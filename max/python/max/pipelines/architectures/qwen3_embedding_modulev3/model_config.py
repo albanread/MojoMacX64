@@ -1,0 +1,66 @@
+# ===----------------------------------------------------------------------=== #
+# Copyright (c) 2026, Modular Inc. All rights reserved.
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions:
+# https://llvm.org/LICENSE.txt
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ===----------------------------------------------------------------------=== #
+
+from dataclasses import dataclass
+from typing import ClassVar
+
+from max.pipelines.lib import MAXModelConfig, PipelineConfig
+from max.pipelines.lib.interfaces.arch_config import ArchConfig
+from max.pipelines.modeling.config_enums import SupportedEncoding
+from transformers import AutoConfig
+from typing_extensions import Self
+
+
+@dataclass(kw_only=True)
+class Qwen3EmbeddingConfig(ArchConfig):
+    """Qwen3 embedding model configuration."""
+
+    DEFAULT_ENCODING: ClassVar[SupportedEncoding] = "bfloat16"
+    SUPPORTED_ENCODINGS: ClassVar[set[SupportedEncoding]] = {
+        "float32",
+        "bfloat16",
+    }
+
+    pipeline_config: PipelineConfig
+    quantization_encoding: SupportedEncoding | None = None
+
+    def get_max_seq_len(self) -> int:
+        return Qwen3EmbeddingConfig.calculate_max_seq_len(
+            self.pipeline_config,
+            self.pipeline_config.model.huggingface_config,
+        )
+
+    @staticmethod
+    def calculate_max_seq_len(
+        pipeline_config: PipelineConfig, huggingface_config: AutoConfig
+    ) -> int:
+        model_max = getattr(
+            huggingface_config, "max_position_embeddings", 32768
+        )
+        configured_max = pipeline_config.model.max_length or 8192
+
+        if configured_max > model_max:
+            raise ValueError(
+                f"Configured max_length ({configured_max}) exceeds model's "
+                f"max_position_embeddings ({model_max})"
+            )
+
+        return configured_max
+
+    @classmethod
+    def initialize(
+        cls,
+        pipeline_config: PipelineConfig,
+        model_config: MAXModelConfig | None = None,
+    ) -> Self:
+        return cls(pipeline_config=pipeline_config)

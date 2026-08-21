@@ -1,0 +1,45 @@
+"""Define bazel dependencies."""
+
+module(
+    name = "modular",
+    version = "0",
+)
+
+include("//bazel:common.MODULE.bazel")
+
+mojo_aliases = use_repo_rule("//bazel:mojo_aliases.bzl", "mojo_aliases")
+
+mojo_aliases(name = "mojo")
+
+modular_wheel_repository = use_repo_rule("//bazel:modular_wheel_repository.bzl", "modular_wheel_repository")
+
+modular_wheel_repository(name = "modular_wheel")
+
+macos_sysroot_repository = use_repo_rule("//bazel/internal/cc-toolchain:macos_sysroot_repository.bzl", "macos_sysroot_repository")
+
+macos_sysroot_repository(name = "sysroot-macos")
+
+include("//bazel:mojo.MODULE.bazel")
+
+link_hack = use_repo_rule("//bazel/internal:link_hack.bzl", "link_hack")
+
+link_hack(
+    name = "build_bazel_rules_android",  # See link_hack.bzl for details
+)
+
+register_toolchains(
+    "//bazel/internal:mojo_toolchain",
+    "@mojo_toolchains//...",
+    "//bazel/internal/cc-toolchain:all",
+    "//bazel/internal:mojo_copts_toolchain",
+)
+
+llvm_source = use_extension("//bazel/public-patches:llvm_source.bzl", "llvm_source")
+use_repo(llvm_source, "llvm-raw")
+
+llvm_configure = use_extension("//bazel/public-patches:llvm_project.bzl", "llvm_configure")
+use_repo(llvm_configure, "llvm-project")
+
+cfg_workaround = use_repo_rule("//bazel/internal:cfg_workaround.bzl", "cfg_workaround")
+
+cfg_workaround(name = "cfg_workaround.bzl")
