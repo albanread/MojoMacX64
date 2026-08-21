@@ -180,7 +180,8 @@ Every existing Metal target is Apple Silicon: unified memory, zero-copy, `storag
 | Device buffers | shared, zero-copy | `storageModePrivate` in HBM2 |
 | HtoD/DtoH | often no-op | real DMA via `MTLBlitCommandEncoder`; shared-storage staging buffers for pinned-host semantics |
 | `DeviceBuffer.hostPtr` | valid pointer | null for device buffers (forces the copy path — ABI supports it) |
-| Bandwidth | one pool | HBM2 ~1 TB/s on-device vs PCIe 3.0 ×16 ~16 GB/s transfers — overlap copies with compute; keep data resident |
+| Bandwidth | one pool | **Measured (S1):** 830 GB/s on-device (copy kernel r+w) vs 12.0 GB/s HtoD blit — overlap copies with compute; keep data resident |
+| Max single buffer | large | **3.5 GiB cap — measured (S1)** despite the 32 GiB working set; MetalRT must chunk or reject larger allocations |
 
 Work item: audit `_device_context_metal.mojo` + stdlib for zero-copy fast paths keyed on unified memory, and route them through the copy path.
 
@@ -188,10 +189,10 @@ Work item: audit `_device_context_metal.mojo` + stdlib for zero-copy fast paths 
 
 | Feature | Vega II under Metal | Action |
 |---|---|---|
-| SIMD-group width | 64 (expected; **verify S1** via `threadExecutionWidth`) | `warp_size=64` in target; audit warp-level algorithms |
+| SIMD-group width | **64 — verified (S1)**, by API and empirically (sum/ballot/shuffle agree) | `warp_size=64` in target; audit warp-level algorithms |
 | `simd_shuffle` / ballot / reductions | Supported (Mac2 family) | Keep; ballot masks are 64-bit — check mask-type assumptions |
-| `simdgroup_matrix` | **Not available** (Apple7+ only) | Gate off; matmul falls back to tiled SIMD-group kernels |
-| bfloat16 | Not native | Gate off / emulate via fp32 |
+| `simdgroup_matrix` | **Not available — verified (S1)**: compiles, then fails at *pipeline* creation | Gate at compile time (never surface the pipeline error); matmul falls back to tiled SIMD-group kernels |
+| bfloat16 | **Surprise (S1): compiles + builds pipelines at MSL 3.1** on both GCN cards; execution/precision unverified, presumably conversion-based | Verify numerics + measure rate before enabling bf16 kernel paths; keep gated until then |
 | fp64 | In hardware (1:2 on Vega 20!) but **Metal has no `double`** | Unavailable — same constraint as Apple GPUs, existing backend already handles it |
 | fp16 | Native, 2× rate (Rapid Packed Math) | Keep fp16 paths on |
 | Metal 4 API | Apple-Silicon-only | Use Metal 3 tier |
@@ -221,14 +222,14 @@ Work item: audit `_device_context_metal.mojo` + stdlib for zero-copy fast paths 
 | R1 | Closed C++ runtime has behavioral contracts (async ordering, ownership, scopes) not fully recoverable from signatures | Med / **High** | CPU-first ABI bring-up against existing tests; headerless `dlsym` smoke test; MSL-source path decouples runtime from codegen (§5.1); the .mojo call sites + doc comments are the spec; sister port's `nvptxrt.cpp` (109 symbols, 2.9k lines) is a working reference implementation |
 | R2 | The AIR trio (§5.2) is new compiler work: AIR emitted by our backend may not load on Intel-mac Metal (version, layout, metallib container) | Med / High | Offload flow already traced end-to-end by sister port; in-tree BitcodeWriters were built for AIR levels; spike S4 validates loadability before porting work; MSL-source path keeps Phase 3 unblocked meanwhile |
 | R3 | Wave64 latent assumptions in Metal plugin/kernels (only ever run on 32-wide Apple GPUs) | **High** / Med | Targeted shuffle/ballot/scan tests early in Phase 3; `warp_size` is already a first-class `GPUInfo` field |
-| R4 | Metal-on-AMD driver quirks, frozen forever (Apple ships no more Intel driver fixes) | Med / Med | Pin macOS version after S1; keep a quirks layer in MetalRT; Duo card gives a second identical GPU for sanity checks |
+| R4 | Metal-on-AMD driver quirks, frozen forever (Apple ships no more Intel driver fixes) | Med / Med | Pin macOS after S1 (provisionally Tahoe 26.3.1, where S1 ran clean); keep a quirks layer in MetalRT; the in-box 580X (Polaris, Mac2-tier, wave64) is a second GCN device for generality checks — S1 found no peer group |
 | R5 | Build-system long tail (hermetic downloads, remote-exec assumptions) | Med / Low | Frozen fork tolerates non-hermetic local fallbacks; delete what we don't need |
 | R6 | 137-symbol ABI scope creep | Low / Med | Stub aggressively; implement on demand, driven by test failures |
 | R7 | Perf ceiling without `simdgroup_matrix` | Certain / Low | MPS is the honest bar (§5.6); Vega II's HBM2 favors bandwidth-bound workloads anyway |
 
 ## 8. Week-1 spikes (do first, in order)
 
-- **S1 — Metal smoke on Vega II.** Trivial MSL kernel → metallib → dispatch. Record `threadExecutionWidth` (expect 64), `maxThreadsPerThreadgroup`, SIMD-group op support, timestamps. ~50 lines of Swift/objc. Also decides which macOS to pin (Sequoia 15 vs Tahoe 26 — Tahoe supports the Mac Pro 2019 and has the newest AIR loader; weigh against AMD-driver maturity).
+- **S1 — Metal smoke on Vega II. ✅ Done 2026-08-21** (`spikes/s1-metal-smoke/`, results in `RESULTS.md`): width **64 confirmed** (API + empirical), MSL 3.2 accepted, Metal3 family yes, `simdgroup_matrix` no (fails at pipeline stage), `double` no, **bfloat compiles (surprise — numerics unverified)**, vadd verified, **830 GB/s** VRAM / **12 GB/s** HtoD, **3.5 GiB single-buffer cap**, no peer group. Offline-metallib leg pending full Xcode. Provisional macOS pin: **26 (Tahoe)** — it ran clean there; confirm at S4.
 - **S2 — Native LLVM+KGEN build attempt.** `./bazelw build //tools/mojo` on the Mac Pro with A1–A3 patched. Surfaces the real build-system long tail immediately.
 - **S3 — Wheel-severed dependency graph.** Map exactly which targets break without `@modular_wheel` (expected: runtime-linked Mojo targets and MAX python only).
 - **S4 — AIR compatibility.** Compare AIR emitted by KGEN's bitcode writers (via `xcrun air-objdump`, already referenced in `bazel/internal/llvm-lit/lit.common.cfg.py:92`) against what the pinned macOS accepts for the AMD device; validate `+metal3_2,+air2_7_0` or pick the right level.
@@ -237,7 +238,7 @@ Work item: audit `_device_context_metal.mojo` + stdlib for zero-copy fast paths 
 ## 9. Machine prep
 
 - Full Xcode (Metal toolchain incl. `metal`, `air-objdump`, `dsymutil` — `mojo build` already shells out to `xcrun dsymutil`, `KGEN/tools/mojo/Build/mojo-build.cpp:617`).
-- macOS pinned per S1; note it in this doc when decided.
+- macOS pin: **provisionally 26.x (Tahoe)** — S1 ran clean on 26.3.1; final confirmation at S4.
 - bazelisk; ~100 GB free for LLVM/KGEN build trees (`/Volumes/S` has ~1.1 TB — fine).
 - Regenerate `cocoa.sqlite` on this machine after the macOS pin (`python3 /Volumes/S/CocoaBaseMCP/build.py`) so offsets/encodings are x86-64 truth (spike S5).
 
@@ -282,7 +283,9 @@ Off the GPU critical path. Needs the native toolchain (Phase 1) plus the `cocoak
 
 ## Appendix A — Vega II datasheet (for tuning)
 
-Radeon Pro Vega II: Vega 20, gfx906-class, 64 CUs / 4096 lanes, wave64, 32 GB HBM2 @ ~1 TB/s, ~14.1 TFLOPS fp32 / ~28.3 TFLOPS fp16 (RPM), 64 KB LDS per CU, max threadgroup 1024, PCIe 3.0 ×16 (MPX). Duo variant pairs two GPUs with Infinity Fabric Link — exposed by Metal as peer transfers; the `AsyncRT_*` ABI already has `canAccess`/`allPeerAccessEnabled` hooks for a later multi-GPU phase.
+Radeon Pro Vega II: Vega 20, gfx906-class, 64 CUs / 4096 lanes, wave64, 32 GB HBM2 @ ~1 TB/s, ~14.1 TFLOPS fp32 / ~28.3 TFLOPS fp16 (RPM), 64 KB LDS per CU, max threadgroup 1024, PCIe 3.0 ×16 (MPX).
+
+**Measured on this machine (S1, 2026-08-21, macOS 26.3.1):** SIMD width 64; Metal3 + Mac2 families; MSL 3.2 accepted; 830 GB/s VRAM copy (r+w); 12.0 GB/s HtoD blit (`maxTransferRate` 15.75 GB/s); 64 KiB threadgroup memory; 1024 threads/TG; working set 32.0 GiB; **single-buffer cap 3.5 GiB**; no `double`; no `simdgroup_matrix` (pipeline-stage failure); bfloat pipelines build (unverified numerics). Second GPU: Radeon Pro 580X (Mac2-tier, wave64) passes all but Metal3. Duo variant pairs two GPUs with Infinity Fabric Link — exposed by Metal as peer transfers; the `AsyncRT_*` ABI already has `canAccess`/`allPeerAccessEnabled` hooks for a later multi-GPU phase.
 
 ## Appendix B — Verified repo facts (survey of `577b6b839e`)
 

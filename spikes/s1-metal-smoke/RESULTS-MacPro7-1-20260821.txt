@@ -1,0 +1,53 @@
+S1 metal smoke — macOS 26.3.1, x86_64
+
+================================================================
+DEVICE: AMD Radeon Pro Vega II
+================================================================
+  registryID              : 0x100000a6a
+  hasUnifiedMemory        : NO (discrete)
+  recommendedMaxWorkingSet: 32.0 GiB
+  maxBufferLength         : 3.5 GiB
+  maxThreadgroupMemory    : 64 KiB
+  maxThreadsPerThreadgroup: 1024 x 1024 x 1024
+  location                : 1 (num 1)  removable=n lowPower=n
+  peerGroupID/index/count : 0 / 0 / 0
+  maxTransferRate         : 15.75 GB/s
+  families                : Common3=yes  Mac2=yes  Metal3=yes  Apple7 (simdgroup_matrix tier)=no  
+  MSL accepted            : 3.2=yes 3.1=yes 3.0=yes 2.4=yes 
+  threadExecutionWidth    : 64 (API, simdprobe)
+  maxTotalThreadsPerTG    : 1024
+  SIMD width (empirical)  : threads_per_simdgroup=64  simd_sum=64  ballot_popcount=64  shuffle_xor=OK
+  vadd correctness        : PASS (0/1048576 wrong, 2.747 ms GPU)
+  simdgroup_matrix        : NO  (pipeline: SC compilation failure)
+  bfloat (MSL>=3.1)       : YES
+  double                  : NO  (compile: program_source:4:3: error: 'double' is not supported in Metal)
+  VRAM copy bandwidth     : 830 GB/s (kernel r+w, 512 MiB)
+  HtoD blit bandwidth     : 12.0 GB/s (shared->private, PCIe)
+  managed storage         : OK
+
+================================================================
+DEVICE: AMD Radeon Pro 580X
+================================================================
+  registryID              : 0x100000a68
+  hasUnifiedMemory        : NO (discrete)
+  recommendedMaxWorkingSet: 8.0 GiB
+  maxBufferLength         : 3.5 GiB
+  maxThreadgroupMemory    : 64 KiB
+  maxThreadsPerThreadgroup: 1024 x 1024 x 1024
+  location                : 1 (num 3)  removable=n lowPower=n
+  peerGroupID/index/count : 0 / 0 / 0
+  maxTransferRate         : 15.75 GB/s
+  families                : Common3=yes  Mac2=yes  Metal3=no  Apple7 (simdgroup_matrix tier)=no  
+  MSL accepted            : 3.2=yes 3.1=yes 3.0=yes 2.4=yes 
+  threadExecutionWidth    : 64 (API, simdprobe)
+  maxTotalThreadsPerTG    : 1024
+  SIMD width (empirical)  : threads_per_simdgroup=64  simd_sum=64  ballot_popcount=64  shuffle_xor=OK
+  vadd correctness        : PASS (0/1048576 wrong, 1.228 ms GPU)
+  simdgroup_matrix        : NO  (pipeline: SC compilation failure)
+  bfloat (MSL>=3.1)       : YES
+  double                  : NO  (compile: program_source:4:3: error: 'double' is not supported in Metal)
+  VRAM copy bandwidth     : 169 GB/s (kernel r+w, 512 MiB)
+  HtoD blit bandwidth     : 9.2 GB/s (shared->private, PCIe)
+  managed storage         : OK
+
+done.
