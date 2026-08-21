@@ -209,7 +209,7 @@ Work item: audit `_device_context_metal.mojo` + stdlib for zero-copy fast paths 
 | Phase | Deliverable | Gate | Size |
 |---|---|---|---|
 | **0. Spikes** | De-risk findings (§8) | S1–S4 answered | days |
-| **1. Host port** | Native x86-64 toolchain (Front A) | `bazelw build //tools/mojo`; CPU tests green; JIT/REPL works | weeks |
+| **1. Host port** | Native x86-64 toolchain (Front A) | **Core met 2026-08-21**: compiler + stdlib build natively; hello-world runs via JIT and AOT (`vega-sdk/bin/mojo`). Remaining: CPU test suite (needs A4 python envs), REPL check | weeks |
 | **2. Runtime — CPU** | C ABI layer over in-tree CPUDevice | Existing CPU `DeviceContext` tests pass against our lib | weeks |
 | **3. Runtime — Metal + target** | MetalDevice + AIR trio (§5.2) + `MetalVega2` entry | **Vector-add end-to-end**: Mojo → AIR → metallib → dispatch on Vega II → verified result; then wave64 shuffle/reduction tests | weeks |
 | **4. Kernels** | Triaged `max/kernels` on Vega II | Curated set green; matmul within 2× of MPS, then tune | weeks–months |

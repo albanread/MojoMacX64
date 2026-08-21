@@ -119,7 +119,10 @@ string_flag(
 
 bool_flag(
     name = "use_prebuilt_mojo_toolchain",
-    build_setting_default = True,
+    # VEGA-FORK: no prebuilt mojo toolchain exists for x86_64-apple-darwin and
+    # never will; default to building from source so exec-config transitions
+    # (which reset flags to defaults) still resolve the source toolchain.
+    build_setting_default = False,
     tags = [ALLOW_UNUSED_TAG],
 )
 
