@@ -22,15 +22,23 @@ filegroup(
 """)
         return
 
-    developer_dir = rctx.getenv("DEVELOPER_DIR")
-    result = rctx.execute(
-        ["/usr/bin/xcrun", "--show-sdk-path", "--sdk", "macosx"],
-        environment = {"DEVELOPER_DIR": developer_dir},
-    )
-    if result.return_code != 0:
-        fail("Failed locating macOS SDK: {}".format(result.stderr))
+    # VEGA-FORK: pin the CommandLineTools 26.x SDK. The selected Xcode 15.2
+    # ships SDK 14.2, whose libc++ headers cannot constant-initialize
+    # std::string at C++20 under clang 22 (protobuf port.cc trips it). The
+    # newer CLT SDK compiles it clean. Fall back to xcrun when absent.
+    pinned_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk"
+    if rctx.path(pinned_sdk).exists:
+        sdk_path = rctx.path(pinned_sdk)
+    else:
+        developer_dir = rctx.getenv("DEVELOPER_DIR")
+        result = rctx.execute(
+            ["/usr/bin/xcrun", "--show-sdk-path", "--sdk", "macosx"],
+            environment = {"DEVELOPER_DIR": developer_dir},
+        )
+        if result.return_code != 0:
+            fail("Failed locating macOS SDK: {}".format(result.stderr))
 
-    sdk_path = rctx.path(result.stdout.strip())
+        sdk_path = rctx.path(result.stdout.strip())
     for child in sdk_path.readdir(watch = "no"):
         rctx.symlink(child, "sysroot/" + child.basename)
     rctx.file("sysroot/BUILD.bazel", """\

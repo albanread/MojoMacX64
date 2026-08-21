@@ -69,7 +69,7 @@ if [[ "${BUILD_IFS:-}" == "yes" ]]; then
   ifs_root="$PWD/external/+http_archive+llvm-ifs/tools/$ifs_platform"
 
   if [[ "${MACOS:-}" == "true" ]]; then
-    "$ifs_root/llvm-readtapi.stripped" -arch arm64 -extract "$ifs_input" -o "$ifs_output"
+    "$ifs_root/llvm-readtapi.stripped" -arch x86_64 -extract "$ifs_input" -o "$ifs_output"  # VEGA-FORK: was arm64
   else
     "$ifs_root/llvm-ifs.stripped" "$ifs_input" --output-elf="$ifs_output"
   fi

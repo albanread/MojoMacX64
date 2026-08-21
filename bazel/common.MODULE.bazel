@@ -345,8 +345,10 @@ filegroup(
 http_archive(
     name = "llvm-ifs",
     build_file_content = "filegroup(name = 'llvm-ifs', srcs = glob(['**']), visibility = ['//visibility:public'])",
-    sha256 = "126f4b14273588f221eb98e8d9952675eddd7f8a0466347be9c8e6d0530c9144",
-    url = "https://modular-bazel-artifacts-public.s3.amazonaws.com/artifacts/llvm-tools/1/126f4b14273588f221eb98e8d9952675eddd7f8a0466347be9c8e6d0530c9144/tools.tar.gz",
+    # VEGA-FORK: Modular's tools.tar.gz mac binary is arm64-only. Ours carries
+    # tools/mac/llvm-readtapi.stripped (x86-64) from the local toolchain build.
+    sha256 = "97dbcd68cbee30277977d3e68f1eb8db46a46de28e3ceaf042628acca8761414",
+    url = "file:///Volumes/S/toolchain-build/llvm-ifs-x86_64.tar.gz",
 )
 
 http_archive(
@@ -537,8 +539,12 @@ http_archive(
     # Override adds: include_dir (directory rule), resource_directory_filegroup,
     # and exports_files for direct file refs (bin/llvm-strip, libclang_rt.*).
     build_file = "//bazel/public-patches:clang.BUILD",
-    sha256 = "ea118e41dfffd5027b378ec932fff70a06be1ab054ffbdaf8209f64579aeee1c",
-    url = "https://modular-bazel-artifacts-public.s3.amazonaws.com/artifacts/llvm-macos/22.1.4/ea118e41dfffd5027b378ec932fff70a06be1ab054ffbdaf8209f64579aeee1c/llvm-macos.tar.xz",
+    # VEGA-FORK: Modular's llvm-macos artifact is arm64-only and official LLVM
+    # 22.1.4 releases ship no macOS x86-64 binaries. This is our own from-source
+    # build (clang+lld+compiler-rt, X86 target only), built once on this machine
+    # by /Volumes/S/toolchain-build-run.sh and pinned forever.
+    sha256 = "05cd61f467a9116351eafb84aedcf2e9962caebaaae84deca443ce81b93acc5e",
+    url = "file:///Volumes/S/toolchain-build/llvm-macos-x86_64-22.1.4.tar.xz",
 )
 
 SHELLCHECK_VERSION = "v0.11.0"
@@ -730,8 +736,10 @@ single_version_override(
 http_archive(
     name = "gperftools-macos",
     build_file = "//bazel/public-patches:gperftools-macos.BUILD",
-    sha256 = "0d1dbb0273d94d32e28ccb53971d1473cab9bde90a463251f6f117867cf2d680",
-    url = "https://modular-bazel-artifacts-public.s3.amazonaws.com/artifacts/gperftools/2.15/0d1dbb0273d94d32e28ccb53971d1473cab9bde90a463251f6f117867cf2d680/tcmalloc.tar.gz",
+    # VEGA-FORK: upstream artifact is arm64-only. Ours is gperftools 2.15
+    # built for x86-64 on this machine (see /Volumes/S/toolchain-build).
+    sha256 = "c0f842338f52c40378a715c6f78b4422d5112004339f0db313633c3ceb6ef656",
+    url = "file:///Volumes/S/toolchain-build/tcmalloc-x86_64.tar.gz",
 )
 
 npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm", dev_dependency = True)
