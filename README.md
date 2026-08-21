@@ -1,112 +1,99 @@
-<!-- rumdl-disable-file MD033 MD041 MD075 -->
+# MojoMacX64
 
-<div align="center">
-    <img src="https://modular-assets.s3.us-east-1.amazonaws.com/images/modular-banner-github.png">
+**Mojo for Intel Macs with AMD GPUs, via Metal.**
 
-[About Modular] | [MAX docs] | [Mojo docs] | [Contributing]
+A permanent fork of [modular/modular](https://github.com/modular/modular),
+frozen at commit `577b6b839e` (2026-08-21 — Mojo `1.1.0.dev2026082105`).
+It exists to bring the Mojo language and its GPU programming stack to
+hardware upstream never targeted:
 
-</div>
+- **Host:** Intel x86-64 macOS (built on/for the Mac Pro 2019)
+- **GPU:** AMD Radeon Pro Vega II 32 GB, programmed through Metal's
+  low-level IR (AIR) — the same path the upstream compiler uses for
+  Apple Silicon GPUs
 
----
+**Mojo only.** This fork covers the Mojo compiler, standard library,
+`DeviceContext` GPU runtime, and the open `max/kernels` library.
+The MAX Engine (graph compiler, `libmax`, Python inference stack) is
+closed-source, has no Intel-mac build, and is **out of scope**.
 
-# Modular Platform
+## ⚠️ No support — and don't bother Modular
 
-This repo hosts open-source components of the Modular Platform,
-a unified platform for AI development and deployment,
-including the **MAX Framework**🧑‍🚀 and the **Mojo Language**🔥.
+This fork is **unsupported by Modular Inc.** and unaffiliated with them.
 
-## Get started
+- Do **not** file issues, discussions, or support requests with Modular
+  or on the upstream repo for anything you build or break here.
+- No support is offered here either. Everything is provided **as-is**,
+  for one machine, with no compatibility promises.
 
-To get started with the Modular Platform and serve a model using the MAX
-framework, see
-[the MAX quickstart guide](https://max.modular.com/get-started).
+If you want supported Mojo on supported platforms, use the real thing:
+[modular/modular](https://github.com/modular/modular) and
+[docs.modular.com](https://docs.modular.com).
 
-To get started with the Mojo language, see
-[the Mojo quickstart guide](https://mojolang.org/docs/manual/quickstart/).
+## Fixed at this release, forever
 
-## About the repo
+This fork never rebases on, merges, or tracks upstream. The fork point
+is the whole point: a known-good snapshot of the open-sourced compiler,
+tuned for this hardware until the machine stops working. Hardcoding for
+x86-64 Darwin and gfx906 is a feature, not a bug.
 
-We're constantly open-sourcing more of the Modular Platform and you can find
-all of it in here.
+## Thank you, Mojo developers
 
-The main components include:
+This fork exists only because Modular open-sourced the entire Mojo
+compiler — parser, elaborator, code generator, JIT, LSP — along with the
+standard library, the GPU kernel library, and the AIR bitcode
+machinery, all under Apache 2.0 with LLVM Exceptions. That is a rare and
+generous act. Thank you to everyone who built Mojo and then gave it
+away. 🔥
 
-- Mojo compiler: [/KGEN](KGEN)
-- Mojo standard library: [/mojo/stdlib](mojo/stdlib)
-- MAX accelerator library: [/max/kernels](/max/kernels)
-- MAX inference server: [/max/python/max/serve](/max/python/max/serve)
-  (OpenAI-compatible endpoint)
-- MAX model pipelines: [/max/python/max/pipelines](/max/python/max/pipelines)
-  (Python-based graphs)
-- Code examples: [/max/examples](/max/examples) +
-  [/mojo/examples](mojo/examples)
+## High-level plan
 
-## Contribute
+Full design with file-level detail: [PORT_DESIGN.md](PORT_DESIGN.md).
 
-We accept contributions to the [Mojo standard library](./mojo), [MAX
-accelerator library](./max/kernels), [MAX model
-architectures](/max/python/max/pipelines/architectures), code examples, Mojo
-docs, and more. We aren't accepting contributions to the Mojo compiler yet.
+**Front A — host port (x86-64 macOS).** The compiler builds from source
+and LLVM's X86 backend is already enabled; the port is a bounded list of
+arm64 assumptions: target-triple hardcodes in the bazel toolchain,
+aarch64-only hermetic tool downloads (Python, uv, linters), a gRPC
+patch, and severing the arm64-only binary wheel.
 
-First, please read the [Contribution Guide](./CONTRIBUTING.md), and then refer
-to the following documentation about how to develop in the repo:
+**Front B — Vega II via Metal AIR.** The macOS Metal driver compiles
+AIR → GCN at pipeline creation, so no GPU instruction selector is
+needed. The compiler's AIR hooks and bitcode machinery are open, but the
+AIR backend itself is not published — we write a small "AIR trio"
+(traits/lowering/backend) into the open target registries, the same
+bounded shape our Windows sibling proved with its SPIR-V trio. Then:
 
-- [`/max/docs`](/max/docs): Docs for developers working in the MAX framework
-  codebase.
-- [`/mojo/stdlib/docs`](/mojo/stdlib/docs): Docs for developers working in the
-  Mojo standard library.
+1. **MetalRT** — reimplement the closed device-runtime C ABI
+   (`AsyncRT_*`) over the open in-tree AsyncRT framework: CPU device
+   first to validate semantics, then a Metal device (command queues,
+   blit copies, pipeline cache) for the Vega II.
+2. **Target entry** — a `MetalVega2` GPU definition: wave64
+   (`warp_size=64` vs Apple's 32), 64 CUs, 64 KB LDS, discrete-memory
+   semantics (private storage + explicit DMA, no unified-memory
+   zero-copy).
+3. **Feature gating** — no `simdgroup_matrix`, no bfloat16, Metal 3
+   tier; fp16 fast paths stay on.
+4. **Kernel triage** — sweep `max/kernels`, fix wave64 assumptions,
+   fall back where Apple-only features are used; benchmark against MPS.
 
-We also welcome your bug reports. If you have a bug, please [file an issue
-here](https://github.com/modular/modular/issues/new/choose).
+**Also intended — Cocoa + Unix, automated.** Make Mojo great at Cocoa:
+comptime metadata queries (`cocoakb_query`) evaluated by the compiler
+against [CocoaBaseMCP](https://github.com/albanread/CocoaBaseMCP)'s
+SQLite mirror of the Objective-C surface — checked struct layouts,
+constants, selectors, and per-signature x86-64 `objc_msgSend` variant
+selection, with no hand-maintained bindings. Includes a no-leak memory
+design: RAII retain/release, autorelease-pool scoping, zeroing weak
+references for cycles, and leak-checked golden tests. See
+[PORT_DESIGN.md](PORT_DESIGN.md) §10.
+
+**Phases.** 0: de-risk spikes (Metal smoke test on the Vega II, native
+build attempt) → 1: native x86-64 toolchain, CPU tests green → 2:
+runtime ABI over CPU device → 3: first kernel end-to-end on the Vega II
+(Mojo → AIR → metallib → dispatch) → 4: kernel library triage →
+5: tune for gfx906 and freeze.
 
 ## License
 
-This repository and its contributions are licensed under the Apache License v2.0
-with LLVM Exceptions. See [LICENSE](LICENSE).
-
-MAX usage and distribution are licensed under the
-[Modular Community License](https://www.modular.com/legal/community).
-
-### Third party licenses
-
-You are entirely responsible for checking and validating the licenses of third
-parties (for example, Hugging Face) for related software and libraries that are
-downloaded.
-
-## Community & Events
-
-Get help from community members, tune in for a community meeting, or join a
-local meetup.
-
-| Channel               | Link                                            |
-|-----------------------|-------------------------------------------------|
-| 💬 Discord            | [discord.gg/modular][discord]                   |
-| 💬 Forum              | [forum.modular.com][forum]                      |
-| 📅 Meetup Group       | [meetup.com/modular-meetup-group][meetup-group] |
-| 🎦 Community Meetings | [Upcoming community calls][public-com-meet-doc] |
-| 📺 YouTube            | [youtube.com/@modularinc][youtube]              |
-
-**Upcoming events** will be posted on our [Meetup page][meetup-group] and
-[Discord][discord]. Community meeting recordings will be posted on our
-[YouTube][youtube].
-
-## Thanks to our contributors
-
-<a href="https://github.com/modular/modular/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=modular/modular" />
-</a>
-
-<!-- Link references -->
-
-<!-- Header navigation links -->
-[About Modular]: https://www.modular.com/
-[MAX docs]: https://max.modular.com/
-[Contributing]: ./CONTRIBUTING.md
-[Mojo docs]: https://mojolang.org/docs/
-
-<!-- Community & Events links -->
-[discord]: https://discord.gg/modular
-[forum]: https://forum.modular.com/
-[meetup-group]: https://www.meetup.com/modular-meetup-group/
-[youtube]: https://www.youtube.com/@modularinc
-[public-com-meet-doc]: https://modul.ar/community-meeting-doc
+Inherited unchanged from upstream: Apache License v2.0 with LLVM
+Exceptions ([LICENSE](LICENSE)); third-party licenses in
+[Licenses/](Licenses/).
