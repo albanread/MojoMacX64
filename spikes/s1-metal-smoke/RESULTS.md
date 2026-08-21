@@ -1,7 +1,14 @@
 # S1 results — 2026-08-21, macOS 26.3.1 (Tahoe), x86-64 Mac Pro
 
-Raw log: `RESULTS-MacPro7-1-20260821.txt`. Offline-metallib leg pending full
-Xcode (CommandLineTools has no `metal` tool); rerun `run.sh` after install.
+Raw log: `RESULTS-MacPro7-1-20260821.txt`.
+
+**Offline-metallib leg (rerun after Xcode 15.2 install): PASS.** A metallib
+built offline with Xcode 15.2's `metal` (Apple metal 32023.101) loads via
+`newLibraryWithURL` and builds pipelines on **both** GPUs. `air-objdump`
+readout — the AIR trio's reference target (S4): container `MetalLib`, arch
+`air64`, embedded triple **`air64-apple-macosx14.2.0`**, `air.*` metadata
+schema (`air.buffer`, `air.thread_position_in_grid`, `air.arg_type_name`,
+`air.max_device_buffers`, `air.compile.*`).
 
 ## Verdicts
 

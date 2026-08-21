@@ -26,7 +26,7 @@ def _mojo_toolchain_impl(ctx):
     if is_macos:
         min_os = ctx.fragments.cpp.minimum_os_version() or ctx.fragments.apple.macos_minimum_os_flag
         if min_os:
-            copts.append("--target-triple=arm64-apple-macosx{}".format(min_os))
+            copts.append("--target-triple=x86_64-apple-macosx{}".format(min_os))  # VEGA-FORK A1: was arm64
 
     copts_toolchain = ctx.toolchains["@rules_mojo//:copts_toolchain_type"]
     if copts_toolchain:

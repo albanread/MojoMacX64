@@ -17,13 +17,14 @@ DEVICE: AMD Radeon Pro Vega II
   threadExecutionWidth    : 64 (API, simdprobe)
   maxTotalThreadsPerTG    : 1024
   SIMD width (empirical)  : threads_per_simdgroup=64  simd_sum=64  ballot_popcount=64  shuffle_xor=OK
-  vadd correctness        : PASS (0/1048576 wrong, 2.747 ms GPU)
+  vadd correctness        : PASS (0/1048576 wrong, 1.783 ms GPU)
   simdgroup_matrix        : NO  (pipeline: SC compilation failure)
   bfloat (MSL>=3.1)       : YES
   double                  : NO  (compile: program_source:4:3: error: 'double' is not supported in Metal)
-  VRAM copy bandwidth     : 830 GB/s (kernel r+w, 512 MiB)
-  HtoD blit bandwidth     : 12.0 GB/s (shared->private, PCIe)
+  VRAM copy bandwidth     : 845 GB/s (kernel r+w, 512 MiB)
+  HtoD blit bandwidth     : 11.9 GB/s (shared->private, PCIe)
   managed storage         : OK
+  metallib load           : lib=OK fns=[offline_vadd] pipeline=OK
 
 ================================================================
 DEVICE: AMD Radeon Pro 580X
@@ -42,12 +43,13 @@ DEVICE: AMD Radeon Pro 580X
   threadExecutionWidth    : 64 (API, simdprobe)
   maxTotalThreadsPerTG    : 1024
   SIMD width (empirical)  : threads_per_simdgroup=64  simd_sum=64  ballot_popcount=64  shuffle_xor=OK
-  vadd correctness        : PASS (0/1048576 wrong, 1.228 ms GPU)
+  vadd correctness        : PASS (0/1048576 wrong, 1.256 ms GPU)
   simdgroup_matrix        : NO  (pipeline: SC compilation failure)
   bfloat (MSL>=3.1)       : YES
   double                  : NO  (compile: program_source:4:3: error: 'double' is not supported in Metal)
   VRAM copy bandwidth     : 169 GB/s (kernel r+w, 512 MiB)
-  HtoD blit bandwidth     : 9.2 GB/s (shared->private, PCIe)
+  HtoD blit bandwidth     : 9.1 GB/s (shared->private, PCIe)
   managed storage         : OK
+  metallib load           : lib=OK fns=[offline_vadd] pipeline=OK
 
 done.

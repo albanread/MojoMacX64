@@ -182,7 +182,7 @@ toolchain(
 toolchain(
     name = "macos-toolchain",
     exec_compatible_with = [
-        "@platforms//cpu:aarch64",
+        "@platforms//cpu:x86_64",  # VEGA-FORK A2b: was aarch64
         "@platforms//os:macos",
     ],
     tags = [TOP_LEVEL_TAG],  # Used from MODULE.bazel
