@@ -9,7 +9,8 @@
 # ===----------------------------------------------------------------------=== #
 
 from std.ffi import external_call, c_char
-from std.memory import OpaquePointer
+from std.memory import OpaquePointer, Pointer
+from std.collections.string.string_span import _get_kgen_string
 from .runtime import ObjCClass, ObjCObject, msg_send
 from .ownership import ObjCRef
 
@@ -81,3 +82,22 @@ def nsstring(s: String) -> ObjCObject:
     return msg_send[
         ObjCObject, "NSString", "stringWithUTF8String:", is_class=True
     ](cls.as_object(), local.as_c_string_slice())
+
+
+def extern_object[name: StaticString]() -> ObjCObject:
+    """The object held in an extern Cocoa constant, e.g.
+    `NSForegroundColorAttributeName`.
+
+    These constants are `NSString *` (or other object) GLOBALS, not values the
+    metadata can hand over at compile time -- `cocoakb_constant_type` reports
+    their type (`@`), and the address is resolved by the linker. So take a
+    link-time reference to the data symbol and load the pointer out of it.
+    """
+    var slot = Pointer[Int, MutUntrackedOrigin](
+        _mlir_value=__mlir_op.`pop.extern_ptr_symbol`[
+            name=_get_kgen_string[name](),
+            alignment=Int(8).__mlir_index__(),
+            _type=Pointer[Int, MutUntrackedOrigin]._mlir_type,
+        ]()
+    )
+    return ObjCObject(slot[])

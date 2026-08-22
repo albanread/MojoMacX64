@@ -1711,3 +1711,52 @@ dispatch work — and `nsstring()` promoted into `std.objc`. Also a
 Verification is the `P0_AUTOCLOSE_TICKS` knob: the timer closes the window
 after N ticks so launch → ticks → close → terminate runs headless. Next: P1,
 the editor.
+
+## 2026-08-22 — Playground P1: a Mojo editor, in Mojo
+
+`spikes/playground/playground.mojo` is a working native editor: code pane over
+output pane, Menlo on a dark ground, live syntax highlighting, ⌘R / ⇧⌘R (Vega
+II) / ⌘. to stop, ⌘O / ⌘S, and a real menu bar. Running is an `NSTask` whose
+pipes a 50 ms `NSTimer` drains on the main thread, so a program that hangs or
+crashes cannot take the editor with it. `PG_SELFTEST=1` exercises the whole
+thing headlessly.
+
+**Three KGEN fixes fell out, all general.** `pop.extern_ptr_symbol` — the
+link-time symbol reference that made dispatch 3 ns — needed two more repairs to
+be usable beyond `objc_msgSend`: it emitted `dso_local=true`, which promises the
+definition is in *this* image, so referencing a **dylib data symbol**
+(`NSForegroundColorAttributeName`) produced direct rip-relative addressing the
+linker rejects outright; and it only looked for an existing *global* of the
+name, so a symbol already declared as a **function** (`read`, from an
+`external_call` elsewhere) got a second declaration and the uniquer renamed one
+of them into oblivion. Both now resolve to the single existing definition.
+`extern_object[name]()` in `std.objc` reads Cocoa's extern constants on top of
+that.
+
+**And a fourth lesson that is not a compiler bug:** file I/O in the app goes
+through Cocoa (`writeToFile:atomically:encoding:error:`,
+`stringWithContentsOfFile:encoding:error:`) rather than stdlib `open`. That
+sidesteps a `read` symbol collision *and* is the idiomatic call in a Cocoa app —
+the same "use the platform's own API" instinct that made the Mandelbrot colour
+in a Mojo kernel instead of a shader.
+
+### Two bugs the user found, both about being *seen*
+
+- **UTF-8 vs UTF-16.** The tokenizer emits byte offsets; `NSTextStorage` ranges
+  are UTF-16 code units. They agree for ASCII, which is why it looked perfect
+  for a moment — and the starter text has `⌘R` in a comment, so every range
+  after that glyph pointed past the end: `NSRangeException`, instant abort.
+  Fixed with a byte→UTF-16 offset map (astral characters counting 2 for the
+  surrogate pair) and taking the length from `NSString length`, not the byte
+  count.
+- **Invisible output.** `setTextColor:` on the text view does nothing for text
+  appended through the storage's `mutableString` — appended text carries *no*
+  attributes and renders default black, invisible on the dark ground. The
+  program had been running correctly all along; the user simply could not see
+  `sum of the first million integers: 499999500000`. Each appended range is now
+  coloured explicitly, which gave colour-coding for free: blue command echo,
+  light output, grey/red exit status.
+- Also filtered: the SDK's benign `Failed to initialize Crashpad` notice. I have
+  been `grep -v`-ing it out of every terminal command all session; in an output
+  pane it is the most prominent thing on screen and reads exactly like a crash.
+  Noise you have learned to ignore is not noise to a user.

@@ -2454,13 +2454,33 @@ struct ConvertExternPointerSymbol
     // sites produced undefined uniqued names. All references to an external
     // symbol must resolve to the one declaration.
     auto nameAttr = cast<StringAttr>(op.getName());
+
+    // The symbol may already exist as a FUNCTION -- e.g. `read`, declared by
+    // an external_call elsewhere in the module. Taking its address is just an
+    // addressof on that declaration; creating a global of the same name would
+    // be renamed (read -> read_0) and then fail to link.
+    if (auto func = symtab.lookup<LLVM::LLVMFuncOp>(nameAttr.getValue())) {
+      b.setInsertionPoint(op);
+      b.replaceOpWithNewOp<LLVM::AddressOfOp>(
+          op, LLVM::LLVMPointerType::get(getContext(), addressSpace),
+          FlatSymbolRefAttr::get(func.getSymNameAttr()));
+      return success();
+    }
+
     auto global = symtab.lookup<LLVM::GlobalOp>(nameAttr.getValue());
     if (!global) {
       b.clearInsertionPoint();
+      // VEGA-FORK: dso_local=false. An external symbol may live in another
+      // dylib (Foundation's NSForegroundColorAttributeName, libobjc's
+      // objc_msgSend), and dso_local promises the definition is in THIS
+      // image -- which makes the backend emit direct rip-relative addressing
+      // and the linker reject it ("invalid use of rip-relative addressing").
+      // Not marking it dso_local yields a GOT-indirect reference, which is
+      // correct whether the definition is local or imported.
       global = LLVM::GlobalOp::create(
           b, op.getLoc(), resType, /*constant=*/false, LLVM::Linkage::External,
           nameAttr, /*value=*/nullptr, align, addressSpace,
-          /*dso_local=*/true);
+          /*dso_local=*/false);
       symtab.insert(global);
     }
 

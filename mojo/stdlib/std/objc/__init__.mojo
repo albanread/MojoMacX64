@@ -14,7 +14,7 @@
 
 from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, send, autoreleasepool
 from .ownership import ObjCRef
-from .foundation import NSString, nsstring
+from .foundation import NSString, nsstring, extern_object
 from .classes import (
     ObjCClassBuilder,
     IMP0,
