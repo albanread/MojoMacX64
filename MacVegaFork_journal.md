@@ -1600,3 +1600,55 @@ was the whole experiment; the treatment arm on its own was uninterpretable.
 
 Fork README now carries the full table and the caveat rather than the earlier
 "floating-point noise" line.
+
+## 2026-08-22 — Tuning llama.cpp on the Vega II: three results, one cause
+
+Chased the obvious speedups for Qwen on the card. The interesting part is that two of
+them made things *worse*, and all three point at the same missing piece.
+
+**Prompt prefix caching is already on, and dwarfs everything else.** llama-server keeps
+per-slot KV and evaluates only the tokens you appended:
+
+```
+first turn, ~1460-token prompt   21.19 s
+follow-up, same prefix            1.56 s
+fully warm                        1.30 s      -> 13.6x
+```
+
+The server log confirms the mechanism rather than the timing: the follow-up evaluated 18
+tokens, the warm repeat 1 (`n_past = 1479`). This immediately caught a bug in the chat
+app's context trimming, written an hour earlier: it trimmed to *just* under the budget,
+so once a conversation hit the limit it would trim on **every** turn, change the prefix
+every turn, and invalidate the cache every turn — converting 1.3 s replies into 20 s ones
+permanently. Now hysteresis: nothing until 70% full, then cut to 40%. **Any cache keyed on
+a prefix turns "trim a little, often" into a pathology; trim rarely and in large steps.**
+
+**KV cache quantization is harmful here** — the opposite of the usual advice:
+
+```
+KV f16    pp 48.1   tg 33.1
+KV q8_0   pp 45.4   tg 14.1     -> generation -57%
+```
+
+Dequantising K/V inside attention costs more than the bandwidth it saves, because the
+flash-attention kernels that normally absorb that cost are disabled on non-Apple7 GPUs.
+
+**Speculative decoding is also a loss**, 25.1 → 15.3 t/s with a Qwen3-0.6B draft. The
+diagnostic that matters is the acceptance rate: **0.65, mean accepted length 2.95**. That
+is a *good* draft. So the draft is not at fault — verification is. Speculation's premise
+is that checking K drafted tokens costs about one forward pass, which is only true with a
+batched **mat-mul**. We have the mat-**vec** fallback, so verifying ~4 tokens costs ~4x,
+and the draft model is pure overhead on top. n-gram speculation (no draft model at all)
+landed within noise, consistent with the same explanation.
+
+**All three trace to `has_simdgroup_mm` being gated on `MTLGPUFamilyApple7`.** It is not
+just a prefill tax — it makes an entire class of optimisation unprofitable. That sharpens
+the case from the earlier entry considerably: a wave64 `mul_mm` built on `simd_shuffle`
+would unlock prompt processing *and* speculative decoding in one change, on top of the
+2.37 TFLOP/s our own AIR matmul already demonstrates the silicon can do.
+
+The methodological note, since it nearly cost a wrong conclusion again: the first pass at
+these numbers grepped `eval time` out of the server log, which also matches `prompt eval
+time`, silently interleaving prefill and generation figures in the same column. The values
+looked plausible — that is precisely the danger. Anchor the pattern (`\|\s+eval time`)
+rather than trusting a substring to be unambiguous.
