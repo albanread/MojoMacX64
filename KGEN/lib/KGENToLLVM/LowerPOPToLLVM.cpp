@@ -2421,12 +2421,22 @@ struct ConvertExternPointerSymbol
     unsigned align = getAlignment(
         getTypeConverter(), op.getResSymbol().getType(), op.getAlignmentAttr());
 
-    b.clearInsertionPoint();
-    auto global = LLVM::GlobalOp::create(
-        b, op.getLoc(), resType, /*constant=*/false, LLVM::Linkage::External,
-        cast<StringAttr>(op.getName()), /*value=*/nullptr, align, addressSpace,
-        /*dso_local=*/true);
-    symtab.insert(global);
+    // VEGA-FORK: reuse an existing declaration for this external name instead
+    // of inserting a fresh global. symtab.insert() renames on collision
+    // (objc_msgSend -> objc_msgSend_0, _1, ...), so referencing one shared
+    // linked symbol -- objc_msgSend from every message send -- from multiple
+    // sites produced undefined uniqued names. All references to an external
+    // symbol must resolve to the one declaration.
+    auto nameAttr = cast<StringAttr>(op.getName());
+    auto global = symtab.lookup<LLVM::GlobalOp>(nameAttr.getValue());
+    if (!global) {
+      b.clearInsertionPoint();
+      global = LLVM::GlobalOp::create(
+          b, op.getLoc(), resType, /*constant=*/false, LLVM::Linkage::External,
+          nameAttr, /*value=*/nullptr, align, addressSpace,
+          /*dso_local=*/true);
+      symtab.insert(global);
+    }
 
     b.setInsertionPoint(op);
     b.replaceOpWithNewOp<LLVM::AddressOfOp>(

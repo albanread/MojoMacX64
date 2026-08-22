@@ -10,6 +10,7 @@ from std.ffi import external_call, c_char, _get_global_or_null
 from std.memory import OpaquePointer
 from std.reflection import reflect
 from std.sys.info import TrivialRegisterPassable
+from std.collections.string.string_span import _get_kgen_string
 from std.sys._cocoakb import (
     cocoakb_msgsend_variant,
     cocoakb_method_arg_classes,
@@ -29,11 +30,6 @@ struct SEL(TrivialRegisterPassable):
         return _RawPtr(unsafe_from_address=self._addr)
 
 
-@always_inline
-def _cache_key[prefix: StaticString, name: StaticString]() -> String:
-    return String(prefix) + String(name)
-
-
 def sel[name: StaticString]() -> SEL:
     """Register (once) and return the selector for `name`.
 
@@ -41,16 +37,14 @@ def sel[name: StaticString]() -> SEL:
     message send still costs a hash lookup; cache the result in a process
     global keyed by the name so each selector is resolved exactly once.
     """
-    var key = _cache_key["vega.objc.sel/", name]()
+    comptime key = StaticString(_get_kgen_string["vega.objc.sel/", name]())
     var cached = _get_global_or_null(key)
     if cached:
         return SEL(Int(cached.value()))
     var registered = external_call["sel_registerName", _RawPtr](
         name.unsafe_ptr()
     )
-    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](
-        StringSlice(key), registered
-    )
+    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](key, registered)
     return SEL(Int(registered))
 
 
@@ -174,12 +168,18 @@ def _type_is_scalar_int(name: StaticString) -> Bool:
 
 
 @always_inline
-def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
-    Int
+def _stub_ptr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
+    _RawPtr
 ):
-    """Resolve, at comptime, WHICH objc_msgSend variant this send needs, and
-    return the runtime address of that stub. A non-register return is a
-    compile error."""
+    """A link-time reference to the objc_msgSend variant this send needs.
+
+    The variant is chosen at COMPILE time from the database; the stub is a
+    linked libobjc symbol, so `pop.extern_ptr_symbol` resolves its address as a
+    relocation -- no dlsym, no cache, no per-call cost. (The KGEN lowering was
+    fixed to dedup a shared external name across call sites; before that, the
+    symbol uniquer renamed it to objc_msgSend_0/_1 and it failed to link.) Only
+    an unmodelable ("?") signature is a compile error.
+    """
     comptime variant = cocoakb_msgsend_variant[cls, selector, is_class]()
     comptime assert variant != "?", (
         "std.objc: '"
@@ -191,28 +191,16 @@ def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
         + " a checked external_call if you know the layout."
     )
     # objc_msgSend / _fpret / _stret are all reached through the same
-    # per-signature function-pointer cast below; the C ABI does the register
-    # allocation, the x87 return, or the hidden sret pointer + self/_cmd shift
-    # according to the RETURN TYPE R the caller declares. The database only has
-    # to tell us WHICH entry point, which it does.
-    var key = String("vega.objc.stub/") + String(variant)
-    var cached = _get_global_or_null(key)
-    if cached:
-        return Int(cached.value())
-    # RTLD_DEFAULT is (void*)-2 on macOS. This scans every loaded dylib, so it
-    # must never run per call -- cache the result keyed by the variant.
-    var rtld_default = OpaquePointer[MutUntrackedOrigin](
-        unsafe_from_address=Int(-2)
+    # per-signature function-pointer cast at the call site; the C ABI does the
+    # register allocation, x87 return, or hidden sret pointer according to the
+    # RETURN TYPE the caller declares. The database only picks WHICH symbol.
+    return _RawPtr(
+        _mlir_value=__mlir_op.`pop.extern_ptr_symbol`[
+            name=_get_kgen_string[variant](),
+            alignment=Int(1).__mlir_index__(),
+            _type=_RawPtr._mlir_type,
+        ]()
     )
-    var name = String(variant)
-    var stub_fn = external_call["dlsym", OpaquePointer[MutUntrackedOrigin]](
-        rtld_default, name.as_c_string_slice()
-    )
-    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](
-        StringSlice(key), stub_fn
-    )
-    return Int(stub_fn)
-
 
 def msg_send[
     R: AnyType, cls: StaticString, selector: StaticString, is_class: Bool = False, *Ts: AnyType
@@ -278,10 +266,10 @@ def msg_send[
                 + " is an integer, but the ABI expects a float register here."
                 + " Pass a Float32/Float64."
             )
-    var stub = _stub_addr[cls, selector, is_class]()
+    var stub = _stub_ptr[cls, selector, is_class]()
     var s = sel[selector]().ptr()
-    # Cast the stub address to the exact function-pointer type for this call
-    # site and invoke it. `id, SEL` precede the message arguments.
+    # Cast the stub symbol to the exact function-pointer type for this call site
+    # and invoke it. `id, SEL` precede the message arguments.
     var call = Pointer(to=stub).unsafe_bitcast[
         def(_RawPtr, _RawPtr, /, *a: *Ts) thin abi("C") -> R
     ]()[]
