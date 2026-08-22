@@ -2,6 +2,14 @@
 # vega-mojo: the fork's mojo with the source-built stdlib and runtime wired in.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export MODULAR_MOJO_MAX_COMPILERRT_PATH="$ROOT/lib/libKGENCompilerRTShared.dylib"
+# Python interop. The system Python is 3.9, which predates Py_NewRef (3.10),
+# so std.python aborts with "symbol not found: Py_NewRef" against it. Point at
+# Homebrew's 3.12 framework libpython, and put the SDK's venv on the path so
+# `Python.import_module` can find pygame, numpy and friends.
+export MOJO_PYTHON_LIBRARY="${MOJO_PYTHON_LIBRARY:-/usr/local/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/lib/libpython3.12.dylib}"
+export PYTHONHOME="${PYTHONHOME:-/usr/local/opt/python@3.12/Frameworks/Python.framework/Versions/3.12}"
+export PYTHONPATH="$ROOT/pyenv/lib/python3.12/site-packages${PYTHONPATH:+:$PYTHONPATH}"
+
 # Cocoa metadata for the comptime cocoakb_query hook (COCOA_DESIGN.md).
 export MODULAR_MOJO_MAX_COCOAKB_PATH="${MODULAR_MOJO_MAX_COCOAKB_PATH:-/Volumes/S/CocoaBaseMCP/cocoa.sqlite}"
 export MODULAR_MOJO_MAX_IMPORT_PATH="$ROOT/pkg${MODULAR_MOJO_MAX_IMPORT_PATH:+,$MODULAR_MOJO_MAX_IMPORT_PATH}"

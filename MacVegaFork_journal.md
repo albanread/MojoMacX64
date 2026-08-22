@@ -1760,3 +1760,27 @@ in a Mojo kernel instead of a shader.
   been `grep -v`-ing it out of every terminal command all session; in an output
   pane it is the most prominent thing on screen and reads exactly like a crash.
   Noise you have learned to ignore is not noise to a user.
+
+## 2026-08-22 — Python interop: the system Python was too old
+
+A stock example (`mojo/examples/life/lifev2.mojo`, Conway's Game of Life drawn
+with pygame) aborted with `symbol not found: Py_NewRef`. Nothing to do with the
+fork: **`Py_NewRef` arrived in CPython 3.10 and macOS ships 3.9**, so
+`std.python` cannot resolve it against the system interpreter. Worth noting
+because the error names a symbol, not a version, and reads like a port gap.
+
+Fixed by pointing Mojo at a newer interpreter, wired into `vega-sdk/bin/mojo`:
+Homebrew `python@3.12` (3.12.14 — `Py_NewRef` confirmed present with `nm`),
+`MOJO_PYTHON_LIBRARY` → its framework `libpython3.12.dylib`, `PYTHONHOME` →
+that framework, and a venv at `vega-sdk/pyenv` on `PYTHONPATH`. Every one of
+those defers to an existing value, so pointing at a different interpreter needs
+no edit.
+
+The venv is not fussiness: Homebrew's Python is PEP 668 externally-managed and
+refuses `pip install`, so it is either a venv or `--break-system-packages`.
+Gitignored, with `vega-sdk/python-requirements.txt` (pygame, numpy) to rebuild
+it; the README carries the recipe.
+
+Verified before the demo — `sys.version` 3.12.14, numpy arrays round-tripping,
+pygame importing — then the Game of Life ran: green cells evolving in a pygame
+window, driven from Mojo on the Intel Mac.

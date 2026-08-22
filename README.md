@@ -66,6 +66,41 @@ type-mangled runtime symbols, the LLVM-vintage constructs that break the
 bitcode writer, bugs in the vendored downgrade writer itself, and which
 tools lie to you. Written to be useful even if you never touch Mojo.
 
+## Python interop needs a Python newer than macOS ships
+
+`std.python` calls `Py_NewRef`, which arrived in **CPython 3.10**. macOS ships
+3.9, so against the system Python any Mojo program that touches Python aborts:
+
+```
+ABORT: symbol not found: Py_NewRef
+```
+
+That is not a gap in this fork — it is the system Python being too old. The
+SDK wrapper (`vega-sdk/bin/mojo`) points Mojo at a newer interpreter:
+
+```bash
+brew install python@3.12
+/usr/local/opt/python@3.12/bin/python3.12 -m venv vega-sdk/pyenv
+vega-sdk/pyenv/bin/pip install -r vega-sdk/python-requirements.txt
+```
+
+The wrapper then sets `MOJO_PYTHON_LIBRARY` to Homebrew's
+`libpython3.12.dylib`, `PYTHONHOME` to that framework, and puts
+`vega-sdk/pyenv`'s `site-packages` on `PYTHONPATH`. Each is overridable: export
+`MOJO_PYTHON_LIBRARY` yourself and the wrapper defers to it.
+
+The venv exists because Homebrew's Python is
+[PEP 668](https://peps.python.org/pep-0668/) externally-managed, so installing
+into it directly is refused; a venv is the clean answer rather than
+`--break-system-packages`. It is gitignored — rebuild it with the commands
+above.
+
+With that in place the stock examples work, including the pygame one:
+
+```bash
+cd mojo/examples/life && ../../../vega-sdk/bin/mojo run lifev2.mojo
+```
+
 ## High-level plan
 
 Full design with file-level detail: [PORT_DESIGN.md](PORT_DESIGN.md).

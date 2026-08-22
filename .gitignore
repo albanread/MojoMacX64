@@ -173,3 +173,7 @@ mojo/docs/releases/nightly.md
 .bazelignore
 spikes/**/s1
 spikes/**/*.o
+
+# VEGA-FORK: the SDK's Python venv (rebuild it from
+# vega-sdk/python-requirements.txt; see the README's Python section).
+/vega-sdk/pyenv/
