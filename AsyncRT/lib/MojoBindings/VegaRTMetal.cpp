@@ -620,6 +620,20 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
                                uint32_t sharedMemBytes, void *const *argAddrs,
                                const uint64_t *argSizes,
                                const bool *argIsDevicePtr, uint32_t argc) {
+  // Metal can silently no-op a dispatch whose threadgroup is too large for
+  // the pipeline (SDL #15241); validate against the pipeline's own limit and
+  // fail loudly instead.
+  unsigned long maxThreads =
+      msg<unsigned long>(fn->pipeline, "maxTotalThreadsPerThreadgroup");
+  unsigned long requested =
+      static_cast<unsigned long>(block[0]) * block[1] * block[2];
+  if (maxThreads && requested > maxThreads)
+    return vrmErrorf("VegaRT[metal]: threadgroup %ux%ux%u = %lu threads "
+                     "exceeds this pipeline's maxTotalThreadsPerThreadgroup "
+                     "(%lu) for '%s'",
+                     block[0], block[1], block[2], requested, maxThreads,
+                     fn->name.c_str());
+
   id cb = msg<id>(ctx->queue, "commandBuffer");
   if (!cb)
     return vrmErrorf("VegaRT[metal]: commandBuffer creation failed");

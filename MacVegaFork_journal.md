@@ -629,3 +629,73 @@ pointer shape); `test_function_mts` and
 `test_static_layout_capture_argcount` now execute but compute wrong values —
 argument-index correspondence between Mojo's packed captures, our
 `air.buffer location_index`, and VegaRT's bind loop is the prime suspect.
+
+## 2026-08-22 — Cross-check against the AIR Backend Field Notes digest
+
+Read a research digest of the public AIR reverse-engineering record
+("AIR Backend Field Notes", 14 sources, compiled 22 Aug 2026). Cross-checking
+it against what this fork has measured:
+
+**Its top-priority open question (Q1) is already settled here — and the
+answer is 64.** The digest opens with a warning that Metal may expose 32-wide
+simdgroups on AMD Macs (MoltenVK 1.4.2 fixed crashes from reporting 64 where
+"Metal expects 32"), cautions that `threadExecutionWidth` is unreliable, and
+prescribes a ten-minute experiment: dispatch a kernel that writes
+`[[threads_per_simdgroup]]` and read it back. Spike S1 ran exactly that
+experiment on day one. On both the Vega II and the 580X:
+`threads_per_simdgroup` = 64, `simd_sum(1u)` = 64, and a 64-bit ballot
+popcount = 64 — three independent in-kernel measurements agreeing, not an API
+query. Since then the wave64 work has produced positive on-device proof:
+`warp.sum` returns 64, and the ballot fix yields `0x5555555555555555` across
+all 64 lanes. **Metal exposes 64-wide simdgroups on this hardware.** The
+MoltenVK issue concerns what MoltenVK reports to Vulkan clients, a different
+layer. (Their advice to prefer an in-kernel query over `threadExecutionWidth`
+is sound regardless, and is what S1 did.)
+
+**Q2 is likewise answered locally:** the Xcode-produced golden metallib on
+this machine carries `air.version 2.6.0`, `air.language_version Metal 3.1.0`,
+triple `air64-apple-macosx14.2.0`, and the runtime accepts 2.6. We can add a
+data point the digest lacks: `amdgpu-nt`'s bundled plugin caps at **2.5**, so
+the standalone tool rejects modules the driver accepts.
+
+**Its address-space table confirms our remap is correct** — AIR 1=device,
+2=constant, 3=threadgroup, and notably **4=threadgroup_imageblock,
+5=ray_data**. Mojo emits NVPTX numbering (4=constant, 5=local), so leaving
+those unmapped meant our constants were landing in *imageblock* space and
+locals in *ray_data*. `remapAddressSpaces` (4→2, 5→0) is right per spec, not
+just empirically.
+
+**Where we can contribute back to that record:** finding A3 ("front-end
+compiler crashes on Radeon") lists three independent reports with no
+diagnosis — "no fix, only strategy." We have the diagnosis: symbolicated
+`MTLCompilerService` crash stacks showing
+`ILTargetLowering::getPtrRsrcId ← getRsrcDescNode ← LowerSTORE` in
+`libAMDIL902.dylib`, root-caused to generic (AS0) pointers having no buffer
+resource descriptor. The crash-report directory is the missing diagnostic
+the digest's section 07 never mentions.
+
+Acted on immediately: **A5** — Metal can silently no-op a dispatch whose
+threadgroup exceeds the pipeline limit (SDL #15241). `VegaRTMetal_launch` now
+validates against the pipeline's own `maxTotalThreadsPerThreadgroup` and
+fails loudly.
+
+Filed as backlog from the digest:
+
+- **I1 / Q5 — atomics miscompile without explicit aliasing metadata.** The
+  RFC author found Apple's compiler reordering memory across atomic CAS,
+  producing *wrong answers, not errors*, and fixed it with Apple-style
+  `!alias.scope`/`!noalias` annotation plus marking affected loads volatile.
+  Unknown whether it reproduces on GCN (the RFC author was almost certainly
+  on Apple Silicon). **Budget this before any lock-free kernel work.**
+- **A1 — Blender's Cycles removed Metal-on-AMD in 4.3** citing driver/compiler
+  bugs; the commits *preceding* removal are the closest thing to a catalogue
+  of AMD-Metal workarounds. Worth mining before writing our own.
+- **B2 — Julia's `llvm-downgrade` maintains an 18.0 target**, and Modular's
+  writer derives from it. Since Metal's reader is LLVM-18-based, 18.0 may be a
+  better base than the 17 we force. Ours works; this is robustness, not a fix.
+- **A4 — instruction selection is Apple's**: gfx906 dot-product instructions
+  (`v_dot4_i32_i8` et al.) cannot be hand-placed. Port AMD kernels for
+  correctness first; treat their performance as unknown.
+- **B5** — the `getMetalKernelArgType` i64→i32 kernel-argument correction,
+  already on our watchpoint list, is confirmed as load-bearing across *every*
+  constant-emission path.
