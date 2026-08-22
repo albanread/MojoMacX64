@@ -162,7 +162,7 @@ mojo_copts_toolchain(
             "--target-cpu=neoverse-n1",
         ],
         "@platforms//os:macos": [
-            "--target-cpu=apple-m1",
+            "--target-cpu=cascadelake",  # VEGA-FORK: was apple-m1; Mac Pro 2019 Xeon W (Cascade Lake, AVX-512)
         ],
     }) + select({
         "//:asan": ["--sanitize=address"],

@@ -240,3 +240,48 @@ share of the credit for pre-clearing the traps. Next: **Phase 2**, the
 MetalRT C ABI over the in-tree `CPUDevice` (existing DeviceContext tests as
 the spec), then `MetalDevice`, then the AIR trio against the captured
 reference.
+
+## 2026-08-22 — Phase 2a: VegaRT passes upstream's own tests
+
+The closed `AsyncRTMojoBindings`/`MGPRT` layer is now replaced by
+`AsyncRT/lib/MojoBindings/VegaRT.cpp` (~900 lines): real implementations of
+the context/buffer/copy/stream/event/timer surface with synchronous
+semantics under the async names, plus a linkable, self-naming error stub for
+every other census symbol. `bazel/api.bzl` maps the virtual
+`//MLRT:Driver/DeviceContext` dep to it; the wheel is out of the graph.
+
+Verdict: **5/5 of upstream's `asyncrt` CPU-lane tests pass** (smoke, memset,
+timing, host_mapped, device_pointer). `test_copies.cpu` is excluded by
+*upstream* on macOS — a pre-existing note in their BUILD file, not ours.
+
+What the recon established before writing code:
+
+- The true census is **120 symbols** (a first grep said 137 — it was
+  matching the substring inside `KGEN_CompilerRT_AsyncRT_*`, a *different*
+  family provided by the open CompilerRT we already build; the task-chain
+  and spin-waiter "gaps" evaporated on word-boundary matching).
+- Conventions, recovered from the Mojo side and now load-bearing: fallible
+  calls return `const char*` (null = success) and **every returned string,
+  errors included, is heap-owned and freed via `strfree`**; handles are
+  opaque and refcounted; **getters hand back +1 references** (the wrappers
+  release in destructors); `deviceApi`/`archName` write StringRef-shaped
+  {ptr,len} out-params that must point at context-lifetime storage.
+
+Then one more arm64 assumption — `mojo_copts_toolchain` passes
+`--target-cpu=apple-m1` on all of macOS; ours is now `cascadelake` (Xeon
+W-3235, and the fork finally *tunes* for the machine) — and three semantic
+bugs the tests caught in an afternoon, which is the CPU-first strategy
+doing exactly what it was designed to do:
+
+1. `test_smoke` requires a lowercase `"cpu"` substring in the device name
+   (and, noted for phase 2b: `"Apple"` for api=metal — our Vega device name
+   will need care or a test patch).
+2. `get_attribute` is CUDA-numbered; CLOCK_RATE(13) and WARP_SIZE(10)
+   needed real answers.
+3. **Zero-length buffers must still return a non-null device pointer** —
+   the Mojo wrapper unwraps it unconditionally
+   (`device_context.mojo:1517`). `malloc(bytes ? bytes : 1)`.
+
+Next: phase 2b — `MetalDevice` behind the same ABI, `MTLCommandQueue`
+streams, blit copies, and the MSL-source `loadFunction` path so the runtime
+runs kernels on the Vega II before the AIR trio exists.

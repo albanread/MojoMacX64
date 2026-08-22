@@ -1,0 +1,11 @@
+load("//bazel:api.bzl", "modular_cc_library")
+
+# VEGA-FORK: VegaRT — our implementation of the AsyncRT device ABI, replacing
+# the closed AsyncRTMojoBindings/MGPRT from the (arm64-only) modular wheel.
+# See VegaRT.cpp and ABI-NOTES.md.
+modular_cc_library(
+    name = "MojoBindings",
+    srcs = ["VegaRT.cpp"],
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+)

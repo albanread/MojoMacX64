@@ -125,7 +125,8 @@ def _process_mojo_deps(deps):
             new_deps.append("@modular_wheel//:" + dep.split("/")[-1])
             imports_max = True
         elif dep == "//MLRT:Driver/DeviceContext":
-            new_deps.append("@modular_wheel//:AsyncRTMojoBindings_lib")
+            # VEGA-FORK: the wheel is arm64-only; VegaRT is our implementation.
+            new_deps.append("//AsyncRT/lib/MojoBindings")
         elif dep == "//KGEN:CompilerRT":
             needs_compiler_rt = True
         else:
