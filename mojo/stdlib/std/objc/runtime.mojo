@@ -14,6 +14,8 @@ from std.collections.string.string_span import _get_kgen_string
 from std.sys._cocoakb import (
     cocoakb_msgsend_variant,
     cocoakb_method_arg_classes,
+    cocoakb_selector_variant,
+    cocoakb_selector_arg_classes,
 )
 
 
@@ -293,6 +295,71 @@ def msg_send[
         def(_RawPtr, _RawPtr, /, *a: *Ts) thin abi("C") -> R
     ]()[]
     return call(obj.ptr(), s, *args)
+@always_inline
+def _sel_stub_ptr[selector: StaticString]() -> _RawPtr:
+    """The objc_msgSend variant for a selector, resolved from the database by
+    selector alone (for protocol-typed receivers). A link-time symbol, same as
+    the class-keyed path."""
+    comptime variant = cocoakb_selector_variant[selector]()
+    comptime assert variant != "?" and variant != "", (
+        "std.objc: no class in the metadata implements selector '"
+        + selector
+        + "', so its dispatch ABI is unknown. Check the selector spelling."
+    )
+    return _RawPtr(
+        _mlir_value=__mlir_op.`pop.extern_ptr_symbol`[
+            name=_get_kgen_string[variant](),
+            alignment=Int(1).__mlir_index__(),
+            _type=_RawPtr._mlir_type,
+        ]()
+    )
+
+
+def send[
+    R: AnyType, selector: StaticString, *Ts: AnyType
+](obj: ObjCObject, *args: *Ts) -> R:
+    """Send `selector` to a PROTOCOL-typed object, returning `R`.
+
+    Like `msg_send`, but the receiver's concrete class is unknown at compile
+    time -- as for every Metal object (`id<MTLDevice>`, `id<MTLTexture>`, ...)
+    and Cocoa delegate. The ABI stub and argument classes come from the
+    database keyed by the SELECTOR (consistent across implementing classes), so
+    dispatch, arg count and register file are still checked; only the receiver
+    class is not.
+    """
+    comptime arg_classes = cocoakb_selector_arg_classes[selector]()
+    comptime expected = _count_arg_classes(arg_classes)
+    comptime assert args.__len__() == expected, (
+        "std.objc: selector '"
+        + selector
+        + "' takes "
+        + String(expected)
+        + " argument(s), but "
+        + String(args.__len__())
+        + " were passed."
+    )
+    comptime for i in range(args.__len__()):
+        comptime name = reflect[Ts[i]].name()
+        comptime kind = _nth_class_kind(arg_classes, i)
+        comptime if _type_is_float(name) and kind == 2:
+            comptime assert False, (
+                "std.objc: argument " + String(i) + " of '" + selector
+                + "' is a float, but the ABI expects an integer/pointer"
+                + " register here."
+            )
+        comptime if _type_is_scalar_int(name) and kind == 1:
+            comptime assert False, (
+                "std.objc: argument " + String(i) + " of '" + selector
+                + "' is an integer, but the ABI expects a float register here."
+            )
+    var stub = _sel_stub_ptr[selector]()
+    var s = sel[selector]().ptr()
+    var call = Pointer(to=stub).unsafe_bitcast[
+        def(_RawPtr, _RawPtr, /, *a: *Ts) thin abi("C") -> R
+    ]()[]
+    return call(obj.ptr(), s, *args)
+
+
 # ===----------------------------------------------------------------------=== #
 # Autorelease pools.
 # ===----------------------------------------------------------------------=== #

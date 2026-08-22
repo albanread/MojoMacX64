@@ -260,6 +260,33 @@ def cocoakb_method_arg_classes[
     return StaticString(res)
 
 
+def cocoakb_selector_variant[selector: StaticString]() -> StaticString:
+    """Which objc_msgSend variant a selector uses, from any class implementing
+    it -- for protocol-typed receivers whose concrete class is unknown at
+    compile time (id<MTLTexture>, a Cocoa delegate, ...)."""
+    var res = __mlir_attr[
+        `#kgen.param.expr<cocoakb_query, `,
+        _get_kgen_string["selector_variant"](),
+        `, `,
+        _get_kgen_string[selector](),
+        `> : !kgen.string`,
+    ]
+    return StaticString(res)
+
+
+def cocoakb_selector_arg_classes[selector: StaticString]() -> StaticString:
+    """The SysV x86-64 argument classes of a selector, from any implementing
+    class -- the selector-keyed counterpart of cocoakb_method_arg_classes."""
+    var res = __mlir_attr[
+        `#kgen.param.expr<cocoakb_query, `,
+        _get_kgen_string["selector_arg_classes"](),
+        `, `,
+        _get_kgen_string[selector](),
+        `> : !kgen.string`,
+    ]
+    return StaticString(res)
+
+
 def cocoakb_posix_sig[name: StaticString]() -> StaticString:
     """The full C type of a POSIX/BSD libc function, as clang reports it.
 

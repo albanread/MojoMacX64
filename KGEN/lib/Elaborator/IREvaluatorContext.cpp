@@ -929,6 +929,17 @@ constexpr StringRef kMethodArgClassesSQL =
     COCOAKB_METHOD_CTE("arg_classes", "method_abi_x64");
 #undef COCOAKB_METHOD_CTE
 
+// Selector-keyed ABI: for a protocol-typed object (id<MTLTexture>, a Cocoa
+// delegate, ...) the concrete class is unknown at compile time, but a selector
+// carries the same ABI wherever it is implemented. Take the majority reading
+// across implementing classes so one odd class can't skew it.
+constexpr StringRef kSelectorVariantSQL =
+    "SELECT msgsend FROM method_abi_x64 WHERE selector = ?1 "
+    "GROUP BY msgsend ORDER BY COUNT(*) DESC LIMIT 1";
+constexpr StringRef kSelectorArgClassesSQL =
+    "SELECT arg_classes FROM method_abi_x64 WHERE selector = ?1 "
+    "GROUP BY arg_classes ORDER BY COUNT(*) DESC LIMIT 1";
+
 constexpr StringRef kPosixSigSQL =
     "SELECT qualtype FROM posix_functions WHERE name = ?1";
 constexpr StringRef kPosixRetClassSQL =
@@ -947,6 +958,8 @@ const CocoaKBQueryDef kCocoaQueries[] = {
     {"msgsend_variant", 3, kMsgSendVariantSQL},
     {"method_ret_class", 3, kMethodRetClassSQL},
     {"method_arg_classes", 3, kMethodArgClassesSQL},
+    {"selector_variant", 1, kSelectorVariantSQL},
+    {"selector_arg_classes", 1, kSelectorArgClassesSQL},
     {"posix_sig", 1, kPosixSigSQL},
     {"posix_ret_class", 1, kPosixRetClassSQL},
     {"posix_arg_classes", 1, kPosixArgClassesSQL},

@@ -12,6 +12,8 @@ if [ "${1:-}" = "build" ]; then
   exec "$ROOT/bin/mojo-driver" build \
     -Xlinker "-L$ROOT/lib" -Xlinker -lVegaRT -Xlinker "-rpath" -Xlinker "$ROOT/lib" \
     -Xlinker -lobjc -Xlinker -framework -Xlinker Foundation \
+    -Xlinker -framework -Xlinker AppKit -Xlinker -framework -Xlinker QuartzCore \
+    -Xlinker -framework -Xlinker Metal \
     "$@"
 fi
 exec "$ROOT/bin/mojo-driver" "$@"

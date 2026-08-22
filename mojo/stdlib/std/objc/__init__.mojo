@@ -12,6 +12,6 @@
 # selector is a compile error.
 # ===----------------------------------------------------------------------=== #
 
-from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, autoreleasepool
+from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, send, autoreleasepool
 from .ownership import ObjCRef
 from .foundation import NSString
