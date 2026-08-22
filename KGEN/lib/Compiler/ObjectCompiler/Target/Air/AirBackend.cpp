@@ -403,6 +403,8 @@ std::optional<std::string> airTypeSuffix(llvm::Type *ty) {
       return ".u.i16";
     case 32:
       return ".u.i32";
+    case 64:
+      return ".u.i64";
     }
   }
   if (auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(ty)) {
@@ -458,20 +460,29 @@ llvm::Error legalizeModule(llvm::Module &m) {
       continue;
     for (llvm::BasicBlock &bb : fn)
       for (llvm::Instruction &inst : bb) {
-        auto usesF64 = [](llvm::Type *ty) {
-          return ty->isDoubleTy() ||
-                 (ty->isVectorTy() &&
-                  ty->getScalarType()->isDoubleTy());
+        // Types Metal/AIR simply does not have. Emitting them yields
+        // bitcode the driver rejects opaquely ("Compilation failed due to
+        // an interrupted compilation"); diagnose at the source instead.
+        auto unsupported = [](llvm::Type *ty) -> const char * {
+          llvm::Type *scalar = ty->isVectorTy() ? ty->getScalarType() : ty;
+          if (scalar->isDoubleTy() || scalar->isFP128Ty() ||
+              scalar->isX86_FP80Ty())
+            return "float64/float128";
+          if (auto *it = llvm::dyn_cast<llvm::IntegerType>(scalar))
+            if (it->getBitWidth() > 64)
+              return "integers wider than 64 bits";
+          return nullptr;
         };
-        bool bad = usesF64(inst.getType());
+        const char *bad = unsupported(inst.getType());
         for (llvm::Value *operand : inst.operands())
-          bad |= usesF64(operand->getType());
+          if (!bad)
+            bad = unsupported(operand->getType());
         if (bad)
           return llvm::createStringError(
               llvm::inconvertibleErrorCode(),
-              "float64 is not supported on Metal/AIR (kernel '%s'); Metal "
-              "has no double type — use Float32 in device code",
-              fn.getName().str().c_str());
+              "%s not supported on Metal/AIR (in kernel '%s'): Metal has "
+              "neither a double nor a 128-bit integer type",
+              bad, fn.getName().str().c_str());
       }
   }
 

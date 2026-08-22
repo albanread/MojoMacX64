@@ -181,19 +181,32 @@ static void downgradeLifetimeIntrinsics(Module &module,
 
 namespace {
 
-// VEGA-FORK (triage finding, print-format cluster): the AIR encoding is
-// LLVM-5-vintage — BitcodeWriter17 hard-crashes (llvm_unreachable) on
-// `freeze` (introduced LLVM 10) and unary `fneg` (LLVM 8), which the
-// mid-level optimizer freely introduces. Standard downgrade practice
-// (cf. Julia's llvm-downgrade): freeze folds to its operand; fneg lowers
-// to fsub(-0.0, x) with fast-math flags preserved.
-void downgradeFreezeAndFNeg(llvm::Module &module) {
+// VEGA-FORK: the AIR encoding is LLVM-5-vintage while our LLVM is 22, so
+// constructs newer than the reader must be lowered away here (this is the
+// published MetalAIRPass; upstream downgrades lifetime intrinsics only):
+//   - `freeze` (LLVM 10) and unary `fneg` (LLVM 8) hard-crash
+//     BitcodeWriter17 with llvm_unreachable
+//   - GEP no-wrap flags (LLVM 19) survive into AIR and break the driver's
+//     GCN compiler
+// Standard downgrade practice, cf. Julia's llvm-downgrade.
+void downgradeModernConstructs(llvm::Module &module) {
   for (llvm::Function &fn : module) {
     for (llvm::BasicBlock &bb : fn) {
       for (llvm::Instruction &inst : llvm::make_early_inc_range(bb)) {
         if (auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(&inst)) {
           freeze->replaceAllUsesWith(freeze->getOperand(0));
           freeze->eraseFromParent();
+          continue;
+        }
+        if (auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&inst)) {
+          // GEP no-wrap flags (nusw/nuw) are LLVM 19+; the AIR reader knows
+          // only `inbounds`. Apple's own air-as rejects the text form
+          // ("expected type" on `getelementptr inbounds nuw`), and the
+          // encoded flag bits make the driver's GCN compiler bail with
+          // "Compilation failed due to an interrupted compilation".
+          gep->setNoWrapFlags(gep->isInBounds()
+                                  ? llvm::GEPNoWrapFlags::inBounds()
+                                  : llvm::GEPNoWrapFlags::none());
           continue;
         }
         auto *unary = llvm::dyn_cast<llvm::UnaryOperator>(&inst);
@@ -221,7 +234,7 @@ PreservedAnalyses LLVMIRDowngradePass::run(Module &module,
                                            ModuleAnalysisManager &mam) {
 
   downgradeLifetimeIntrinsics(module, mam);
-  downgradeFreezeAndFNeg(module);
+  downgradeModernConstructs(module);
   return PreservedAnalyses::all();
 }
 

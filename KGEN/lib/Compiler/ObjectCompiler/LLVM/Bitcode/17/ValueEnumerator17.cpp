@@ -1106,6 +1106,15 @@ void ValueEnumerator17::incorporateFunction(const Function &F) {
       }
       if (auto *SVI = dyn_cast<ShuffleVectorInst>(&I))
         EnumerateValue(SVI->getShuffleMaskForBitcode());
+      // VEGA-FORK (triage finding): this enumerator was vendored from an
+      // LLVM where SwitchInst kept case values as operands. They are now
+      // stored out-of-line (PHINode-style), so the operand walk above misses
+      // them while writeInstruction still emits them — "Value not in
+      // slotcalculator!" for any kernel SimplifyCFG turned into a switch.
+      // Mirrors upstream ValueEnumerator.cpp.
+      if (auto *SI = dyn_cast<SwitchInst>(&I))
+        for (const auto &Case : SI->cases())
+          EnumerateValue(Case.getCaseValue());
     }
     BasicBlocks.push_back(&BB);
     ValueMap[&BB] = BasicBlocks.size();
