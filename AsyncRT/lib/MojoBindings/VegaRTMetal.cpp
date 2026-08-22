@@ -627,7 +627,23 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
   msg<void>(enc, "setComputePipelineState:", fn->pipeline);
 
   for (uint32_t i = 0; i < argc; i++) {
-    if (argIsDevicePtr && argIsDevicePtr[i]) {
+    // Plain path (no per-arg flags): classify 8-byte args by whether their
+    // value resolves in the allocation registry — a resolving address is a
+    // device pointer and binds with setBuffer (external-function launches
+    // pass DeviceBuffer device addresses this way).
+    bool isDev = argIsDevicePtr ? argIsDevicePtr[i] : false;
+    if (!argIsDevicePtr && argSizes && argSizes[i] >= 8) {
+      // DeviceBuffer host structs are {device_ptr, handle} — the address is
+      // the first word. Any >=8-byte arg whose leading word resolves in the
+      // allocation registry is treated as a device pointer. (TODO: replace
+      // the heuristic with pipeline-reflection argument classification.)
+      uint64_t maybe = 0;
+      memcpy(&maybe, argAddrs[i], sizeof(maybe));
+      size_t off = 0;
+      if (resolveAddress(maybe, &off))
+        isDev = true;
+    }
+    if (isDev) {
       uint64_t addr = 0;
       memcpy(&addr, argAddrs[i], sizeof(addr));
       size_t off = 0;

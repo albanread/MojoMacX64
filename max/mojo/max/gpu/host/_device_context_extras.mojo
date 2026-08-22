@@ -254,9 +254,15 @@ __extension DeviceExternalFunction:
             for i in range(len(constant_memory)):
                 self._copy_to_constant_memory(constant_memory[i])
 
-        # External functions carry no argument-size metadata, so no per-arg
-        # sizes are passed to the enqueuer (matching the previous direct call).
-        var no_arg_sizes = OptionalPointer[UInt64, MutAnyOrigin](None)
+        # VEGA-FORK: host-side sizes ARE known (size_of each pack element);
+        # pass them like DeviceFunction._call_with_pack does. A null argSizes
+        # with argCount > 0 is the wrapper-protocol discriminator at the C
+        # ABI, and the old no_arg_sizes convention made external launches
+        # indistinguishable from MetalEnqueueFunctionArgs launches (host
+        # segfault; see MacVegaFork_journal.md).
+        var dense_args_sizes = Array[UInt64, num_args](uninitialized=True)
+        comptime for i in range(num_args):
+            dense_args_sizes[i] = UInt64(size_of[Ts[i]]())
         _checked(
             ctx.enqueue(
                 self._handle,
@@ -267,10 +273,14 @@ __extension DeviceExternalFunction:
                 len(attributes),
                 dense_args_addrs.unsafe_ptr().as_unsafe_any_origin(),
                 UInt32(num_args),
-                no_arg_sizes,
+                OptionalPointer[UInt64, MutAnyOrigin](
+                    dense_args_sizes.unsafe_ptr()
+                    .unsafe_origin_cast[MutAnyOrigin]()
+                ),
             ),
             location=location.or_else(call_location()),
         )
+        _ = dense_args_sizes
 
 
 __extension DeviceContext:

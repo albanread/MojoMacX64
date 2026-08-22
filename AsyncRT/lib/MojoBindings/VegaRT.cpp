@@ -776,8 +776,14 @@ extern "C" const char *AsyncRT_DeviceContext_enqueueFunctionDirect(
   const uint32_t grid[3] = {gridX, gridY, gridZ};
   const uint32_t block[3] = {blockX, blockY, blockZ};
   if (argSizes == nullptr && argCount > 0 && args != nullptr) {
-    // Metal wrapper path: single MetalEnqueueFunctionArgs pointer.
+    // Metal wrapper path: single MetalEnqueueFunctionArgs pointer. A null
+    // argSizes with argCount > 0 is the protocol discriminator; validate the
+    // wrapper shape instead of faulting if a caller violates it.
     const auto *mv = static_cast<const MetalArgsView *>(args[0]);
+    if (!mv || !mv->addrs || !mv->sizes || !mv->isDevicePtr)
+      return vrErrorf("VegaRT: malformed MetalEnqueueFunctionArgs (null "
+                      "fields); launches without sizes must use the wrapper "
+                      "protocol");
     return VegaRTMetal_launch(ctx->metal, func->mtl, grid, block,
                               sharedMemBytes, mv->addrs, mv->sizes,
                               mv->isDevicePtr, argCount);

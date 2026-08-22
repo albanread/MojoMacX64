@@ -1,0 +1,17 @@
+# Tests excluded from the metal-vega2 sweep: foreign-ISA-only features whose
+# constructs have no AIR/GCN equivalent (upstream's own BUILD constraints
+# confine them to NVIDIA/AMD CI). Verified per-test in the Phase-4 triage.
+test_semaphore              # PTX named hardware barriers (nvvm.barrier)
+test_producer_consumer      # mbarrier objects (llvm.nvvm.mbarrier.*, H100 CI)
+test_cluster_dims_attribute # Hopper thread-block clusters
+test_cluster_sync           # Hopper thread-block clusters
+test_grid_dependence_control# nvptx64 target test
+test_is_sm90                # nvptx64 target test
+test_load_width_codegen     # nvptx64 target test
+test_sync                   # nvptx64 target test
+test_convert                # amdgcn target test
+test_fast_div_ptx           # nvptx64 target test
+test_invariant_load         # nvptx64 target test
+test_tcgen05                # Blackwell tcgen05 (nvptx64)
+test_tensor_core_fp8_mma_sync # NVIDIA tensor cores
+test_wmma_amd               # AMD ISA mma (amdgcn path, not AIR)
