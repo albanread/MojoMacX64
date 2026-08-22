@@ -54,6 +54,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
@@ -511,23 +512,41 @@ std::optional<std::string> airTypeSuffix(llvm::Type *ty) {
   return std::nullopt;
 }
 
-void mangleAirOps(llvm::Module &m) {
+// AIR runtime functions carry a type suffix; the stdlib emits bare stems.
+// The math family additionally has a `fast_` variant selected by fast-math,
+// which we do not enable, so the plain spelling is correct here.
+bool needsAirTypeSuffix(llvm::StringRef name) {
   static const llvm::StringRef stems[] = {
+      // shuffles / simd-group ops
       "air.simd_shuffle_xor", "air.simd_shuffle_down", "air.simd_shuffle_up",
-      "air.simd_shuffle"};
+      "air.simd_shuffle", "air.simd_sum", "air.simd_prefix_sum",
+      "air.simd_min", "air.simd_max", "air.simd_product",
+      // math
+      "air.cos", "air.sin", "air.tan", "air.acos", "air.asin", "air.atan",
+      "air.cosh", "air.sinh", "air.tanh", "air.exp", "air.exp2", "air.exp10",
+      "air.log", "air.log2", "air.log10", "air.sqrt", "air.rsqrt",
+      "air.fabs", "air.floor", "air.ceil", "air.rint", "air.trunc",
+      "air.round", "air.fmin", "air.fmax", "air.fma", "air.pow", "air.powr",
+      "air.fmod", "air.copysign", "air.frac", "air.divide", "air.recip"};
+  for (llvm::StringRef stem : stems)
+    if (name == stem)
+      return true;
+  return false;
+}
+
+void mangleAirOps(llvm::Module &m) {
   llvm::SmallVector<llvm::CallInst *, 16> calls;
   for (llvm::Function &fn : m)
     for (llvm::BasicBlock &bb : fn)
       for (llvm::Instruction &inst : bb)
         if (auto *call = llvm::dyn_cast<llvm::CallInst>(&inst))
           if (llvm::Function *callee = call->getCalledFunction())
-            for (llvm::StringRef stem : stems)
-              if (callee->getName() == stem) {
-                calls.push_back(call);
-                break;
-              }
+            if (needsAirTypeSuffix(callee->getName()))
+              calls.push_back(call);
   for (llvm::CallInst *call : calls) {
-    auto suffix = airTypeSuffix(call->getArgOperand(0)->getType());
+    llvm::Type *keyTy = call->arg_size() ? call->getArgOperand(0)->getType()
+                                         : call->getType();
+    auto suffix = airTypeSuffix(keyTy);
     if (!suffix)
       continue; // leaves the bare stem; fails loudly with a clear label
     std::string mangled =
@@ -832,6 +851,16 @@ public:
       pb.registerLoopAnalyses(lam);
       pb.crossRegisterProxies(lam, fam, cgam, mam);
       llvm::ModulePassManager mpm;
+      // Metal kernels are conventionally fully inlined, and AMD's backend
+      // cannot trace a buffer resource across a call boundary — a store
+      // through a pointer that arrived as a callee parameter crashes its
+      // lowering. Force every internal helper into its caller.
+      for (llvm::Function &fn : module)
+        if (!fn.isDeclaration() && fn.hasLocalLinkage()) {
+          fn.removeFnAttr(llvm::Attribute::NoInline);
+          fn.addFnAttr(llvm::Attribute::AlwaysInline);
+        }
+      mpm.addPass(llvm::AlwaysInlinerPass());
       // The published Metal emission machinery, by its own declarations:
       // BitcodeWriter17.cpp:15 — "for writing Metal bitcode"; Apple's AIR
       // reader is LLVM-18-based (BitcodeWriter17.cpp ~1765) and requires

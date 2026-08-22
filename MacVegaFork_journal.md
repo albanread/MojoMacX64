@@ -813,3 +813,51 @@ compiles and builds a pipeline on this GPU, so f16 is not the trigger by
 itself. Something narrower — the `[2 x i8]` byte-array GEP arithmetic feeding
 a 16-bit store, or the 4-wide (`r1_w4`) vectorized variant — still defeats
 AMD's resource inference. Next.
+
+## 2026-08-22 — test_random: narrowed hard, not yet cracked
+
+Bisected the test down to a single trigger and fixed two real bugs on the
+way, but the crash survives all of them.
+
+**The trigger is `NormalRandom`/`step_normal`, not `Random`.** Running each
+variant alone: `float16` uniform and `float32` uniform both **pass**; both
+`"normal"` variants fail. So it is the Box-Muller path, in both dtypes.
+
+Two genuine bugs found and fixed while narrowing:
+
+1. **AIR math functions were emitted as bare stems.** The kernel called
+   `air.cos`, `air.sin`, `air.sqrt` — undefined symbols. Golden probes show
+   AIR spells them `air.cos.f32` (and `air.fast_cos.f32` under fast-math,
+   which we do not enable), with genuine **vector** forms too:
+   `air.cos.v4f32`. `mangleAirOps` now covers the whole math family, keyed on
+   the first argument type, and emits exactly the golden names.
+2. **Internal helpers were not being inlined.** The module carried a
+   non-inlined `std_random_philox_NormalRandom...` taking and returning
+   structs by value. Metal kernels are conventionally fully inlined, and
+   AMD's backend cannot trace a buffer resource across a call boundary, so
+   an always-inliner now runs over internal functions before emission. The
+   module is now a single function.
+
+After both: **one function, all stores `addrspace(1)`, one cleanly hoisted
+buffer parameter, correct AIR symbol names, no generic pointers, no
+`addrspacecast`s** — and `getPtrRsrcId` ← `LowerSTORE` still segfaults.
+
+Excluded by direct probe on this GPU, so none of these is the cause:
+
+- `half` stores (plain MSL, and our own direct-buffer f16 kernel: both fine)
+- f16/f32 elementwise at width 1 and 4 through a hoisted pointer (passes)
+- `Random`/`step_uniform` (passes)
+- vector transcendentals — Apple's own `float4` `cos`+`sqrt` kernel builds a
+  pipeline on the Vega II
+- non-inlined helpers (now inlined; crash persists)
+- undefined AIR symbols (now correctly mangled; crash persists)
+
+Both fixes are kept: they are correct independently, and the regression set
+(warp64, ballot64, shuffle, prefix_sum, vecadd, fast_div, function_mts, sum,
+barrier, constant_memory, launch_binary, laneid) is green.
+
+Next angle when this resumes: bisect the *kernel body* rather than the test —
+take the emitted `.ll`, delete statements until the pipeline builds, and read
+what survives. The harness for that is the `VEGA_KEEP_AIR` pre/post dumps
+plus `xcrun metallib` + the S1 probe, which together give a
+sub-minute edit→verdict loop without going through Mojo at all.
