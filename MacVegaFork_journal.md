@@ -1156,3 +1156,35 @@ count and the return are checked, the arg types are trusted), a
 `sel_registerName` cache, and higher-level sugar (NSString<->String bridging,
 typed wrappers for common AppKit/Foundation classes) — all queries and
 convenience over the four working layers.
+
+## 2026-08-22 — Cocoa: the payoff — idiomatic, leak-safe Cocoa in Mojo
+
+`std.objc.foundation` binds `NSString` as a leak-safe Mojo type, and
+`foundation_demo.mojo` reads like ordinary Mojo:
+
+```mojo
+var hello = NSString("Hello, ")
+var greeting = hello.appending(NSString("Cocoa from Mojo"))
+print(greeting.to_string())          # Hello, Cocoa from Mojo
+print(greeting.equals(other))        # a real -isEqualToString:
+```
+
+Creation from a Mojo `String`, `.length()`, `.to_string()`, `.equals()`,
+`.appending()` — each is one `msg_send` with a database-selected stub, and the
+object is owned by an `ObjCRef`, so nothing leaks and no stub is ever named by
+hand. 200,000 bridged NSStrings cycle at a flat 10 MB RSS.
+
+The point of this layer is what it *isn't*: it's not a generator, and it's not
+1,000 lines. Binding a Cocoa class is a handful of typed methods over the four
+working layers underneath. That's the whole thesis of the database-backed
+design — new surface is queries and convenience, never new machinery. The
+Windows sister port learned the same lesson with `winkb`; here it holds for a
+runtime with 422,683 methods.
+
+The Cocoa stack as it stands: **P1** comptime SDK queries (checked layouts,
+enums, selectors, encodings), **P2** calling with database-selected dispatch,
+**P3** no-leak RAII ownership, **P4** struct returns/arguments, and a
+**Foundation** convenience layer proving it composes. Remaining is depth, not
+mechanism: a comptime `@encode` parser to check argument *types* (the count
+and return are checked today, arg types trusted), a selector cache, and more
+bridged classes as they're needed.
