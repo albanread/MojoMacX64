@@ -1258,3 +1258,51 @@ comptime substring (which the StaticString constructors don't make easy).
 one database: the selector exists, the correct objc_msgSend variant, the
 correct argument count, and the correct register file per argument. That is a
 meaningfully safer FFI than hand-written bindings, which check none of them.
+
+## 2026-08-22 — Cocoa dispatch materialized to C speed (3660ns → 3ns)
+
+The user's push — "materialize these into C speed calls, we are on LLVM, use
+code generation" — was exactly right, and it turned into two small KGEN fixes
+that make a fully-checked, database-driven message send cost about as much as a
+hand-written `objc_msgSend`. The progression, on a 50M-iteration `length` loop:
+
+| stage | ns/send | what changed |
+|---|---|---|
+| original | 3660 | `dlsym(RTLD_DEFAULT)` **per call** — scans every dylib |
+| hashed cache | 38 | dlsym + selector cached in the runtime global registry (one hash each) |
+| direct stub | 26.7 | stub is a link-time symbol reference (relocation), selector still hashed |
+| **global slot** | **3.0** | selector in a per-selector persistent global slot (one load) |
+
+**Two compiler bugs, same shape.** Both `pop.extern_ptr_symbol` and
+`pop.global_alloc` lower through `symtab.insert()`, which **renames on
+collision** (`objc_msgSend` → `objc_msgSend_0`, `_1`; `slot` → `slot_0`). That
+uniquing is correct for genuinely distinct symbols but wrong for two cases I
+needed:
+
+- Referencing **one shared external symbol** (`objc_msgSend`, from every send)
+  from many call sites — the renamed `objc_msgSend_0` is undefined at link.
+- A **named host global** used as a cache — each call site silently got its own
+  renamed slot, so nothing ever persisted (this is why my first `global_alloc`
+  persistence test read 0 every time).
+
+The fix in both lowerings is the lookup-or-reuse the same file already used for
+`AlignedAlloc`/`AlignedFree`: look up an existing declaration for the name and
+reuse it. For `global_alloc` it's guarded to the non-GPU-shared, no-initializer
+path (a fixed-name global is a C-file-scope-`static`-like named global);
+`GPU_SHARED` keeps its per-kernel uniquing. Only three `global_alloc` users
+exist, all GPU-path, so the host change is safe — confirmed by rebuilding std
+and max plus the full GPU regression.
+
+**Why this matters beyond a microbenchmark.** The whole thesis of the
+database-backed design is that the compiler does the work the programmer would
+otherwise do by hand and get wrong. Dispatch was the last place that thesis
+leaked into runtime cost: a checked call was 1000× slower than an unchecked
+one, which would have pushed anyone writing a hot loop back to raw
+`external_call` and its hand-rolled ABI. Now the checked path *is* the fast
+path — selector existence, ABI stub, argument count, and register file all
+verified at compile time, and the emitted code is a relocation, a load, a
+predicted branch, and the call. There is no longer a reason to write an
+unchecked Cocoa call.
+
+The two KGEN dedup fixes are general — any Mojo code referencing a shared
+external symbol, or using a fixed-name host global as a cache, benefits.
