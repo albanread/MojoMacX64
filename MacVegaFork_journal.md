@@ -1562,3 +1562,41 @@ which are reported the same way.
 
 Practical outcome: Qwen3-30B-A3B Q4_K_M is now the default model on this box —
 faster and more capable than the 8B, with ~14 GB of headroom left for context.
+
+## 2026-08-22 — Correction: the MoE routing verdict, measured properly
+
+The previous entry called the MoE perplexity gap "expert flips on near-ties" on the
+strength of n = 12 chunks of an ad-hoc corpus, and said p = 0.064 was "no evidence
+of a bug". Re-run on **wikitext-2, 80 paired chunks** for both models, the picture is
+sharper and the earlier framing was too loose in both directions:
+
+```
+                        GPU        CPU      delta     paired t
+Qwen3-30B-A3B (MoE)    9.6700     9.6356   +0.357%     +2.69
+Qwen3-8B      (dense) 10.5178    10.5342   -0.156%     -2.59
+```
+
+**The deltas are systematic, not noise.** Both exceed |t| = 2, and the GPU number
+reproduces bit-for-bit across a `ubatch` change, so the backend is deterministic and
+genuinely differs from CPU. Saying "identical to CPU" on one perplexity number, as the
+previous entry effectively did, is an over-claim.
+
+**But it is still not a routing fault**, and the control is what settles it: the *dense*
+model deviates just as significantly and in the **opposite** direction — the GPU is
+slightly better there. A real routing fault would make MoE worse while leaving dense at
+t ≈ 0. A sign that depends on the model is accumulated floating-point divergence, not a
+broken argmax. The MoE magnitude being ~2× dense fits expert selection amplifying that
+divergence through a discrete top-k over 128 near-tied scores.
+
+Practically it is immaterial — 0.36% against Q4_K_M's own 1–3% quantization cost.
+
+**Two lessons, both about measurement rather than GPUs.** First, `p = 0.064` at n = 12
+was not "no effect", it was *no power*; at n = 80 the same effect is p ≈ 0.009. Reporting
+an underpowered null as reassurance is how you set someone up for a fall. Second, and
+worse: a *single-arm* measurement could not have distinguished "MoE routing is broken"
+from "the two backends simply differ slightly". Only the dense control, run at equal
+power on the same corpus, separates them — and it inverted the conclusion. The control
+was the whole experiment; the treatment arm on its own was uninterpretable.
+
+Fork README now carries the full table and the caveat rather than the earlier
+"floating-point noise" line.
