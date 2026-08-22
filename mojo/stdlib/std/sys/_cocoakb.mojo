@@ -287,6 +287,20 @@ def cocoakb_selector_arg_classes[selector: StaticString]() -> StaticString:
     return StaticString(res)
 
 
+def cocoakb_selector_encoding[selector: StaticString]() -> StaticString:
+    """The verbatim @encode signature of a selector (majority across the
+    classes implementing it), e.g. "v24@0:8@16" -- for typing a Mojo method
+    when defining an Objective-C class at runtime."""
+    var res = __mlir_attr[
+        `#kgen.param.expr<cocoakb_query, `,
+        _get_kgen_string["selector_encoding"](),
+        `, `,
+        _get_kgen_string[selector](),
+        `> : !kgen.string`,
+    ]
+    return StaticString(res)
+
+
 def cocoakb_posix_sig[name: StaticString]() -> StaticString:
     """The full C type of a POSIX/BSD libc function, as clang reports it.
 

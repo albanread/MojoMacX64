@@ -1688,3 +1688,26 @@ with or without the MojoLLDB plugin path wired — the signature of macOS's
 debugserver/entitlement requirement for a non-Apple-signed lldb. Filed as P2
 wiring with a fallback REPL (accumulate cells, re-run) that needs nothing.
 The design is not blocked on it; P0+P1 (editor + run) use only `mojo run`.
+
+## 2026-08-22 — Playground P0: Cocoa calls Mojo, and the real run loop
+
+`spikes/playground/p0_window.mojo` passes unattended: a window, a button, a
+label and a timer, with the app delegate's lifecycle, the timer tick and the
+button action all **Mojo functions reached by Cocoa** — through
+`std.objc.ObjCClassBuilder`, which allocates a class at runtime and adds
+methods whose IMPs are Mojo `abi("C")` functions. For any selector the SDK
+knows, the `@encode` type string is pulled from the database and its frame
+offsets stripped (`v24@0:8@16` → `v@:@`), so a delegate method's signature is
+never hand-typed; custom selectors pass `encoding=`. The app runs on
+`[NSApp run]` — the genuine AppKit loop — and exits through
+`applicationShouldTerminateAfterLastWindowClosed:` answering `True` from Mojo.
+
+Two small primitives fell out that every Cocoa app in Mojo will want:
+`named_global[name, T]()` — a zero-initialised process global callbacks can
+reach (they get no closure), built on the KGEN named-global dedup from the
+dispatch work — and `nsstring()` promoted into `std.objc`. Also a
+`selector_encoding` query (majority `@encode` across implementing classes).
+
+Verification is the `P0_AUTOCLOSE_TICKS` knob: the timer closes the window
+after N ticks so launch → ticks → close → terminate runs headless. Next: P1,
+the editor.

@@ -14,4 +14,14 @@
 
 from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, send, autoreleasepool
 from .ownership import ObjCRef
-from .foundation import NSString
+from .foundation import NSString, nsstring
+from .classes import (
+    ObjCClassBuilder,
+    IMP0,
+    IMP1,
+    IMP1Bool,
+    IMP2,
+    new_instance,
+    named_global,
+    sel_dynamic,
+)

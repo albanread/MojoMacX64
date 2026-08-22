@@ -71,3 +71,13 @@ struct NSString(Movable):
         # +1 the autoreleased result into our own owned handle.
         _ = external_call["objc_retain", _RawPtr](s.ptr())
         return NSString(adopt=s)
+
+
+def nsstring(s: String) -> ObjCObject:
+    """An autoreleased NSString for `s` -- for handing to AppKit setters
+    (which retain), inside an autorelease pool."""
+    var cls = ObjCClass.lookup["NSString"]()
+    var local = s
+    return msg_send[
+        ObjCObject, "NSString", "stringWithUTF8String:", is_class=True
+    ](cls.as_object(), local.as_c_string_slice())

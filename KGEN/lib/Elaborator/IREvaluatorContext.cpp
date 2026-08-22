@@ -939,6 +939,12 @@ constexpr StringRef kSelectorVariantSQL =
 constexpr StringRef kSelectorArgClassesSQL =
     "SELECT arg_classes FROM method_abi_x64 WHERE selector = ?1 "
     "GROUP BY arg_classes ORDER BY COUNT(*) DESC LIMIT 1";
+// The verbatim @encode signature for a selector, majority reading. Used to
+// type a Mojo-implemented method when defining an ObjC class at runtime
+// (class_addMethod), so even a callback's signature comes from the SDK.
+constexpr StringRef kSelectorEncodingSQL =
+    "SELECT encoding FROM rt_methods WHERE selector = ?1 "
+    "GROUP BY encoding ORDER BY COUNT(*) DESC LIMIT 1";
 
 constexpr StringRef kPosixSigSQL =
     "SELECT qualtype FROM posix_functions WHERE name = ?1";
@@ -960,6 +966,7 @@ const CocoaKBQueryDef kCocoaQueries[] = {
     {"method_arg_classes", 3, kMethodArgClassesSQL},
     {"selector_variant", 1, kSelectorVariantSQL},
     {"selector_arg_classes", 1, kSelectorArgClassesSQL},
+    {"selector_encoding", 1, kSelectorEncodingSQL},
     {"posix_sig", 1, kPosixSigSQL},
     {"posix_ret_class", 1, kPosixRetClassSQL},
     {"posix_arg_classes", 1, kPosixArgClassesSQL},
