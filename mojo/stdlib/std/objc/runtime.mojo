@@ -9,7 +9,10 @@
 from std.ffi import external_call, c_char
 from std.memory import OpaquePointer
 from std.sys.info import TrivialRegisterPassable
-from std.sys._cocoakb import cocoakb_msgsend_variant
+from std.sys._cocoakb import (
+    cocoakb_msgsend_variant,
+    cocoakb_method_arg_classes,
+)
 
 
 comptime _RawPtr = OpaquePointer[MutUntrackedOrigin]
@@ -100,6 +103,20 @@ struct ObjCObject(TrivialRegisterPassable):
 
 
 @always_inline
+def _count_arg_classes(classes: StaticString) -> Int:
+    """Count the message arguments a selector takes, from its comma-separated
+    SysV class string ("" = none, "g" = one, "g,g" = two). Runs at comptime."""
+    var bytes = classes.as_bytes()
+    if len(bytes) == 0:
+        return 0
+    var n = 1
+    for i in range(len(bytes)):
+        if bytes[i] == UInt8(ord(",")):
+            n += 1
+    return n
+
+
+@always_inline
 def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
     Int
 ):
@@ -148,6 +165,23 @@ def msg_send[
         is_class: True for a class (+) method.
         Ts: The argument types.
     """
+    # The selector's declared argument count, from the database. A call that
+    # passes the wrong number of message arguments would otherwise read
+    # garbage from an unset register or the stack -- caught here at comptime.
+    comptime expected = _count_arg_classes(
+        cocoakb_method_arg_classes[cls, selector, is_class]()
+    )
+    comptime assert args.__len__() == expected, (
+        "std.objc: '"
+        + selector
+        + "' on "
+        + cls
+        + " takes "
+        + String(expected)
+        + " argument(s), but "
+        + String(args.__len__())
+        + " were passed."
+    )
     var stub = _stub_addr[cls, selector, is_class]()
     var s = sel[selector]().ptr()
     # Cast the stub address to the exact function-pointer type for this call

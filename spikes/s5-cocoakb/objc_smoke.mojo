@@ -26,6 +26,10 @@ def main():
         var n = msg_send[Int, "NSString", "length"](s)
         print("length:", n)
 
+        # -[NSString characterAtIndex:] -> unichar (one checked argument)
+        var ch = msg_send[UInt16, "NSString", "characterAtIndex:"](s, UInt(0))
+        print("first char code:", Int(ch))
+
         # -[NSString UTF8String] -> const char *
         var back = msg_send[
             OpaquePointer[MutUntrackedOrigin], "NSString", "UTF8String"
