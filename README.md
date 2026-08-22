@@ -12,6 +12,14 @@ hardware upstream never targeted:
   low-level IR (AIR) — the same path the upstream compiler uses for
   Apple Silicon GPUs
 
+![Mojo Mandelbrot on the Radeon Pro Vega II](spikes/mandelbrot/mandelbrot.png)
+
+*A native macOS app in Mojo: a live-zooming Mandelbrot at 60fps where both the
+escape iteration and the colour are Mojo kernels on the Vega II — no shader
+anywhere — presented through an NSWindow whose every AppKit and Metal call is
+type-checked against the SDK at compile time. See
+[`spikes/mandelbrot/`](spikes/mandelbrot/).*
+
 **Mojo only.** This fork covers the Mojo compiler, standard library,
 `DeviceContext` GPU runtime, and the open `max/kernels` library.
 The MAX Engine (graph compiler, `libmax`, Python inference stack) is

@@ -1,5 +1,11 @@
 # Cocoa Mandelbrot
 
+![Mojo Mandelbrot running on the Radeon Pro Vega II](mandelbrot.png)
+
+*Live on the 2019 Intel Mac Pro: seahorse valley at 60fps, every pixel and
+every colour computed by a Mojo kernel on the AMD Radeon Pro Vega II through
+this fork's AIR backend — no shader anywhere in the pipeline.*
+
 A native macOS app written entirely in Mojo — the Mac answer to the Windows
 Direct3D mandelbrot. Every pixel is computed by a Mojo kernel on the AMD Radeon
 Pro Vega II (through this fork's AIR backend); the frame is handed to a
