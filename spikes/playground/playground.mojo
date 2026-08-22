@@ -793,8 +793,29 @@ def main() raises:
         g_window()[] = win.addr()
         var content = msg_send[ObjCObject, "NSWindow", "contentView"](win)
 
-        # Editor above, output below.
+        # Editor above, output below, with a draggable divider between them.
+        # NSSplitView owns the geometry from here: it lays the panes out, drags
+        # the divider, and resizes them with the window.
         comptime out_h = WIN_H * (1.0 - EDITOR_FRAC)
+        var split = msg_send[
+            ObjCObject, "NSSplitView", "alloc", is_class=True
+        ](ObjCClass.lookup["NSSplitView"]().as_object())
+        split = msg_send[ObjCObject, "NSSplitView", "initWithFrame:"](
+            split, CGRect(CGPoint(0.0, 0.0), CGSize(WIN_W, WIN_H))
+        )
+        # Horizontal divider (panes stacked vertically) with the thin style.
+        _ = msg_send[ObjCObject, "NSSplitView", "setVertical:"](split, False)
+        _ = msg_send[ObjCObject, "NSSplitView", "setDividerStyle:"](
+            split, Int(2)  # NSSplitViewDividerStyleThin
+        )
+        # Remember where the user left the divider, across launches.
+        _ = msg_send[ObjCObject, "NSSplitView", "setAutosaveName:"](
+            split, nsstring(String("PlaygroundSplit")).ptr()
+        )
+        _ = msg_send[ObjCObject, "NSView", "setAutoresizingMask:"](
+            split, Int(18)
+        )
+
         var editor = make_text_view(
             CGRect(CGPoint(0.0, 0.0), CGSize(WIN_W, WIN_H * EDITOR_FRAC)),
             True,
@@ -805,9 +826,7 @@ def main() raises:
         g_editor()[] = editor.addr()
         var editor_scroll = scroll_wrapping(
             editor,
-            CGRect(
-                CGPoint(0.0, out_h), CGSize(WIN_W, WIN_H * EDITOR_FRAC)
-            ),
+            CGRect(CGPoint(0.0, 0.0), CGSize(WIN_W, WIN_H * EDITOR_FRAC)),
         )
 
         var output = make_text_view(
@@ -818,12 +837,20 @@ def main() raises:
             output, CGRect(CGPoint(0.0, 0.0), CGSize(WIN_W, out_h))
         )
 
-        _ = msg_send[ObjCObject, "NSView", "addSubview:"](
-            content, editor_scroll.ptr()
+        # Order matters: first subview is the top pane.
+        _ = msg_send[ObjCObject, "NSSplitView", "addSubview:"](
+            split, editor_scroll.ptr()
+        )
+        _ = msg_send[ObjCObject, "NSSplitView", "addSubview:"](
+            split, output_scroll.ptr()
         )
         _ = msg_send[ObjCObject, "NSView", "addSubview:"](
-            content, output_scroll.ptr()
+            content, split.ptr()
         )
+        # Place the divider (autosave overrides this on later launches).
+        _ = msg_send[
+            ObjCObject, "NSSplitView", "setPosition:ofDividerAtIndex:"
+        ](split, WIN_H * EDITOR_FRAC, Int(0))
 
         _ = msg_send[ObjCObject, "NSTextView", "setString:"](
             editor, nsstring(String(STARTER)).ptr()
