@@ -189,7 +189,48 @@ namespace {
 //   - GEP no-wrap flags (LLVM 19) survive into AIR and break the driver's
 //     GCN compiler
 // Standard downgrade practice, cf. Julia's llvm-downgrade.
+// `poison` (LLVM 12) is newer than the AMD Metal plugin's LLVM fork, which
+// emits none of its own; Apple's shader compiler crashes on modules that use
+// it. `undef` is the classic equivalent and is what older readers expect.
+llvm::Constant *depoison(llvm::Constant *c) {
+  if (llvm::isa<llvm::PoisonValue>(c))
+    return llvm::UndefValue::get(c->getType());
+  auto *agg = llvm::dyn_cast<llvm::ConstantAggregate>(c);
+  if (!agg)
+    return c;
+  bool changed = false;
+  llvm::SmallVector<llvm::Constant *, 8> elems;
+  for (unsigned i = 0, e = agg->getNumOperands(); i != e; ++i) {
+    llvm::Constant *elem = agg->getOperand(i);
+    llvm::Constant *fixed = depoison(elem);
+    changed |= fixed != elem;
+    elems.push_back(fixed);
+  }
+  if (!changed)
+    return c;
+  if (llvm::isa<llvm::ConstantVector>(agg))
+    return llvm::ConstantVector::get(elems);
+  if (auto *at = llvm::dyn_cast<llvm::ArrayType>(agg->getType()))
+    return llvm::ConstantArray::get(at, elems);
+  if (auto *st = llvm::dyn_cast<llvm::StructType>(agg->getType()))
+    return llvm::ConstantStruct::get(st, elems);
+  return c;
+}
+
+void downgradePoison(llvm::Module &module) {
+  for (llvm::Function &fn : module)
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb)
+        for (llvm::Use &use : inst.operands())
+          if (auto *c = llvm::dyn_cast<llvm::Constant>(use.get())) {
+            llvm::Constant *fixed = depoison(c);
+            if (fixed != c)
+              use.set(fixed);
+          }
+}
+
 void downgradeModernConstructs(llvm::Module &module) {
+  downgradePoison(module);
   for (llvm::Function &fn : module) {
     for (llvm::BasicBlock &bb : fn) {
       for (llvm::Instruction &inst : llvm::make_early_inc_range(bb)) {

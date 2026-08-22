@@ -966,6 +966,14 @@ def log[
         comptime ln2 = 0.69314718055966295651160180568695068359375
         return ln2 * log2(x)
 
+    # VEGA-FORK: Metal provides log natively (`air.log.f32`/`.v4f32`); the
+    # generic polynomial expands to vector select/compare shapes that crash
+    # the AMD Metal backend, and the intrinsic is better code besides.
+    comptime if is_apple_gpu() and dtype == DType.float32:
+        return llvm_intrinsic["llvm.air.log", type_of(x), has_side_effect=False](
+            x
+        )
+
     return _log_base[27](x)
 
 
