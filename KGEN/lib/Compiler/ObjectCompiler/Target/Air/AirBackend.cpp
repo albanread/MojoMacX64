@@ -446,12 +446,56 @@ void mangleAirOps(llvm::Module &m) {
   }
 }
 
+// Device pointers captured in a kernel's packed argument buffer are loaded
+// out of it as raw 64-bit addresses, i.e. as GENERIC (AS0) pointers. Apple
+// silicon tolerates that — flat addressing — but AMD's Metal plugin must
+// resolve every access to a buffer *resource descriptor* and null-derefs on
+// a generic pointer: MTLCompilerService dies with SIGSEGV in
+// ILTargetLowering::getPtrRsrcId <- getRsrcDescNode <- LowerSTORE, which the
+// runtime reports only as "Compilation failed due to an interrupted
+// connection: XPC_ERROR_CONNECTION_INTERRUPTED".
+//
+// Retype such loads to device AS1 and propagate through their use graph.
+void deviceizeCapturedPointers(llvm::Module &m) {
+  llvm::LLVMContext &c = m.getContext();
+  for (llvm::Function &fn : m) {
+    if (fn.isDeclaration())
+      continue;
+    llvm::SmallVector<llvm::Instruction *, 8> sources;
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb) {
+        auto *resultTy = llvm::dyn_cast<llvm::PointerType>(inst.getType());
+        if (!resultTy || resultTy->getAddressSpace() != 0)
+          continue;
+        // A pointer loaded out of the constant argument buffer (AS2) or out
+        // of device memory (AS1) is itself a device pointer...
+        if (auto *ld = llvm::dyn_cast<llvm::LoadInst>(&inst)) {
+          auto *srcTy = llvm::dyn_cast<llvm::PointerType>(
+              ld->getPointerOperand()->getType());
+          if (srcTy && (srcTy->getAddressSpace() == 2 ||
+                        srcTy->getAddressSpace() == 1))
+            sources.push_back(ld);
+        }
+        // ...and so is one extracted from a capture struct that was loaded
+        // as a single aggregate, which is how Mojo packs kernel captures.
+        if (llvm::isa<llvm::ExtractValueInst>(&inst))
+          sources.push_back(&inst);
+      }
+    for (llvm::Instruction *src : sources) {
+      src->mutateType(llvm::PointerType::get(c, 1));
+      llvm::SmallVector<llvm::Value *, 16> retype{src};
+      propagatePointerAS(retype);
+    }
+  }
+}
+
 // Full-module AIR legalization.
 llvm::Error legalizeModule(llvm::Module &m) {
   llvm::LLVMContext &c = m.getContext();
   m.setTargetTriple(llvm::Triple(kAirTriple));
   mangleAirOps(m);
   remapAddressSpaces(m);
+  deviceizeCapturedPointers(m);
 
   // Metal has no 64-bit floats anywhere (MSL has no `double`); emitting the
   // type produces bitcode the AIR reader rejects opaquely. Diagnose cleanly.

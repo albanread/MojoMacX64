@@ -34,12 +34,12 @@ test_has_nvidia_gpu         # vendor-identity assertion
 # NOTE test_constant_memory is nvidia-only upstream but PASSES on this fork.
 # Open, not yet root-caused (compile clean, driver reports "Compilation
 # failed due to an interrupted compilation" at pipeline creation):
-test_fast_div               # FastDiv magic-number kernels
-test_random                 # device RNG kernels
+test_fast_div               # AMD plugin SIGSEGV, getPtrRsrcId<-LowerSTORE (see journal)
+test_random                 # same crash class
 test_static_layout_capture_argcount  # runtime value mismatch (-1.0 vs 1.0)
+test_function_mts           # now compiles+runs after deviceization; wrong values
 # Disproved for these: LLVM-intrinsic availability (driver handles llvm.umax
 # natively), i128 (comptime-folded host-side), GEP no-wrap flags (fixed).
 # SDK package gaps (kernels-library packages not yet in vega-sdk/pkg, not bugs):
-test_function_mts           # needs 'extensibility' package
-test_wmma                   # needs 'linalg' package (also nvidia_gpu upstream)
+test_wmma                   # needs '_rocblas' (AMD library binding); nvidia_gpu upstream
 test_kernel_with_list       # device-side malloc/free (Metal has no device heap); PTX-specific CHECKs
