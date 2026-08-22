@@ -2234,6 +2234,32 @@ struct ConvertPOPGlobalAlloc : public ConvertSymbolOpToLLVM<GlobalAllocOp> {
     b.clearInsertionPoint();
     auto arrayType = LLVM::LLVMArrayType::get(
         elementType, cast<IntegerAttr>(op.getCount()).getInt());
+
+    // VEGA-FORK: a fixed-name host global (not GPU_SHARED, no initializer) is a
+    // NAMED global -- like a C file-scope static -- so multiple ops with the
+    // same name must resolve to one storage location. symtab.insert() renames
+    // on collision (name -> name_0, _1, ...), which silently gave each call
+    // site its own slot and defeated any use as a shared cache. Reuse an
+    // existing compatible global for the name instead.
+    bool sharedByName =
+        op.getMemoryType() != POP::GlobalAllocAddressSpace::GPU_SHARED &&
+        !op.getInitializer();
+    if (sharedByName) {
+      if (auto existing = symtab.lookup<LLVM::GlobalOp>(name)) {
+        if (existing.getGlobalType() == arrayType) {
+          b.setInsertionPoint(op);
+          auto opaquePtrType =
+              LLVM::LLVMPointerType::get(getContext(), addrSpace);
+          auto ptr = LLVM::AddressOfOp::create(b, op.getLoc(), existing);
+          b.replaceOpWithNewOp<LLVM::BitcastOp>(
+              op,
+              LLVM::LLVMPointerType::get(opaquePtrType.getContext(), addrSpace),
+              ptr);
+          return success();
+        }
+      }
+    }
+
     auto global = LLVM::GlobalOp::create(
         b, op.getLoc(), arrayType,
         /*isConstant=*/false, LLVM::Linkage::Internal, name,

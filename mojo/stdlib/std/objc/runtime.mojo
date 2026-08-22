@@ -30,22 +30,41 @@ struct SEL(TrivialRegisterPassable):
         return _RawPtr(unsafe_from_address=self._addr)
 
 
+@always_inline
+def _sel_slot[name: StaticString]() -> Pointer[Int, MutUntrackedOrigin]:
+    """A persistent, per-selector global holding the resolved SEL (0 until
+    first resolved). Deduped by name in the KGEN lowering, so every call site
+    for a given selector shares one slot -- a single load, not a hash lookup."""
+    comptime slot_name = StaticString(
+        _get_kgen_string["vega.objc.selslot/", name]()
+    )
+    return Pointer[Int, MutUntrackedOrigin](
+        _mlir_value=__mlir_op.`pop.global_alloc`[
+            name=_get_kgen_string[slot_name](),
+            count=Int(1).__mlir_index__(),
+            _type=Pointer[Int, MutUntrackedOrigin]._mlir_type,
+            alignment=Int(8).__mlir_index__(),
+        ]()
+    )
+
+
+@always_inline
 def sel[name: StaticString]() -> SEL:
     """Register (once) and return the selector for `name`.
 
-    `sel_registerName` interns the name in the runtime, but calling it on every
-    message send still costs a hash lookup; cache the result in a process
-    global keyed by the name so each selector is resolved exactly once.
+    The resolved SEL is cached in a per-selector global slot, so after the
+    first send the cost is one load and a branch-predicted-away null check --
+    no hash lookup, no runtime registry.
     """
-    comptime key = StaticString(_get_kgen_string["vega.objc.sel/", name]())
-    var cached = _get_global_or_null(key)
-    if cached:
-        return SEL(Int(cached.value()))
-    var registered = external_call["sel_registerName", _RawPtr](
-        name.unsafe_ptr()
+    var slot = _sel_slot[name]()
+    var cached = slot[]
+    if cached != 0:
+        return SEL(cached)
+    var registered = Int(
+        external_call["sel_registerName", _RawPtr](name.unsafe_ptr())
     )
-    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](key, registered)
-    return SEL(Int(registered))
+    slot[] = registered
+    return SEL(registered)
 
 
 @fieldwise_init
