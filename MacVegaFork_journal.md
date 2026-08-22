@@ -1,0 +1,242 @@
+# MacVegaFork — port journal
+
+Mojo on an Intel Mac Pro, driving a Radeon Pro Vega II through Metal AIR.
+Running record of what was done, what was learned, and what it cost. Newest
+entries at the bottom. The design lives in [PORT_DESIGN.md](PORT_DESIGN.md);
+this file is what actually happened.
+
+Machine: Mac Pro (2019), 24-core Xeon, 192 GB, macOS 26.3.1 (Tahoe).
+GPUs: Radeon Pro Vega II 32 GB (slot 1, the target), Radeon Pro 580X 8 GB
+(slot 3, the control group). Fork: `modular/modular @ 577b6b839e`, frozen
+forever, fresh git history, never rebases.
+
+Sister projects, one day ahead of us and heavily plundered:
+[WINMOJOX64Blackwell](https://github.com/albanread/WINMOJOX64Blackwell)
+(Windows x64 + NVIDIA, journals `PORT-JOURNAL.md` / `DRAGONMAX-JOURNAL.md`)
+and [CocoaBaseMCP](https://github.com/albanread/CocoaBaseMCP) (SQLite mirror
+of the Objective-C surface). Both cloned as siblings under `/Volumes/S/`.
+
+---
+
+## 2026-08-21 — Recon: what the fork point actually contains
+
+Cloned upstream (1.1 GB, 720k objects), surveyed, then cut fresh history
+(`eb55c88`, 20:33; `.git` shrank 830 MB → 96 MB).
+
+**The two facts everything else follows from:**
+
+1. **The compiler is fully open and self-contained.** `KGEN/` carries the
+   parser, elaborator, ObjectCompiler, ORC JIT, LSP, LLDB; `tools/mojo` the
+   driver. LLVM builds from source, and its backend list
+   (`bazel/public-patches/llvm_project.bzl`) already includes **X86**.
+   `tools/mojo` and `KGEN` have **no dependency on the binary wheel** —
+   prebuilts attach only to runtime-linked targets via `bazel/api.bzl:128`.
+
+2. **The device runtime is not open.** The Mojo stdlib calls a 137-symbol C
+   ABI (`AsyncRT_*`, every signature documented in comments at the call
+   sites) implemented by wheel-only libraries — `AsyncRTMojoBindings`,
+   `MGPRT` and friends — and on macOS the build selects the **arm64** wheel
+   unconditionally (`bazel/modular_wheel_repository.bzl:213-217`). No
+   x86-64-darwin wheel exists or ever will.
+
+Also found on day one: an in-tree how-to (`mojo/stdlib/docs/adding-gpu-targets.md`),
+Apple Metal targets M1–M5 in `mojo/stdlib/std/gpu/host/info.mojo` (triple
+`air64-apple-macosx`, features `+metal3_2,+air2_7_0`), Metal frame capture
+support, and `isMetalTriple()` hooks throughout the compiler.
+
+**Wrong belief, held for several hours:** "the Metal backend already exists
+in-tree." See the next entry.
+
+## 2026-08-21 — Sister-port review: four corrections and a blueprint
+
+Reviewed WINMOJOX64Blackwell's 21 commits and both journals. It is the same
+play (frozen fork of the same monorepo, unsupported platform, closed runtime
+reimplemented) one platform over, and it changed our design in four places:
+
+1. **The AIR backend is not in open source.** Their DragonMax journal traced
+   the per-triple registries; re-checking *our* tree confirmed only the
+   `Host` trio exists (`KGEN/lib/Target/Host`, `KGENToLLVM/Target/Host`,
+   `ObjectCompiler/Target/Host`). The AIR *building blocks* are in-tree —
+   versioned bitcode writers (LLVM 17/19/21), `LLVMIRDowngradePass`,
+   `PointerRewriter` — but the backend that drives them is closed. So we
+   write an **AIR trio** (traits/lowering/backend), the same bounded shape
+   as their SPIR-V trio. Their traced offload flow
+   (`emitOffloadKernels` → per-kernel bytes in `CompiledFunctionInfo.asm` →
+   `AsyncRT_DeviceContext_loadFunction`) means **no packaging step exists to
+   build** — the kernel blob goes straight from backend to runtime.
+
+2. **The accelerator gate is open.** `--target-accelerator` is stored
+   verbatim and validated in the *stdlib's* `_all_targets` comptime list.
+   The closed vendor tables feed only `--print-supported-accelerators` help
+   text. And `isMaxInstalled()` defaults to **true** when no config exists
+   ("probably in bazel, pretend we have MAX").
+
+3. **Runtime bring-up practices, proven twice** (their `dragonrt` over
+   OpenCL, `nvptxrt` over the CUDA driver — 109 symbols, 2.9k lines, and a
+   **33-symbol subset reached a verified first kernel**): a headerless C
+   smoke test through `dlsym` only; `loadFunction` sniffing the blob so an
+   **MSL-source path** exists before the AIR trio does (a codegen bug and a
+   runtime bug can never be the same investigation); `uint32` launch dims;
+   and the runtime retaining buffers referenced by in-flight work — their
+   `__ownership_keepalive` test patch is the scar Mojo's ASAP destruction
+   leaves when the runtime borrows instead of retains.
+
+4. **Cocoa gets the `winkb` architecture, not a bindings generator.** Their
+   origin story: 35 hand-transcribed constants, 34 right, the 35th
+   (`STARTF_USESTDHANDLES` = 1, actually 0x100) failed *silently* for hours.
+   The fix was a generic comptime query param-expr in the elaborator over a
+   SQLite metadata DB — "a binding states a name and the compiler supplies
+   the rest"; an unknown name is a compile error, not a wrong answer. Our
+   §10 now adopts this as `cocoakb_query`, backed by **CocoaBaseMCP's**
+   `cocoa.sqlite` (libobjc runtime walk + BridgeSupport + POSIX signatures;
+   regenerated on this machine it carries **x86-64 truth by construction**).
+   One gap: its ABI-tier derivation covers AAPCS64; we add SysV x86-64 for
+   `objc_msgSend` / `_stret` / `_fpret` selection. Memory design (Strong/
+   Weak RAII, autoreleasepool scoping, weak-by-convention delegates,
+   `leaks --atExit` golden tests) is §10.3.
+
+Also adopted: their "Stop sending fork users upstream to report bugs" commit
+(our A12), their capability-diagnostics pattern (assert the architecture at
+the intrinsic; never let LLVM's "Cannot select" invite a bug report), and
+their license read — the MAX Community License attaches to *using Modular's
+SDK binaries or hosted platform*, so the fork's standing rule is **never
+pull or link the wheel**.
+
+## 2026-08-21 — S1: the hardware says yes (`f831f58`, 20:59)
+
+~300 lines of Objective-C (`spikes/s1-metal-smoke/`), run on both GPUs.
+Everything the design predicted, plus three surprises:
+
+| Predicted | Measured |
+|---|---|
+| wave64 | **64** — API `threadExecutionWidth` *and* empirical (`threads_per_simdgroup`, `simd_sum(1)`, 64-bit ballot popcount, `simd_shuffle_xor` all agree, both GPUs) |
+| discrete memory | `hasUnifiedMemory=NO`, managed storage works |
+| no `simdgroup_matrix` | correct — but it **compiles and fails at pipeline creation** with an opaque "SC compilation failure"; gate at compile time |
+| no `double` | correct — rejected at source compile |
+| MSL / features | runtime accepts **3.2** (validates `+metal3_2`); Vega II reports **Metal3 family** |
+| ~1 TB/s HBM2 | **830 GB/s** from a naive copy kernel (81% of peak — the ≥80% bandwidth target is real, day one) |
+| PCIe transfers | **12.0 GB/s** HtoD blit |
+
+Surprises: **bfloat compiles and builds pipelines** on both GCN cards
+(numerics unverified, stays gated — but cheaper than feared); a **3.5 GiB
+single-buffer cap** despite the 32 GiB working set (MetalRT must chunk); and
+no peer group — but the box has a second GCN GPU (the 580X, Mac2-tier,
+wave64) which passes everything except Metal3 family: a free control device.
+
+After Xcode 15.2 arrived, the offline leg passed too: a metallib built by
+Xcode's `metal` loads via `newLibraryWithURL` and builds pipelines on both
+GPUs. `air-objdump` on it gives the AIR trio its reference target:
+container `MetalLib`, arch `air64`, embedded triple
+**`air64-apple-macosx14.2.0`**, and the `air.*` metadata schema
+(`air.buffer`, `air.thread_position_in_grid`, `air.arg_type_name`,
+`air.max_device_buffers`, `air.compile.*`). macOS pin: provisionally Tahoe
+26 — S1 ran clean on it.
+
+## 2026-08-21 — S2: seven blockers between us and a compiler
+
+The build attempt, in the order the wall was hit. Each fix is one commit
+theme in `7361a23` (analysis passes, 21:15) and `e8d488b` (build completes,
+22:28).
+
+1. **`bazelw` itself is arm64-hardcoded** (`platform=darwin-arm64`). Patched
+   to arch-detect; buildbuddy's bazel 5.0.382 ships darwin-x86_64 and just
+   works.
+2. **A mode gate**: `--config=prebuilt-mojo` or `--config=build-mojo`.
+   Prebuilt can never exist here; `build-mojo` is now the fork default.
+3. **`tools/bazel` requires full Xcode** (rejects CommandLineTools, uses
+   `xcodebuild` metadata). Legitimate machine prep, not patched around.
+   Xcode 15.2 installed and selected.
+4. **`@clang-macos` is arm64-only** — a single Mach-O, no fat binary, and
+   there is no reverse Rosetta. Worse: official LLVM 22.1.4 releases ship
+   **macOS-ARM64 only**; the ecosystem has dropped Intel-mac binaries. So we
+   built our own: LLVM 22.1.4 clang+lld+compiler-rt, X86 target only,
+   ~35 minutes on 24 cores (recipe in `spikes/toolchain-build-run.sh`),
+   packaged in the layout `clang.BUILD` expects and pinned by sha256 via a
+   `file://` URL. 476 MB, ours forever.
+5. **SDK version skew, disguised as a protobuf bug.** `port.cc:120: variable
+   does not have a constant initializer` — constinit `std::string` at C++20
+   fails against Xcode 15.2's SDK 14.2 libc++ under clang 22, compiles clean
+   against the CommandLineTools SDK 26. Repro'd both ways in isolation
+   before touching the build. `macos_sysroot_repository.bzl` now pins the
+   CLT `MacOSX26.sdk` (falls back to xcrun).
+6. **Two more arm64 prebuilts, found at link time**: `@llvm-ifs`'s mac
+   `llvm-readtapi.stripped` ("Bad CPU type in executable" — plus a hardcoded
+   `-arch arm64` in `linker-driver.sh`), and `@gperftools-macos`'s
+   `libtcmalloc_minimal.a` (ld64.lld warned, then 38 undefined `tc_*`
+   symbols). Both replaced with local x86-64 builds, same `file://` + sha
+   pattern as the toolchain.
+7. Result: **~9,000 actions, exit 0.** `bazel-bin/KGEN/tools/mojo/mojo` is a
+   165 MB x86-64 Mach-O reporting `Mojo 1.1.0.dev0`.
+
+**The subtle one, worth its own paragraph.** With the compiler built, the
+stdlib wouldn't: `No matching toolchains found for @@rules_mojo+//:toolchain_type`
+— despite the source-built mojo toolchain being registered first and
+carrying no platform constraints at all. The catch: it is gated on
+`target_settings = ["//:use_prebuilt_mojo_toolchain_disabled"]`, and
+**exec-configuration transitions reset build settings to their defaults**.
+The flag's default was `True`, so in every `[for tool]` configuration the
+gate failed and the toolchain vanished — invisibly, because the normal
+target configuration (where `--config=build-mojo` applies) resolved fine.
+The fix is one word: `build_setting_default = False`, which on this platform
+is also simply the truth. File under: *config_setting-gated toolchains and
+exec transitions do not mix unless the default is the mode you mean.*
+
+## 2026-08-21/22 — Phase 1 core: hello, Mojo (`a2a7041`, 22:35)
+
+The stdlib (3,681 Mojo files) compiled to `std.mojoc` by our own compiler on
+the first try — zero Mojo-language-level failures in the port so far; every
+single blocker has been build-system or binary-artifact plumbing.
+
+Driver wiring, learned from `KGEN/lib/Support/Configuration.cpp`: config
+keys map to `MODULAR_MOJO_MAX_*` environment variables (`.compilerrt_path` ↔
+`MODULAR_MOJO_MAX_COMPILERRT_PATH`, `.import_path` ↔
+`MODULAR_MOJO_MAX_IMPORT_PATH`, defaults resolved against a package root as
+`lib/libKGENCompilerRTShared.dylib` etc.). `vega-sdk/bin/mojo` wraps the
+bazel artifacts with exactly those variables. Verified:
+
+```
+$ vega-sdk/bin/mojo run hello.mojo      # ORC JIT, x86-64: works
+$ vega-sdk/bin/mojo build hello.mojo    # native Mach-O: runs
+```
+
+Formerly-wheel-only libraries — `MSupportGlobals`, `AsyncRTRuntimeGlobals`,
+`KGENCompilerRTShared` — all built and linked **from in-tree source**. The
+closed-wheel problem is now confined to exactly where the design said it
+lived: the GPU device runtime (`AsyncRTMojoBindings`/`MGPRT`), which is
+Phase 2's job to replace.
+
+Still open in Phase 1: the CPU test suite needs the real A4 fix (pycross has
+no `x86_64-apple-darwin` environments — python-interop tests only), a REPL
+check, and two cosmetics (crashpad-handler warning → A12 rebrand; an ld
+warning from linking SDK-26 objects at min-os 14.2).
+
+### Traps collected so far, for whoever reads this next
+
+- **"macos" without an arch suffix means arm64.** Every Modular macOS
+  artifact (`clang-macos`, `llvm-ifs` `tools/mac`, `gperftools-macos`,
+  `uv_darwin_aarch64`) is single-arch, and the failure surfaces at *use*
+  time ("Bad CPU type", undefined symbols), never at fetch time.
+- **Exec transitions reset build settings to defaults.** Gated toolchains
+  disappear only in `[for tool]` configurations. Make the default the truth.
+- **New clang + old SDK libc++ is a real compatibility axis.** It presents
+  as a third-party code bug (protobuf's constinit string), not as a
+  toolchain error. Repro in isolation before patching the dependency.
+- **Wrap builds you background in an exit-code sentinel.** `cmd | tail`
+  reports tail's exit status; every long build here writes
+  `SOMETHING-EXIT:$?` and the watcher greps for it.
+- **zsh eats backticks in double-quoted `git commit -m` strings.** One
+  commit message lost half a sentence to command substitution before this
+  was noticed. Single-quote commit messages.
+- The pipeline of fixes ran: patch → relaunch → next wall, seven times, with
+  ~2–6 minutes per round thanks to bazel's action cache. Background the
+  build, watch for the sentinel, and fix while it's still warm.
+
+### Where this leaves the plan
+
+Phase 0 spikes: S1 done (hardware verified beyond the design's hopes), S4's
+reference artifact captured, S2 done a phase early. Phase 1: core met in one
+evening against a "weeks" estimate — the sister port's journals deserve a
+share of the credit for pre-clearing the traps. Next: **Phase 2**, the
+MetalRT C ABI over the in-tree `CPUDevice` (existing DeviceContext tests as
+the spec), then `MetalDevice`, then the AIR trio against the captured
+reference.
