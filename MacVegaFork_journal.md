@@ -1652,3 +1652,39 @@ these numbers grepped `eval time` out of the server log, which also matches `pro
 time`, silently interleaving prefill and generation figures in the same column. The values
 looked plausible — that is precisely the danger. Anchor the pattern (`\|\s+eval time`)
 rather than trusting a substring to be unambiguous.
+
+## 2026-08-22 — Designing the Mojo Mac Playground (editor + REPL, no terminal)
+
+The user's next ask: the lldb REPL is "remarkably un-Mac-like" — build a native
+Cocoa editor+REPL in Mojo. Design written to `MOJO_MAC_PLAYGROUND_DESIGN.md`.
+The research that shaped it:
+
+**The engines already exist, open, in this tree.** `mojo-lsp-server` builds
+(130 MB) and answers `initialize` with completion, hover, definition,
+references, rename, document symbols, semantic tokens, signature help, inlay
+hints and code actions — editor intelligence is free. `mojo-jupyter-executor`
+builds: a persistent-state cell kernel (`MojoKernel::startExecution(cell,
+expr, storeHistory)`) — the REPL engine behind Mojo notebooks. `lldb-dap` is
+buildable from the vendored LLVM, and the in-tree `MojoLLDB` plugin's own docs
+name lldb-dap as their primary integration target.
+
+**The question "can a user work inside a running program?" conflates two
+things**, and the design gives them separate engines behind one UI: a REPL
+(persistent evaluation — the jupyter executor) and a debugger (stop, inspect,
+evaluate in-frame — lldb-dap). Both are lldb's expression engine underneath,
+which is *why* upstream's REPL is lldb; the un-Mac-like part was the terminal,
+not the engine. Xcode is the precedent — lldb behind a Cocoa face.
+
+**Cocoa → Mojo callbacks work** (`spikes/s5-cocoakb/callback_probe.mojo`): a
+class allocated at runtime, `class_addMethod` with a Mojo `abi("C")` IMP, and
+the database supplying the `v@:@` encoding. The first attempt failed for the
+*right* reason — `send` refused my made-up `doAction:` because the database
+doesn't know it — so the probe uses a real delegate selector. Every AppKit
+selector the design needs resolves: the "missing" ones are on superclasses
+(inheritance walk) or a private subclass (selector-keyed `send`).
+
+**One honest open item.** The executor launches but never prints its prompt,
+with or without the MojoLLDB plugin path wired — the signature of macOS's
+debugserver/entitlement requirement for a non-Apple-signed lldb. Filed as P2
+wiring with a fallback REPL (accumulate cells, re-run) that needs nothing.
+The design is not blocked on it; P0+P1 (editor + run) use only `mojo run`.
