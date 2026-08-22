@@ -908,3 +908,60 @@ can be written for each in turn, but it is a losing race; **bisecting the
 Mojo source with our own compiler was far cheaper** and is what actually
 found this. Worth remembering: prefer bisecting at the level where your
 own toolchain still works.
+
+## 2026-08-22 — test_random solved: it was Mojo's `log`, not the encoder
+
+**26 passing (+1), no regressions.** The constant-encoding hypothesis from
+the previous entry was **wrong**, and checking it properly is what found the
+real answer.
+
+Correction first: NaN/Inf vector constants *are* encoded correctly, as `DATA`
+records, byte-identical in form to Apple's. The earlier "only 4 FLOAT
+records" reading was a misreading — **vector constant elements are encoded as
+`DATA`, not as individual `FLOAT` records**, so counting `FLOAT` records
+against float literals in the text IR compares two different things. A
+genuine dropped-constant bug would look different.
+
+What actually found it: comparing **bitstream record-type inventories**
+between our module and an Apple-compiled equivalent MSL kernel.
+
+```
+record types only in ours: INST_CMP2, INST_VSELECT, STRUCT_ANON, UNDEF
+```
+
+Apple's `log` is a single `air.log.v4f32` call. **Mojo's is an inline
+polynomial**, and its special-case handling expands into vector
+compare/select shapes the AMD Metal backend cannot lower. `std.math.log` had
+a fast path for NVIDIA (`ln2 * log2(x)`) and fell through to the generic
+polynomial for everyone else — including Metal, which provides `log`
+natively. Added the Apple-GPU path; `test_random` passes.
+
+Also fixed along the way, and kept because it is correct regardless:
+**`poison` (LLVM 12) is newer than the AMD plugin's LLVM fork** and Apple
+emits none of it. `MetalAIRPass` now downgrades `poison` → `undef`,
+recursing into constant aggregates. It was not this bug's trigger, but it is
+the same class as `freeze`/`fneg`/GEP-flags and would have bitten later.
+
+### The lesson worth keeping
+
+Three times today the crash location was a lie. `getPtrRsrcId ← LowerSTORE`
+pointed at stores, and the causes were, in order: a capture struct's pointers
+having no resource descriptor, then nothing at all (already fixed), then a
+`log` polynomial hundreds of instructions upstream of the store that merely
+*consumed* its result. **On this backend, treat the crashing instruction as
+"where the DAG died", not "what is wrong".** The reliable technique is not
+reading the stack — it is:
+
+1. bisect at the level where your own toolchain still works (Mojo source
+   here, never the `air-as` text round-trip), then
+2. diff the **record-type inventory** of your bitstream against an Apple
+   compilation of the equivalent kernel, and investigate every record type
+   that is yours alone.
+
+That comparison takes one command and would have found this in minutes:
+
+```
+llvm-bcanalyzer --dump ours.air  | grep -oE '<[A-Za-z_0-9]+' | sort -u > ours.txt
+llvm-bcanalyzer --dump apple.air | grep -oE '<[A-Za-z_0-9]+' | sort -u > apple.txt
+comm -23 ours.txt apple.txt
+```

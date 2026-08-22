@@ -412,29 +412,37 @@ Two fixups recorded in Modular's writer, both worth replicating:
   `CE_EXTRACTELT`, `CE_INSERTELT`). Miss one and you get a type-table mismatch
   far from the cause.
 
-### Vector/splat constants may never be written
+### Use Metal's math functions; don't ship a polynomial
 
-> **`MEASURED`** — cost a full day of misdirection, because it presents as a
-> crash in something else entirely.
+> **`MEASURED`** — and the crash location lied about this one for a day.
 
-Symptom: a kernel using NaN/Inf constants inside vectors (e.g. anything that
-goes through a `log` implementation's special-case handling) crashes the AMD
-backend in `LowerSTORE` — on the store that *consumes* the value. Address
-spaces, provenance, symbol names, attributes and inlining are all irrelevant.
+Symptom: a kernel using `log` crashes the AMD backend in `LowerSTORE` — on a
+store hundreds of instructions downstream that merely consumes the result.
 
-Diagnosis: `llvm-bcanalyzer` the emitted module and **count `FLOAT` records
-against the float constants in your text IR.** Ours carried `+inf`, `+qnan`,
-`-2.0`, `-0.0` and more in the IR, but only the handful of scalars appeared
-in the bitstream — every float constant living inside a **vector/splat
-constant** was silently dropped. The reader then reconstructs garbage.
+Cause: a portable math library that implements `log` as an **inline
+polynomial** expands into vector compare/select shapes the AMD Metal backend
+cannot lower. Apple's own `log` is a single `air.log.v4f32` call. Metal
+provides the whole math family natively; call it. (Our stdlib had a fast path
+for NVIDIA and fell through to the polynomial for everyone else — worth
+checking whether yours does the same.)
 
-Recent LLVM changed how splat vector constants are represented (which is also
-why `air-as` cannot parse the `splat (…)` textual form). A vendored
-enumerator written against an older LLVM will not walk them, so those
-elements never get value IDs and never get written — the same class of bug as
-the missing switch-case values above. Audit your `ValueEnumerator` fork
-against upstream for **every** constant kind, not just the ones your tests
-happened to exercise.
+**The diagnostic that finds this class in one command** — diff the bitstream
+record-type inventory against an Apple compilation of the equivalent kernel,
+and investigate every record type that is yours alone:
+
+```sh
+llvm-bcanalyzer --dump ours.air  | grep -oE '<[A-Za-z_0-9]+' | sort -u > ours.txt
+llvm-bcanalyzer --dump apple.air | grep -oE '<[A-Za-z_0-9]+' | sort -u > apple.txt
+comm -23 ours.txt apple.txt        # -> INST_VSELECT, INST_CMP2, ...
+```
+
+Two things this exercise also settled, worth recording so nobody repeats
+them: **vector constant elements are encoded as `DATA` records, not
+individual `FLOAT` records**, so counting `FLOAT` records against float
+literals in the text IR compares two different things and will fake a
+dropped-constant bug. And **`poison` (LLVM 12) is newer than the AMD plugin's
+LLVM fork** — Apple emits none of it — so downgrade `poison` → `undef`
+(recursing into constant aggregates) alongside `freeze` and `fneg`.
 
 ### Bugs we found in the vendored writer itself
 
