@@ -122,9 +122,47 @@ not the same thing, even though it is indistinguishable in the IR.
 
 **Implication:** if your frontend packs kernel captures into a flat argument
 blob (most do), you need `MTLArgumentEncoder`-built argument buffers, or you
-must hoist captured pointers into real kernel buffer parameters — which
-requires the host and the compiler to agree on binding indices. Budget for
-this before porting a closure-heavy kernel library.
+must hoist captured pointers into real kernel buffer parameters.
+
+#### A hoisting protocol that works
+
+> **`MEASURED`** — this fixed kernels that had been crashing the shader
+> compiler outright.
+
+The obstacle is that the *host* usually cannot know which capture bytes hold
+device addresses (a frontend that treats captures as opaque values has no
+such record), while the *compiler* can see it plainly in the IR. So let the
+compiler tell the runtime, through a channel that survives compilation:
+
+1. **Compiler.** For each device pointer extracted from the capture struct,
+   append a real kernel buffer parameter, and name it to encode where the
+   address lives — e.g. `__vega_cap_<srcArg>_<byteOffset>`. Give it normal
+   `air.buffer` argument metadata with `air.location_index` = its parameter
+   index.
+2. **Runtime.** Create the pipeline with `MTLPipelineOptionArgumentInfo` and
+   read `reflection.bindings`. **Parameter names survive into reflection** —
+   verified on Vega II, including synthetic ones. Parse them back into a
+   table of *(bufferIndex, srcArg, byteOffset)*.
+3. **At launch.** For each entry, read 8 bytes from the packed argument at
+   that offset, resolve the address to its owning `MTLBuffer` (keep an
+   interval map of allocations keyed by `gpuAddress`), and `setBuffer` it at
+   `bufferIndex`.
+
+The pointer is then a bound resource with a descriptor behind it, and
+`getPtrRsrcId` resolves. **Probe step 2 before building steps 1 and 3** —
+the whole design rests on reflection preserving names.
+
+Three traps worth naming, all hit while implementing this:
+
+- Rewiring uses to a new device-space parameter leaves the old
+  AS0-derived users behind; **propagate the address space through the use
+  graph**, because a `bitcast` cannot cross address spaces.
+- If an earlier pass already inserted an `addrspacecast` on the pointers
+  you are about to hoist, you are left with an **invalid same-address-space
+  cast**. Hoisting supersedes such casts — do not do both.
+- Once a module is malformed enough that `llvm-dis` refuses it, you have no
+  way to see what you emitted. **Dump textual IR from inside the backend**,
+  before and after the pass pipeline.
 
 Two provenance notes that cost us time:
 

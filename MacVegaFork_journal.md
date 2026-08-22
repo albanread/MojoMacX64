@@ -750,3 +750,66 @@ The `addrspacecast` work is kept regardless: `inttoptr` in device code is a
 provenance bug on any target, and the AS1 typing is correct per the AIR
 address-space spec. No regressions (warp64, ballot64, shuffle, prefix_sum,
 vecadd, add_constant, sum, laneid, constant_memory, launch_binary all pass).
+
+## 2026-08-22 — Hoisting lands: captured pointers become bound resources
+
+**25 passing (+2), no regressions.** `test_fast_div` and `test_function_mts`
+both pass — two kernels that crashed Apple's shader compiler all session.
+
+The protocol, end to end:
+
+- **Compiler.** Every device pointer `extractvalue`d out of a by-value
+  capture struct becomes a real kernel buffer parameter, named
+  `__vega_cap_<srcParam>_<byteOffset>` and carrying its own `air.buffer`
+  metadata. Offsets come from walking the aggregate layout by hand
+  (`getIndexedOffsetInType` wants `Value` indices; `extractvalue` carries
+  constant `unsigned`s).
+- **Runtime.** Pipelines build with `MTLPipelineOptionArgumentInfo`;
+  reflection parameter names are parsed back into a hoist table; at launch
+  each entry reads the address out of the recorded packed argument at the
+  recorded offset, resolves it in the allocation registry, and binds the
+  owning buffer with `setBuffer`.
+
+The design is self-describing — the compiler tells the runtime, through
+parameter names, which capture bytes hold which binding — which matters
+because **Mojo itself does not know**: its own comment says *"captures are
+raw values, never device buffers"*, and the `_buffers` handle list only
+covers *passed* `DevicePassable` args. For an elementwise kernel everything
+is captured, so `_buffers` is empty and the host has nothing to offer. The
+compiler knows, and VegaRT already had the address→buffer registry, so the
+information exists on both ends — it just needed a channel.
+
+**Verify the linchpin before building on it.** The whole design collapses if
+reflection drops parameter names, so that was probed first: a hand-written
+MSL kernel with a literal `__vega_cap_16` argument, compiled and reflected on
+the Vega II. Names survive. Only then was any of the above written.
+
+Three bugs found on the way in, all mine:
+
+1. `scalarOrigTypes` indexed past its end once hoisted params joined the
+   parameter list (the original-param metadata loop must stop at
+   `firstHoistIdx`).
+2. Rewiring uses to an AS1 parameter leaves AS0-derived users behind, and a
+   `bitcast` cannot cross address spaces — the address space has to be
+   propagated through the use graph after rewiring.
+3. `deviceizeCapturedPointers` ran *before* hoisting and addrspacecast the
+   very `extractvalue`s hoisting then replaced, leaving an **invalid
+   same-address-space `addrspacecast`**. Hoisting supersedes that path
+   entirely, so the extractvalue branch is gone.
+
+Tooling note: added a post-pass IR dump (`VEGA_KEEP_AIR` now writes
+`vega-kernel.pre.ll` *and* `vega-kernel.post.ll`). Once a module is bad
+enough that `llvm-dis` refuses it, the textual dump from inside the backend
+is the only way to see what was actually emitted — which is precisely when
+you most need to.
+
+### `test_random`: narrower than it looks
+
+Same `getPtrRsrcId` ← `LowerSTORE` crash, but the easy explanations are all
+excluded: exactly one device pointer, cleanly hoisted, provenance intact
+(`__vega_cap_0_0` → bitcast → GEP → bitcast → store), zero generic accesses,
+zero `addrspacecast`s. The kernel stores `half`, and a plain MSL `half` store
+compiles and builds a pipeline on this GPU, so f16 is not the trigger by
+itself. Something narrower — the `[2 x i8]` byte-array GEP arithmetic feeding
+a 16-bit store, or the 4-wide (`r1_w4`) vectorized variant — still defeats
+AMD's resource inference. Next.
