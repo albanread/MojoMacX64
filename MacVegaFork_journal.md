@@ -861,3 +861,50 @@ take the emitted `.ll`, delete statements until the pipeline builds, and read
 what survives. The harness for that is the `VEGA_KEEP_AIR` pre/post dumps
 plus `xcrun metallib` + the S1 probe, which together give a
 sub-minute edit→verdict loop without going through Mojo at all.
+
+## 2026-08-22 — test_random bisected to a constant-encoding bug
+
+Bisected from a failing test down to a four-line kernel and then into the
+bitstream. The chain:
+
+1. **`test_random` → `NormalRandom`.** Running variants alone: both uniform
+   variants pass, both `"normal"` variants fail. Box-Muller, not the RNG.
+2. **`step_normal` → `log`.** A minimal kernel (direct buffer argument, no
+   elementwise, no captures, no hoisting) reproduces it, and stripping
+   `step_normal` down to `sqrt(-2.0 * log(v))` on a `SIMD[float32, 4]` still
+   crashes. `cos`, `sin`, `sqrt`, vector transcendentals, scalar NaN — all
+   pass in isolation.
+3. **`log` → NaN/Inf vector constants.** Mojo's `log` expands inline with
+   special-case handling whose tail is
+   `select ..., <4 x float> splat (float +qnan)` and
+   `splat (float +inf)`.
+4. **Not a driver bug.** Apple's own MSL kernel doing `select` over `float4`
+   NaN and Inf constants compiles, links and builds a pipeline on the Vega II.
+5. **Our encoding is dropping them.** `llvm-bcanalyzer` on the emitted AIR:
+   the kernel's text IR contains `+inf`, `+qnan`, `-2.0`, `-0.0`, `-1.0` and
+   more, but the bitstream carries **only 4 `FLOAT` records** — the three
+   scalars I wrote explicitly in the probe, and nothing else. **The float
+   constants inside vector/splat constants are never emitted.** The reader
+   therefore reconstructs garbage, and the AMD backend dies lowering the
+   instruction that consumes it — which is why the crash always surfaced in
+   `LowerSTORE`, on the store that consumes the value, and why fixing address
+   spaces, provenance, symbol names, attributes and inlining never helped.
+
+**Next step is a specific hypothesis, and it rhymes with a bug already fixed
+here:** the vendored `ValueEnumerator17` failed to enumerate `SwitchInst`
+case values because newer LLVM stores them out-of-line. Splat vector
+constants got a new representation in recent LLVM too (hence the `splat (…)`
+textual form the LLVM-18-era `air-as` cannot even parse). The enumerator very
+likely walks `ConstantVector` operands in a way that misses splat elements,
+so they are never assigned value IDs and never written. Check
+`ValueEnumerator17::EnumerateValue` against upstream's handling of
+`ConstantDataVector`/splat constants, exactly as was done for switch cases.
+
+Tooling note: an IR-level bisection harness (`.ll` → `air-as` → `metallib` →
+S1 probe) was attempted and abandoned. `air-as` is LLVM-18-era and rejects
+essentially every modern textual construct — `splat (…)`, `f0x…` float
+literals, `disjoint`, `captures(none)`, `memory(…)`, `+qnan`. A normalizer
+can be written for each in turn, but it is a losing race; **bisecting the
+Mojo source with our own compiler was far cheaper** and is what actually
+found this. Worth remembering: prefer bisecting at the level where your
+own toolchain still works.

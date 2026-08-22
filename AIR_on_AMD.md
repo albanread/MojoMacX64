@@ -412,6 +412,30 @@ Two fixups recorded in Modular's writer, both worth replicating:
   `CE_EXTRACTELT`, `CE_INSERTELT`). Miss one and you get a type-table mismatch
   far from the cause.
 
+### Vector/splat constants may never be written
+
+> **`MEASURED`** — cost a full day of misdirection, because it presents as a
+> crash in something else entirely.
+
+Symptom: a kernel using NaN/Inf constants inside vectors (e.g. anything that
+goes through a `log` implementation's special-case handling) crashes the AMD
+backend in `LowerSTORE` — on the store that *consumes* the value. Address
+spaces, provenance, symbol names, attributes and inlining are all irrelevant.
+
+Diagnosis: `llvm-bcanalyzer` the emitted module and **count `FLOAT` records
+against the float constants in your text IR.** Ours carried `+inf`, `+qnan`,
+`-2.0`, `-0.0` and more in the IR, but only the handful of scalars appeared
+in the bitstream — every float constant living inside a **vector/splat
+constant** was silently dropped. The reader then reconstructs garbage.
+
+Recent LLVM changed how splat vector constants are represented (which is also
+why `air-as` cannot parse the `splat (…)` textual form). A vendored
+enumerator written against an older LLVM will not walk them, so those
+elements never get value IDs and never get written — the same class of bug as
+the missing switch-case values above. Audit your `ValueEnumerator` fork
+against upstream for **every** constant kind, not just the ones your tests
+happened to exercise.
+
 ### Bugs we found in the vendored writer itself
 
 > **`MEASURED`** — if you vendor a downgrade writer, these are waiting for you.

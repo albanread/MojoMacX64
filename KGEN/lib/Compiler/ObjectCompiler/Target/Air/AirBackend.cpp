@@ -553,6 +553,18 @@ void mangleAirOps(llvm::Module &m) {
         (call->getCalledFunction()->getName() + *suffix).str();
     llvm::FunctionCallee target = m.getOrInsertFunction(
         mangled, call->getFunctionType());
+    // Golden AIR declares its runtime functions pure and non-throwing
+    // (`nounwind willreturn memory(none) local_unnamed_addr`). Without
+    // `memory(none)` the backend must assume the call clobbers memory, which
+    // perturbs how dependent stores are lowered.
+    if (auto *decl = llvm::dyn_cast<llvm::Function>(target.getCallee())) {
+      decl->setDoesNotThrow();
+      decl->setDoesNotAccessMemory();
+      decl->setWillReturn();
+      decl->setMustProgress();
+      decl->setDoesNotFreeMemory();
+      decl->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Local);
+    }
     call->setCalledFunction(target);
   }
 }
