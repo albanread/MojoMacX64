@@ -6,7 +6,7 @@
 # expected, but they lower to the same `objc_msgSend(id, SEL, ...)` call.
 # ===----------------------------------------------------------------------=== #
 
-from std.ffi import external_call, c_char
+from std.ffi import external_call, c_char, _get_global_or_null
 from std.memory import OpaquePointer
 from std.reflection import reflect
 from std.sys.info import TrivialRegisterPassable
@@ -29,15 +29,29 @@ struct SEL(TrivialRegisterPassable):
         return _RawPtr(unsafe_from_address=self._addr)
 
 
+@always_inline
+def _cache_key[prefix: StaticString, name: StaticString]() -> String:
+    return String(prefix) + String(name)
+
+
 def sel[name: StaticString]() -> SEL:
     """Register (once) and return the selector for `name`.
 
-    `sel_registerName` interns the name, so repeated calls return the same
-    `SEL`.
+    `sel_registerName` interns the name in the runtime, but calling it on every
+    message send still costs a hash lookup; cache the result in a process
+    global keyed by the name so each selector is resolved exactly once.
     """
-    return SEL(
-        Int(external_call["sel_registerName", _RawPtr](name.unsafe_ptr()))
+    var key = _cache_key["vega.objc.sel/", name]()
+    var cached = _get_global_or_null(key)
+    if cached:
+        return SEL(Int(cached.value()))
+    var registered = external_call["sel_registerName", _RawPtr](
+        name.unsafe_ptr()
     )
+    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](
+        StringSlice(key), registered
+    )
+    return SEL(Int(registered))
 
 
 @fieldwise_init
@@ -181,13 +195,21 @@ def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
     # allocation, the x87 return, or the hidden sret pointer + self/_cmd shift
     # according to the RETURN TYPE R the caller declares. The database only has
     # to tell us WHICH entry point, which it does.
-    # RTLD_DEFAULT is (void*)-2 on macOS.
+    var key = String("vega.objc.stub/") + String(variant)
+    var cached = _get_global_or_null(key)
+    if cached:
+        return Int(cached.value())
+    # RTLD_DEFAULT is (void*)-2 on macOS. This scans every loaded dylib, so it
+    # must never run per call -- cache the result keyed by the variant.
     var rtld_default = OpaquePointer[MutUntrackedOrigin](
         unsafe_from_address=Int(-2)
     )
     var name = String(variant)
     var stub_fn = external_call["dlsym", OpaquePointer[MutUntrackedOrigin]](
         rtld_default, name.as_c_string_slice()
+    )
+    external_call["KGEN_CompilerRT_InsertGlobal", NoneType](
+        StringSlice(key), stub_fn
     )
     return Int(stub_fn)
 
