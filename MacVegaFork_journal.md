@@ -574,3 +574,58 @@ MOCO-2405/2366) — their own Metal backend cannot run them either, and
 KERN-2360 is *their* MetalAIRPass address-space propagation bug, a class we
 fixed in ours. Two upstream-skipped tests now pass here: `test_launch_binary`
 (apple-incompatible upstream) and `test_constant_memory` (nvidia-only).
+
+## 2026-08-22 — "Interrupted compilation" decoded: AMD wants resource descriptors
+
+The opaque failure blocking `test_fast_div`, `test_random` and
+`test_function_mts` finally has a name, and it came from a source I should
+have checked hours earlier: **`~/Library/Logs/DiagnosticReports/`**. The
+Metal shader compiler runs as an XPC service, and it was not *rejecting* our
+AIR — it was **crashing on it**, dozens of times, leaving fully symbolicated
+reports each time:
+
+```
+EXC_BAD_ACCESS (SIGSEGV) KERN_INVALID_ADDRESS at 0x20
+libAMDIL902.dylib  llvm::ILTargetLowering::getPtrRsrcId(...)
+libAMDIL902.dylib  llvm::ILTargetLowering::getRsrcDescNode(...)
+libAMDIL902.dylib  llvm::ILTargetLowering::LowerSTORE(...)
+AMDRadeonX5000Shared  AMDGFX9MTLCompilerPlugin::compileShaders(...)
+```
+
+**AMD's Metal plugin must resolve every memory access to a buffer *resource
+descriptor*.** A generic (AS0) pointer has none, so `getPtrRsrcId` null-
+derefs. Apple silicon accepts the identical IR because it has flat
+addressing — which is why upstream never had to care, and why this is a
+fork-specific class rather than a bug anyone else would hit.
+
+Where the generics came from: Mojo packs kernel captures into an argument
+buffer, loads the whole thing as **one aggregate**, and `extractvalue`s the
+device pointers out — so they materialize as AS0. (My first fix hooked only
+loads *returning* pointers and did nothing; the pointers were never loaded
+individually.) `deviceizeCapturedPointers` now retypes pointers sourced from
+AS2/AS1 loads *and* from capture-struct extractvalues to device AS1 and
+propagates. Generic stores in the fast_div kernel: **6 → 0**, and
+`test_function_mts` went from "cannot compile" to executing its kernel.
+
+Two lessons worth keeping:
+
+- **When a vendor toolchain reports a transport error, look for a crash
+  report.** "XPC_ERROR_CONNECTION_INTERRUPTED after multiple retries" is what
+  a segfaulting compiler service looks like from the client side; the actual
+  stack was on disk the whole time. This replaces `amdgpu-nt`, which is no
+  longer usable (air-as stamps its own AIR version, so the standalone tool
+  always sees 2.6 against its 2.5 plugin).
+- **Apple-silicon tolerance hides address-space bugs.** Flat addressing means
+  upstream's Metal path never needs correct address spaces; ours does, for
+  every pointer, everywhere. Expect more of this class.
+
+Also fixed: the SDK was missing kernels-library packages — `linalg` and
+`graph_compiler/extensibility` are now built and linked into `vega-sdk/pkg`.
+`test_wmma` needs `_rocblas` (an AMD library binding, genuinely N/A here).
+
+Still open: `test_fast_div`/`test_random` still crash the plugin (generic
+stores are gone, so a remaining generic access or another unresolvable
+pointer shape); `test_function_mts` and
+`test_static_layout_capture_argcount` now execute but compute wrong values —
+argument-index correspondence between Mojo's packed captures, our
+`air.buffer location_index`, and VegaRT's bind loop is the prime suspect.
