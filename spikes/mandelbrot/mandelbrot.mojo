@@ -15,6 +15,7 @@
 # ===----------------------------------------------------------------------=== #
 
 from std.gpu import global_idx
+from std.math import cos
 from max.gpu.host import DeviceContext
 from std.time import perf_counter_ns
 from std.objc import (
@@ -108,6 +109,56 @@ def mandelbrot_kernel(
         escape[unsafe_offset=idx] = n
 
 
+comptime TAU = Float32(6.28318530718)
+
+
+def mandelbrot_color_kernel(
+    dst: Pointer[UInt32, MutAnyOrigin],
+    center_x: Float32,
+    center_y: Float32,
+    scale: Float32,
+    phase: Float32,
+):
+    var idx = Int(global_idx.x)
+    if idx < PIXELS:
+        var px = idx % WIDTH
+        var py = idx // WIDTH
+        var cx = center_x + (Float32(px) - Float32(WIDTH) * 0.5) * scale
+        var cy = center_y + (Float32(py) - Float32(HEIGHT) * 0.5) * scale
+        var zx = Float32(0)
+        var zy = Float32(0)
+        var n = UInt32(0)
+        while n < UInt32(MAX_ITER) and zx * zx + zy * zy <= Float32(4):
+            var nzx = zx * zx - zy * zy + cx
+            zy = Float32(2) * zx * zy + cy
+            zx = nzx
+            n += 1
+
+        var pixel: UInt32
+        if n >= UInt32(MAX_ITER):
+            # inside the set: near-black plum, like the Windows shader
+            pixel = _pack(13, 3, 5)
+        else:
+            # Inigo Quilez cosine palette: three cosines a third of a cycle
+            # apart give a smooth rainbow that shifts with `phase`.
+            var tt = Float32(n) / Float32(64) + phase
+            var r = Float32(0.5) + Float32(0.5) * cos(TAU * (tt + Float32(0.00)))
+            var g = Float32(0.5) + Float32(0.5) * cos(TAU * (tt + Float32(0.33)))
+            var b = Float32(0.5) + Float32(0.5) * cos(TAU * (tt + Float32(0.67)))
+            pixel = _pack(
+                UInt32(b * Float32(255)),
+                UInt32(g * Float32(255)),
+                UInt32(r * Float32(255)),
+            )
+        dst[unsafe_offset=idx] = pixel
+
+
+@always_inline
+def _pack(b: UInt32, g: UInt32, r: UInt32) -> UInt32:
+    # BGRA8Unorm little-endian: byte0=B, byte1=G, byte2=R, byte3=A.
+    return b | (g << 8) | (r << 16) | (UInt32(255) << 24)
+
+
 def mandelbrot_cpu(
     escape: Pointer[UInt32, MutAnyOrigin],
     cx0: Float32,
@@ -172,6 +223,7 @@ def main() raises:
     comptime cx = Float32(-0.743643)
     comptime cy = Float32(0.131826)
     var scale = Float32(3.0) / Float32(WIDTH)
+    var phase = Float32(0.0)
 
     # Layouts are checked against the SDK before anything runs.
     from std.sys import size_of
@@ -194,6 +246,7 @@ def main() raises:
     print("  GPU:", ctx.name())
     var dev = ctx.enqueue_create_buffer[DType.uint32](PIXELS)
     var kern = ctx.compile_function[mandelbrot_kernel]()
+    var color_kern = ctx.compile_function[mandelbrot_color_kernel]()
     comptime block = 256
     comptime grid = (PIXELS + block - 1) // block
     ctx.enqueue_function(
@@ -306,15 +359,23 @@ def main() raises:
                 running = False
                 break
 
-            # Compute this frame on the Vega II, colour it, upload, present.
+            # Compute AND colour this frame in one Mojo kernel on the Vega II
+            # -- the whole pipeline is Mojo, no shader. Output is packed BGRA8.
             ctx.enqueue_function(
-                kern, dev, cx, cy, scale, grid_dim=(grid), block_dim=(block)
+                color_kern,
+                dev,
+                cx,
+                cy,
+                scale,
+                phase,
+                grid_dim=(grid),
+                block_dim=(block),
             )
             ctx.synchronize()
-            with dev.map_to_host() as esc:
-                colorize(
-                    esc.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](), bgra
-                )
+            with dev.map_to_host() as pix:
+                var src = pix.unsafe_ptr().bitcast[UInt8]()
+                for k in range(PIXELS * 4):
+                    bgra[unsafe_offset=k] = src[unsafe_offset=k]
 
             var drawable = msg_send[
                 ObjCObject, "CAMetalLayer", "nextDrawable"
@@ -338,7 +399,8 @@ def main() raises:
                 var now = perf_counter_ns()
                 var fps = Float64(frames) / (Float64(now - loop_start) / 1e9)
                 print("  frame", frames, "—", fps, "fps")
-            # Zoom in toward the seahorse valley, then reset.
+            # Drift the palette and zoom toward the seahorse valley, then reset.
+            phase += Float32(0.004)
             scale *= Float32(0.985)
             if scale < Float32(3.0) / Float32(WIDTH) * Float32(1e-4):
                 scale = Float32(3.0) / Float32(WIDTH)
