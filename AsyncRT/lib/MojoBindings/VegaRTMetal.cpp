@@ -114,12 +114,24 @@ struct VRMetalBuf {
   uint64_t gpuBase = 0;  // gpuAddress of `buffer` (not of the view)
 };
 
+// A device pointer that the AIR backend hoisted out of a capture struct into
+// a real buffer parameter (see AIR_on_AMD.md): the kernel expects a bound
+// resource at `bufferIndex`, and the address to bind is stored in the packed
+// argument at `srcArg`, `byteOffset` bytes in. Recovered from the parameter
+// name via pipeline reflection.
+struct HoistedCapture {
+  unsigned bufferIndex;
+  unsigned srcArg;
+  uint64_t byteOffset;
+};
+
 struct VRMetalFunc {
   id library = nullptr;
   id function = nullptr;
   id pipeline = nullptr; // id<MTLComputePipelineState>
   std::string name;
   int32_t maxDynamicSharedBytes = -1;
+  std::vector<HoistedCapture> hoists;
 };
 
 namespace {
@@ -579,13 +591,33 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   }
 
   nserr = nullptr;
-  id pipeline = msg<id>(ctx->device,
-                        "newComputePipelineStateWithFunction:error:", function,
-                        &nserr);
+  // MTLPipelineOptionArgumentInfo (1 << 0) so reflection carries parameter
+  // names — that is how hoisted captures are recovered.
+  id reflection = nullptr;
+  id pipeline = msg<id>(
+      ctx->device,
+      "newComputePipelineStateWithFunction:options:reflection:error:", function,
+      (unsigned long)1, &reflection, &nserr);
   if (!pipeline) {
     objcRelease(function);
     objcRelease(library);
     return errorFromNSError("newComputePipelineStateWithFunction", nserr);
+  }
+
+  std::vector<HoistedCapture> hoists;
+  if (reflection) {
+    id bindings = msg<id>(reflection, "bindings");
+    unsigned long n = bindings ? msg<unsigned long>(bindings, "count") : 0;
+    for (unsigned long i = 0; i < n; i++) {
+      id b = msg<id>(bindings, "objectAtIndex:", i);
+      std::string bname = nsstringToStd(msg<id>(b, "name"));
+      unsigned srcArg = 0;
+      unsigned long long off = 0;
+      if (sscanf(bname.c_str(), "__vega_cap_%u_%llu", &srcArg, &off) == 2) {
+        hoists.push_back({static_cast<unsigned>(msg<unsigned long>(b, "index")),
+                          srcArg, static_cast<uint64_t>(off)});
+      }
+    }
   }
 
   auto *fn = new VRMetalFunc();
@@ -594,6 +626,7 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   fn->pipeline = pipeline;
   fn->name = functionName;
   fn->maxDynamicSharedBytes = maxDynamicSharedBytes;
+  fn->hoists = std::move(hoists);
   *out = fn;
   return nullptr;
 }
@@ -676,6 +709,34 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
                 static_cast<unsigned long>(size),
                 static_cast<unsigned long>(i));
     }
+  }
+
+  // Bind the hoisted captured pointers: read the address out of the packed
+  // argument the compiler recorded, resolve it in the allocation registry,
+  // and bind the owning buffer as a real resource.
+  for (const HoistedCapture &h : fn->hoists) {
+    if (h.srcArg >= argc) {
+      msg<void>(enc, "endEncoding");
+      return vrmErrorf("VegaRT[metal]: hoisted capture names arg %u but the "
+                       "launch has %u args",
+                       h.srcArg, argc);
+    }
+    uint64_t addr = 0;
+    memcpy(&addr,
+           static_cast<const char *>(argAddrs[h.srcArg]) + h.byteOffset,
+           sizeof(addr));
+    size_t off = 0;
+    id buffer = resolveAddress(addr, &off);
+    if (!buffer) {
+      msg<void>(enc, "endEncoding");
+      return vrmErrorf("VegaRT[metal]: hoisted capture at arg %u+%llu holds "
+                       "0x%llx, which is not a known device allocation",
+                       h.srcArg, (unsigned long long)h.byteOffset,
+                       (unsigned long long)addr);
+    }
+    msg<void>(enc, "setBuffer:offset:atIndex:", buffer,
+              static_cast<unsigned long>(off),
+              static_cast<unsigned long>(h.bufferIndex));
   }
 
   if (sharedMemBytes)

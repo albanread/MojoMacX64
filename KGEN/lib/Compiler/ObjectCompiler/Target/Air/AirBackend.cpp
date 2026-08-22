@@ -247,6 +247,61 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
   // device pointers as generic AS0, which NVPTX tolerates but AIR rejects —
   // this rewrite is the address-space half of the closed MetalAIRPass.
   llvm::LLVMContext &ctx_ = fn.getContext();
+
+  // ── Captured-pointer hoisting ──────────────────────────────────────────
+  // A device pointer that arrives inside a by-value capture struct is just a
+  // raw address; AMD's Metal backend cannot resolve it to a buffer resource
+  // descriptor and crashes lowering any access through it. Hoist each such
+  // pointer into a real kernel buffer parameter, named
+  // `__vega_cap_<srcParam>_<byteOffset>` so the runtime can recover — via
+  // pipeline reflection — which capture-blob bytes hold the address to bind
+  // there. See AIR_on_AMD.md.
+  struct HoistedCapture {
+    unsigned srcParam;
+    uint64_t offset;
+    llvm::SmallVector<llvm::ExtractValueInst *, 4> uses;
+  };
+  llvm::SmallVector<HoistedCapture, 4> hoists;
+  {
+    const llvm::DataLayout &dl = m.getDataLayout();
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb) {
+        auto *ev = llvm::dyn_cast<llvm::ExtractValueInst>(&inst);
+        if (!ev || !ev->getType()->isPointerTy())
+          continue;
+        auto *arg = llvm::dyn_cast<llvm::Argument>(ev->getAggregateOperand());
+        if (!arg || arg->getParent() != &fn)
+          continue;
+        // Walk the aggregate manually: getIndexedOffsetInType wants Values,
+        // while extractvalue carries constant unsigned indices.
+        uint64_t off = 0;
+        llvm::Type *cur = arg->getType();
+        for (unsigned idx : ev->getIndices()) {
+          if (auto *st = llvm::dyn_cast<llvm::StructType>(cur)) {
+            off += dl.getStructLayout(st)->getElementOffset(idx);
+            cur = st->getElementType(idx);
+          } else if (auto *at = llvm::dyn_cast<llvm::ArrayType>(cur)) {
+            off += idx * dl.getTypeAllocSize(at->getElementType());
+            cur = at->getElementType();
+          } else {
+            cur = nullptr;
+            break;
+          }
+        }
+        if (!cur)
+          continue;
+        HoistedCapture *slot = nullptr;
+        for (HoistedCapture &h : hoists)
+          if (h.srcParam == arg->getArgNo() && h.offset == off)
+            slot = &h;
+        if (!slot) {
+          hoists.push_back({arg->getArgNo(), off, {}});
+          slot = &hoists.back();
+        }
+        slot->uses.push_back(ev);
+      }
+  }
+
   // By-value scalar params become constant-address-space(2) pointer params —
   // AIR's model for MSL `constant T&` — loaded at entry; the runtime binds
   // them with setBytes at the same index. Generic pointers move to device
@@ -264,6 +319,9 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
       paramTypes.push_back(llvm::PointerType::get(ctx_, 2));
     }
   }
+  unsigned firstHoistIdx = paramTypes.size();
+  for (unsigned i = 0; i < hoists.size(); ++i)
+    paramTypes.push_back(llvm::PointerType::get(ctx_, 1));
   unsigned firstBuiltinIdx = paramTypes.size();
   for (KernelBuiltinUse &use : uses)
     paramTypes.push_back(use.anyDimensioned
@@ -312,6 +370,26 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
   }
   propagatePointerAS(retype);
 
+  // Point the captured-pointer uses at their new buffer parameters.
+  for (unsigned h = 0; h < hoists.size(); ++h) {
+    llvm::Argument *param = newFn->getArg(firstHoistIdx + h);
+    param->setName(llvm::Twine("__vega_cap_") + llvm::Twine(hoists[h].srcParam) +
+                   "_" + llvm::Twine(hoists[h].offset));
+    param->addAttr(llvm::Attribute::get(c, "air-buffer-no-alias"));
+    for (llvm::ExtractValueInst *ev : hoists[h].uses) {
+      llvm::SmallVector<llvm::Use *, 8> uses;
+      for (llvm::Use &u : ev->uses())
+        uses.push_back(&u);
+      for (llvm::Use *u : uses)
+        u->set(param);
+      ev->eraseFromParent();
+    }
+    // The users were typed off an AS0 pointer; carry the device address
+    // space through them (a bitcast cannot cross address spaces).
+    llvm::SmallVector<llvm::Value *, 16> retype{param};
+    propagatePointerAS(retype);
+  }
+
   // Replace shim calls with reads of the new parameters.
   for (unsigned u = 0; u < uses.size(); ++u) {
     llvm::Argument *arg = newFn->getArg(firstBuiltinIdx + u);
@@ -341,7 +419,9 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
   // listed all three including the by-value id as builtin; scalars passed
   // by value from Mojo become setBytes-bound constant buffers instead), so
   // v1 requires kernels whose leading params are all pointers.
-  for (unsigned i = 0; i != firstBuiltinIdx; ++i) {
+  // Original params only — hoisted and builtin params get their own records
+  // below, and scalarOrigTypes is sized to the original parameter list.
+  for (unsigned i = 0; i != firstHoistIdx; ++i) {
     llvm::Argument *arg = newFn->getArg(i);
     bool isScalar = scalarOrigTypes[i] != nullptr;
     unsigned as = isScalar
@@ -363,6 +443,18 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
             mdStr(c, "air.arg_name"), mdStr(c, arg->getName())}));
     if (!isScalar)
       arg->addAttr(llvm::Attribute::get(c, "air-buffer-no-alias"));
+  }
+  for (unsigned h = 0; h < hoists.size(); ++h) {
+    unsigned idx = firstHoistIdx + h;
+    argMD.push_back(mdStrings(
+        c, {mdI32(c, idx), mdStr(c, "air.buffer"),
+            mdStr(c, "air.location_index"), mdI32(c, idx), mdI32(c, 1),
+            mdStr(c, "air.read_write"), mdStr(c, "air.address_space"),
+            mdI32(c, 1), mdStr(c, "air.arg_type_size"), mdI32(c, 4),
+            mdStr(c, "air.arg_type_align_size"), mdI32(c, 4),
+            mdStr(c, "air.arg_type_name"), mdStr(c, "void"),
+            mdStr(c, "air.arg_name"),
+            mdStr(c, newFn->getArg(idx)->getName())}));
   }
   for (unsigned u = 0; u < uses.size(); ++u) {
     unsigned idx = firstBuiltinIdx + u;
@@ -476,10 +568,12 @@ void deviceizeCapturedPointers(llvm::Module &m) {
                         srcTy->getAddressSpace() == 1))
             sources.push_back(ld);
         }
-        // ...and so is one extracted from a capture struct that was loaded
-        // as a single aggregate, which is how Mojo packs kernel captures.
-        if (llvm::isa<llvm::ExtractValueInst>(&inst))
-          sources.push_back(&inst);
+        // NOTE: pointers extracted from a by-value capture struct are
+        // handled by the hoisting pass in legalizeKernel, which turns them
+        // into real buffer parameters — a strictly better fix, since AMD
+        // needs a bound resource and not merely a device-space address.
+        // Casting them here would leave a same-address-space addrspacecast
+        // behind once hoisting rewrites the uses.
       }
     for (llvm::Instruction *src : sources) {
       // Insert an explicit addrspacecast rather than mutating the type:
@@ -750,6 +844,23 @@ public:
       mpm.addPass(LLVMIRDowngradePass());
       mpm.addPass(PointerRewriter());
       mpm.run(module, mam);
+    }
+
+    // Debug hatch: dump post-pass text (after MetalAIRPass/PointerRewriter).
+    if (const char *keep = ::getenv("VEGA_KEEP_AIR")) {
+      std::error_code ec;
+      llvm::raw_fd_ostream dbg(std::string(keep) + "/vega-kernel.post.ll", ec);
+      if (!ec)
+        module.print(dbg, nullptr);
+    }
+
+    // Debug hatch: dump the legalized module as text before encoding, so a
+    // module the reader rejects can still be inspected.
+    if (const char *keep = ::getenv("VEGA_KEEP_AIR")) {
+      std::error_code ec;
+      llvm::raw_fd_ostream dbg(std::string(keep) + "/vega-kernel.pre.ll", ec);
+      if (!ec)
+        module.print(dbg, nullptr);
     }
 
     // Emission: AIR bitcode via the cooperating PointerRewriter +
