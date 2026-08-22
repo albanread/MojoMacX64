@@ -79,6 +79,9 @@ comptime g_read_fd = named_global["pg.readfd", Int]
 comptime g_running = named_global["pg.running", Int]
 comptime g_path = named_global["pg.path", Int]  # heap C string, or 0
 comptime g_errslot = named_global["pg.errslot", Int]  # NSError** out-param sink
+comptime g_split = named_global["pg.split", Int]
+comptime g_outscroll = named_global["pg.outscroll", Int]
+comptime g_edscroll = named_global["pg.edscroll", Int]
 
 
 @always_inline
@@ -614,7 +617,29 @@ def make_text_view(frame: CGRect, editable: Bool) -> ObjCObject:
     _ = msg_send[
         ObjCObject, "NSTextView", "setAutomaticTextReplacementEnabled:"
     ](tv, False)
-    _ = msg_send[ObjCObject, "NSView", "setAutoresizingMask:"](tv, Int(18))
+    # A text view inside a scroll view has to be told to grow: without this it
+    # keeps its creation height and the scroll view's own (white) background
+    # shows below the text.
+    _ = msg_send[ObjCObject, "NSTextView", "setMinSize:"](
+        tv, CGSize(0.0, 0.0)
+    )
+    _ = msg_send[ObjCObject, "NSTextView", "setMaxSize:"](
+        tv, CGSize(1.0e7, 1.0e7)
+    )
+    _ = msg_send[ObjCObject, "NSTextView", "setVerticallyResizable:"](tv, True)
+    _ = msg_send[ObjCObject, "NSTextView", "setHorizontallyResizable:"](
+        tv, False
+    )
+    # Width tracks the view so text wraps instead of scrolling sideways.
+    var container = msg_send[ObjCObject, "NSTextView", "textContainer"](tv)
+    _ = msg_send[
+        ObjCObject, "NSTextContainer", "setWidthTracksTextView:"
+    ](container, True)
+    _ = msg_send[ObjCObject, "NSTextContainer", "setContainerSize:"](
+        container, CGSize(frame.size.width, 1.0e7)
+    )
+    # Only the width follows the scroll view; the height is content-driven.
+    _ = msg_send[ObjCObject, "NSView", "setAutoresizingMask:"](tv, Int(2))
     return tv
 
 
@@ -628,6 +653,10 @@ def scroll_wrapping(view: ObjCObject, frame: CGRect) -> ObjCObject:
     )
     _ = msg_send[ObjCObject, "NSScrollView", "setDocumentView:"](
         sv, view.ptr()
+    )
+    _ = msg_send[ObjCObject, "NSScrollView", "setDrawsBackground:"](sv, True)
+    _ = msg_send[ObjCObject, "NSScrollView", "setBackgroundColor:"](
+        sv, color(0.09, 0.10, 0.12).ptr()
     )
     _ = msg_send[ObjCObject, "NSView", "setAutoresizingMask:"](sv, Int(18))
     return sv
@@ -791,8 +820,6 @@ def main() raises:
             win, nsstring(String("Mojo Playground")).ptr()
         )
         g_window()[] = win.addr()
-        var content = msg_send[ObjCObject, "NSWindow", "contentView"](win)
-
         # Editor above, output below, with a draggable divider between them.
         # NSSplitView owns the geometry from here: it lays the panes out, drags
         # the divider, and resizes them with the window.
@@ -807,10 +834,6 @@ def main() raises:
         _ = msg_send[ObjCObject, "NSSplitView", "setVertical:"](split, False)
         _ = msg_send[ObjCObject, "NSSplitView", "setDividerStyle:"](
             split, Int(2)  # NSSplitViewDividerStyleThin
-        )
-        # Remember where the user left the divider, across launches.
-        _ = msg_send[ObjCObject, "NSSplitView", "setAutosaveName:"](
-            split, nsstring(String("PlaygroundSplit")).ptr()
         )
         _ = msg_send[ObjCObject, "NSView", "setAutoresizingMask:"](
             split, Int(18)
@@ -844,13 +867,28 @@ def main() raises:
         _ = msg_send[ObjCObject, "NSSplitView", "addSubview:"](
             split, output_scroll.ptr()
         )
-        _ = msg_send[ObjCObject, "NSView", "addSubview:"](
-            content, split.ptr()
+        # Make the split view the content view: it then fills the window
+        # exactly at every size. Adding it as a subview instead leaves it at
+        # its creation size when the window is resized -- dead space below.
+        _ = msg_send[ObjCObject, "NSWindow", "setContentView:"](
+            win, split.ptr()
         )
-        # Place the divider (autosave overrides this on later launches).
+        g_split()[] = split.addr()
+        g_outscroll()[] = output_scroll.addr()
+        g_edscroll()[] = editor_scroll.addr()
+        # NSSplitView does not lay out subviews merely because they were
+        # added: without adjustSubviews they all sit at origin (0,0), stacked
+        # on top of each other, and only the last one added is visible.
+        _ = msg_send[ObjCObject, "NSSplitView", "adjustSubviews"](split)
+
+        # Neither pane may be squeezed out of existence when the window
+        # resizes: the editor yields first, the output keeps its share.
         _ = msg_send[
-            ObjCObject, "NSSplitView", "setPosition:ofDividerAtIndex:"
-        ](split, WIN_H * EDITOR_FRAC, Int(0))
+            ObjCObject, "NSSplitView", "setHoldingPriority:forSubviewAtIndex:"
+        ](split, Float32(250.0), Int(0))
+        _ = msg_send[
+            ObjCObject, "NSSplitView", "setHoldingPriority:forSubviewAtIndex:"
+        ](split, Float32(260.0), Int(1))
 
         _ = msg_send[ObjCObject, "NSTextView", "setString:"](
             editor, nsstring(String(STARTER)).ptr()
@@ -888,6 +926,12 @@ def main() raises:
         _ = msg_send[
             ObjCObject, "NSApplication", "activateIgnoringOtherApps:"
         ](app, Bool(True))
+
+        # Now that the split view has its true size, place the divider.
+        var sframe = msg_send[CGRect, "NSView", "frame"](split)
+        _ = msg_send[
+            ObjCObject, "NSSplitView", "setPosition:ofDividerAtIndex:"
+        ](split, sframe.size.height * EDITOR_FRAC, Int(0))
 
     var app2 = msg_send[
         ObjCObject, "NSApplication", "sharedApplication", is_class=True
@@ -941,4 +985,26 @@ def selftest(editor: ObjCObject, actions: ObjCObject) raises:
     )
     var ran = "hello from the playground" in out
     print("selftest: program output captured:", ran)
+    dump_geometry()
     print("PLAYGROUND-SELFTEST: PASS" if ran else "PLAYGROUND-SELFTEST: FAIL")
+
+
+def dump_geometry():
+    var split = ObjCObject(g_split()[])
+    var outscroll = ObjCObject(g_outscroll()[])
+    var out = ObjCObject(g_output()[])
+    var sf = msg_send[CGRect, "NSView", "frame"](split)
+    var of = msg_send[CGRect, "NSView", "frame"](outscroll)
+    var tf = msg_send[CGRect, "NSView", "frame"](out)
+    var subs = msg_send[ObjCObject, "NSView", "subviews"](split)
+    var nsubs = msg_send[Int, "NSArray", "count"](subs)
+    print("  split frame:", sf.origin.x, sf.origin.y, sf.size.width, sf.size.height)
+    print("  split subviews:", nsubs)
+    var ef = msg_send[CGRect, "NSView", "frame"](ObjCObject(g_edscroll()[]))
+    print("  editor scroll frame:", ef.origin.x, ef.origin.y, ef.size.width, ef.size.height)
+    var flipped = msg_send[Bool, "NSView", "isFlipped"](split)
+    print("  split isFlipped:", flipped)
+    print("  output scroll frame:", of.origin.x, of.origin.y, of.size.width, of.size.height)
+    print("  output textview frame:", tf.origin.x, tf.origin.y, tf.size.width, tf.size.height)
+    var draws = msg_send[Bool, "NSScrollView", "drawsBackground"](outscroll)
+    print("  output scroll drawsBackground:", draws)
