@@ -406,3 +406,35 @@ The design's highest-risk item — R2, the AIR trio — is retired. What remains
 in phase 3/4: warp-level tests on wave64, `--emit=asm` cosmetics for the
 device lane, the gpu-lane test-suite wiring, and then the kernel-library
 triage.
+
+### Addendum, same day — the writers' own testimony (review credit: Alban)
+
+A closer read of the vendored writers — prompted by review, and verified —
+corrects and enriches the record above:
+
+- `BitcodeWriter17.cpp:15` says it plainly: *"for writing Metal bitcode."*
+  It IS the AIR writer, by its own declaration; no bitstream forensics were
+  ever needed, and the bisection that briefly convicted it was contaminated
+  by the double-wrap. It is also, like PointerRewriter, taken from Julia's
+  LLVM downgrader — one lineage for the whole emission apparatus.
+- `BitcodeWriter17.cpp:~1765`: **Apple's AIR reader is LLVM-18-based**, and
+  the LLVM-17-fork writer carries targeted fixups for it (metal-allowed
+  FPMathOperator checks). The version skew is deliberate. Sibling
+  `Bitcode/19|21` directories are the same treatment for other consumers,
+  selected by `TargetTraits::forcedBitcodeVersion()`.
+- `BitcodeWriter17.cpp:3611`: the writer knows PointerRewriter's `emask`
+  callee typing and matches explicit call types to it — the cooperation is
+  literal, not inferred.
+- `BitcodeWriter17.cpp:2820`: `VE.getMetalKernelArgType` applies
+  **i64→i32 kernel-argument conversions** inside the writer. Phase-4
+  watchpoint: our legalizer's argument typing interacts with this
+  machinery (and it rhymes with the sister port's i64-vs-i32 launch-path
+  legalization note).
+- `LLVMIRDowngradePass.cpp:184`: the downgrade pass is internally
+  **`MetalAIRPass`** (pipeline name `kgen-metal-air`) — upstream published
+  the pass *skeleton* (lifetime-intrinsic downgrading today) and kept its
+  body closed. Our `AirBackend::legalizeModule` is that missing body; it
+  arguably belongs inside this pass eventually. The pass was also innocent
+  of the address-space stripping it was blamed for mid-debug (the AS0 came
+  from Mojo's generic-pointer elaboration all along) and is now back in the
+  emission pipeline where upstream intended it. vecadd still passes.
