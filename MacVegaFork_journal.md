@@ -1483,3 +1483,17 @@ the struct-vs-scalar classification of three different geometry types, and the
 retain/release balance of every autoreleased NSString built for a title or a
 run-loop mode. The compiler checked all of it, and the app is ~450 lines with
 no binding boilerplate.
+
+### Colour: a Mojo kernel, not a shader
+
+First cut coloured with a flat CPU ramp and looked muted beside the Windows
+demo. The fix is the point of the whole exercise: the Windows version coloured
+in an **HLSL pixel shader**; ours colours in a **Mojo kernel**. The escape
+count and the Inigo-Quilez cosine palette (`0.5 + 0.5·cos(2π·(t + phase +
+{0, ⅓, ⅔}))` per channel — three cosines a third of a cycle apart give a smooth
+rainbow) are computed together in one kernel on the Vega II, packed to BGRA8,
+and the loop just uploads the bytes. The phase drifts per frame so it shimmers.
+Colouring on the GPU keeps the 2.4M cosines/frame off the CPU and the loop
+stays at 60fps. So the entire pipeline — compute and colour — is Mojo compiled
+to AIR; there is no shader anywhere, which is a step past the example it
+answers.
