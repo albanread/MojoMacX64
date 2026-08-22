@@ -965,3 +965,52 @@ llvm-bcanalyzer --dump ours.air  | grep -oE '<[A-Za-z_0-9]+' | sort -u > ours.tx
 llvm-bcanalyzer --dump apple.air | grep -oE '<[A-Za-z_0-9]+' | sort -u > apple.txt
 comm -23 ours.txt apple.txt
 ```
+
+## 2026-08-22 — basics suite complete: 26 pass, 0 unexplained
+
+Every remaining failure in `max/kernels/test/gpu/basics` is accounted for on
+the skip list — NVIDIA/AMD-ISA-only features, upstream's own
+`_APPLE_GPU_INCOMPATIBLE` set, or SDK package gaps. **Nothing is failing for
+a reason we do not understand.** Moving past basics to real kernels.
+
+## 2026-08-22 — It runs real work: 1024³ matmul at 2.37 TFLOP/s
+
+```
+device: AMD Radeon Pro Vega II (Apple Metal)
+matmul 1024 x 1024 x 1024 : 0.907 ms   2367.68 GFLOP/s
+verify: 0 wrong
+MATMUL-ON-VEGA: PASS
+```
+
+A tiled 16×16 matmul written in ordinary Mojo — `stack_allocation` in
+`AddressSpace.SHARED`, `barrier()`, `thread_idx`/`block_idx`, buffer
+arguments — compiled through the fork's AIR backend and run on the Vega II.
+Results verified against a CPU reference. **~17% of the card's ~14.1 TFLOPS
+fp32 peak from a naive tiled kernel**, which is the normal range for one
+before any register-tiling or vectorization work. Source kept at
+[`spikes/matmul/matmul.mojo`](spikes/matmul/matmul.mojo).
+
+To get there, two more mangling bugs — both in code added earlier today:
+
+1. **Declaration-time mangling was needed for *all* suffixed families, not
+   just shuffles.** `AirLowering` reused one bare `air.log` declaration for
+   both a scalar and a vector call, and LLVM asserts "Calling a function with
+   a bad signature" when the second call's operands do not match. Extending
+   the suffix to every family that carries one fixed it.
+2. **…but not for the families that do *not* carry one.** Generalizing to
+   every `air.*` name promptly broke the matmul: builtin shims became
+   `air.thread_position_in_threadgroup.x.u.i32`, which the backend's
+   `parseBuiltinShim` no longer recognized (so they were never turned into
+   kernel parameters), and `air.wg.barrier` gained a suffix it does not have.
+   Both now consult the same whitelist the backend uses.
+
+The pairing is the lesson: **"mangle nothing" and "mangle everything" are
+both wrong; AIR's symbol families differ and the whitelist has to be shared
+between the lowering and the backend.** They are now explicitly kept in sync,
+with a comment saying so on both copies.
+
+Also on the way: the full kernel-library package set is now built and linked
+into `vega-sdk/pkg` — `layout`, `linalg`, `nn`, `algorithm`, `pipeline`,
+`comm`, `structured_kernels`, `internal_utils`, `extensibility`, and the
+vendor-binding stubs (`_rocblas`, `_cublas`, `_cudnn`, `_miopen`, `_cufft`).
+Every `unable to locate module` error in the kernels tree is gone.

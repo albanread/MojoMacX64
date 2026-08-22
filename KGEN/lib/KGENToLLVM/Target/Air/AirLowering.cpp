@@ -56,6 +56,25 @@ std::optional<std::string> airSuffixFor(mlir::Type ty) {
   return std::nullopt;
 }
 
+// Families whose AIR runtime symbols carry a type suffix. Kept in sync with
+// the backend's copy in AirBackend.cpp.
+bool needsAirTypeSuffix(llvm::StringRef name) {
+  static const llvm::StringRef stems[] = {
+      "air.simd_shuffle_xor", "air.simd_shuffle_down", "air.simd_shuffle_up",
+      "air.simd_shuffle", "air.simd_sum", "air.simd_prefix_sum",
+      "air.simd_min", "air.simd_max", "air.simd_product", "air.simd_ballot",
+      "air.cos", "air.sin", "air.tan", "air.acos", "air.asin", "air.atan",
+      "air.cosh", "air.sinh", "air.tanh", "air.exp", "air.exp2", "air.exp10",
+      "air.log", "air.log2", "air.log10", "air.sqrt", "air.rsqrt",
+      "air.fabs", "air.floor", "air.ceil", "air.rint", "air.trunc",
+      "air.round", "air.fmin", "air.fmax", "air.fma", "air.pow", "air.powr",
+      "air.fmod", "air.copysign", "air.frac", "air.divide", "air.recip"};
+  for (llvm::StringRef stem : stems)
+    if (name == stem)
+      return true;
+  return false;
+}
+
 class ConvertAirIntrinsicToCall
     : public mlir::ConvertOpToLLVMPattern<POP::CallLLVMIntrinsicOp> {
 public:
@@ -98,9 +117,17 @@ public:
     for (mlir::Value v : operands)
       argTypes.push_back(v.getType());
 
-    if (llvm::StringRef(fnName).starts_with("air.simd_shuffle") &&
-        !operands.empty()) {
-      if (auto suffix = airSuffixFor(operands[0].getType()))
+    // Mangle the AIR type suffix at DECLARATION time for the families that
+    // carry one. Reusing a single bare-stem declaration across e.g. a scalar
+    // and a vector call yields a call whose operands do not match the callee
+    // ("Calling a function with a bad signature").
+    //
+    // Builtins (thread_position_in_grid, …) and barriers must stay bare:
+    // the AIR backend matches builtin stems by name to turn them into kernel
+    // parameters, and barriers are unsuffixed in AIR.
+    if (needsAirTypeSuffix(fnName)) {
+      mlir::Type keyTy = !operands.empty() ? operands[0].getType() : resType;
+      if (auto suffix = airSuffixFor(keyTy))
         fnName += *suffix;
     }
     auto fn = symtab.lookup<mlir::LLVM::LLVMFuncOp>(fnName);
