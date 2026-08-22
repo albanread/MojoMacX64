@@ -1188,3 +1188,37 @@ enums, selectors, encodings), **P2** calling with database-selected dispatch,
 mechanism: a comptime `@encode` parser to check argument *types* (the count
 and return are checked today, arg types trusted), a selector cache, and more
 bridged classes as they're needed.
+
+## 2026-08-22 — Cocoa: argument-count checking closes the dispatch correctness gap
+
+`msg_send` now catches a wrong argument count at compile time. It reads the
+selector's declared arity from the database — `cocoakb_method_arg_classes`,
+counted from its comma-separated SysV class string ("" = 0, "g" = 1,
+"g,g" = 2) — and comptime-asserts it against the pack length. Forgetting the
+index on `characterAtIndex:` is now:
+
+```
+constraint failed: std.objc: 'characterAtIndex:' on NSString takes
+1 argument(s), but 0 were passed.
+```
+
+instead of a runtime read of garbage from an unset register. This is the kind
+of bug that is nearly impossible to find by testing — the call *works*, it just
+reads whatever was in `rdx` — so moving it to compile time is high value.
+
+I used the SysV arg-class string rather than parsing `@encode` directly: it's
+already the ABI truth the database derived, and a count has none of the
+signedness or struct-layout subtlety that a full `@encode` type comparison
+carries. Argument *type* checking (matching each Mojo argument's ABI category
+against the expected class per position) is the natural next step on exactly
+this data — the count check is the robust half done first.
+
+Two Mojo-string gotchas worth noting for the next comptime-string code:
+`len()` on a `String`/`StringSlice` is rejected outright (UTF-8 ambiguity —
+use `.as_bytes()` then `len(bytes)`), and a `VariadicPack`'s comptime length is
+`args.__len__()` (which returns `Ts.length`), not `args.size`.
+
+The Cocoa dispatch path now checks: selector exists (P1), correct ABI stub
+(P2), and correct argument count (this) — all at compile time, all from one
+database. Remaining depth: per-argument type category, a selector cache, and
+more bridged classes.
