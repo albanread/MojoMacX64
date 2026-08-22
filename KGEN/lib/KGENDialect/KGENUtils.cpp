@@ -1051,6 +1051,18 @@ static ParseResult parseOperatorOperands(AsmParser &p, uint32_t opcode,
   case (uint32_t)POC::StringAddress:
     return parseParamValue(p, operands.emplace_back(),
                            StringType::get(type.getContext()));
+
+  case (uint32_t)POC::CocoaKBQuery: {
+    // The query name, then its arguments -- all strings, and a variable
+    // number of them, since different queries take different keys.
+    auto stringType = StringType::get(type.getContext());
+    if (parseParamValue(p, operands.emplace_back(), stringType))
+      return failure();
+    while (succeeded(p.parseOptionalComma()))
+      if (parseParamValue(p, operands.emplace_back(), stringType))
+        return failure();
+    return success();
+  }
   }
   llvm_unreachable("unknown operator");
 }

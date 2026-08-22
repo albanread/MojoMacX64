@@ -2,6 +2,8 @@
 # vega-mojo: the fork's mojo with the source-built stdlib and runtime wired in.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export MODULAR_MOJO_MAX_COMPILERRT_PATH="$ROOT/lib/libKGENCompilerRTShared.dylib"
+# Cocoa metadata for the comptime cocoakb_query hook (COCOA_DESIGN.md).
+export MODULAR_MOJO_MAX_COCOAKB_PATH="${MODULAR_MOJO_MAX_COCOAKB_PATH:-/Volumes/S/CocoaBaseMCP/cocoa.sqlite}"
 export MODULAR_MOJO_MAX_IMPORT_PATH="$ROOT/pkg${MODULAR_MOJO_MAX_IMPORT_PATH:+,$MODULAR_MOJO_MAX_IMPORT_PATH}"
 export DYLD_LIBRARY_PATH="$ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 # When building executables, link VegaRT (the AsyncRT device runtime).

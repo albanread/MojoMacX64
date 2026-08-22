@@ -86,6 +86,10 @@ public:
   /// Return the path to the mgp-rt library.
   StringRef getMGPRTPath();
 
+  /// VEGA-FORK: path to the Cocoa metadata database (cocoa.sqlite) consulted
+  /// by the comptime `cocoakb_query` param-expr. See COCOA_DESIGN.md.
+  StringRef getCocoaKBPath();
+
   //===--------------------------------------------------------------------===//
   // Driver Configurations
   //===--------------------------------------------------------------------===//

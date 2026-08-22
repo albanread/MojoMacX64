@@ -27,6 +27,12 @@
 #include "mlir/Support/DebugStringHelper.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/ScopeExit.h"
+#include "KGEN/Support/Configuration.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/SHA256.h"
+#include <mutex>
+#include <sqlite3.h>
 
 using namespace M;
 using namespace KGEN;
@@ -830,6 +836,300 @@ FailureOr<TypedAttr> IREvaluatorContext::evaluateGetEnv(ParamOperatorAttr op) {
   }
 
   return result.get();
+}
+
+
+//===----------------------------------------------------------------------===//
+// VEGA-FORK: Cocoa metadata queries (COCOA_DESIGN.md)
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// A lazily-opened, read-only handle on the Cocoa metadata database, shared
+/// for the life of the process. Elaboration is concurrent, so every use is
+/// guarded; the queries themselves are reads against an immutable file.
+class CocoaKBDatabase {
+public:
+  static CocoaKBDatabase &get() {
+    static CocoaKBDatabase instance;
+    return instance;
+  }
+
+  llvm::Expected<int64_t> queryInt(StringRef query, ArrayRef<StringRef> args);
+  llvm::Expected<std::string> queryString(StringRef query,
+                                          ArrayRef<StringRef> args);
+
+private:
+  CocoaKBDatabase() = default;
+  llvm::Error openLocked();
+  llvm::Expected<sqlite3_stmt *> prepare(StringRef query,
+                                         ArrayRef<StringRef> args);
+
+  std::mutex mutex;
+  sqlite3 *db = nullptr;
+  bool attempted = false;
+  std::string openError;
+  std::string openedPath;
+  std::string cachedHash;
+};
+
+/// The queries this exposes, by the name Mojo passes as the first operand.
+/// A binding asks for "struct_size", not for SQL, so the schema stays an
+/// implementation detail of the compiler; a metadata layout change is a
+/// one-line fix here instead of a break in every caller.
+struct CocoaKBQueryDef {
+  StringRef name;
+  unsigned argCount;
+  StringRef sql;
+};
+
+constexpr StringRef kStructSizeSQL =
+    "SELECT size FROM structs WHERE name = ?1";
+constexpr StringRef kStructAlignSQL =
+    "SELECT align FROM structs WHERE name = ?1";
+constexpr StringRef kFieldOffsetSQL =
+    "SELECT offset FROM struct_fields WHERE struct = ?1 AND name = ?2";
+
+// BridgeSupport value64 is text; CAST gives the signed reading, which is the
+// one that survives narrowing in both directions (see the sister port's
+// HKEY_LOCAL_MACHINE lesson in COCOA_DESIGN.md D6).
+constexpr StringRef kEnumValueSQL =
+    "SELECT CAST(value AS INTEGER) FROM bs_enums WHERE name = ?1 LIMIT 1";
+
+// Extern-symbol constants (NSFontAttributeName...) are runtime addresses,
+// not comptime values: the database supplies the declared type and the
+// binding dlsyms the symbol at runtime.
+constexpr StringRef kConstantTypeSQL =
+    "SELECT type64 FROM bs_constants WHERE name = ?1 LIMIT 1";
+
+constexpr StringRef kSuperclassSQL =
+    "SELECT superclass FROM rt_classes WHERE name = ?1";
+
+// Method lookups walk the superclass chain: the runtime ingest records a
+// method on the class that DEFINES it, and inheritance is a query, not
+// codegen. ORDER BY depth so the nearest definition (an override) wins.
+#define COCOAKB_METHOD_CTE(column, table)                                      \
+  "WITH RECURSIVE chain(c, depth) AS ("                                        \
+  "  SELECT ?1, 0"                                                             \
+  "  UNION ALL"                                                                \
+  "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"          \
+  "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"                 \
+  " SELECT m." column " FROM chain JOIN " table " m"                           \
+  "   ON m.class = chain.c AND m.selector = ?2"                                \
+  "  AND m.is_class = CAST(?3 AS INTEGER)"                                     \
+  " ORDER BY chain.depth LIMIT 1"
+
+constexpr StringRef kMethodEncodingSQL =
+    COCOAKB_METHOD_CTE("encoding", "rt_methods");
+constexpr StringRef kMsgSendVariantSQL =
+    COCOAKB_METHOD_CTE("msgsend", "method_abi_x64");
+constexpr StringRef kMethodRetClassSQL =
+    COCOAKB_METHOD_CTE("ret_class", "method_abi_x64");
+constexpr StringRef kMethodArgClassesSQL =
+    COCOAKB_METHOD_CTE("arg_classes", "method_abi_x64");
+#undef COCOAKB_METHOD_CTE
+
+constexpr StringRef kPosixSigSQL =
+    "SELECT qualtype FROM posix_functions WHERE name = ?1";
+constexpr StringRef kPosixRetClassSQL =
+    "SELECT ret_class FROM posix_function_abi_x64 WHERE name = ?1";
+constexpr StringRef kPosixArgClassesSQL =
+    "SELECT arg_classes FROM posix_function_abi_x64 WHERE name = ?1";
+
+const CocoaKBQueryDef kCocoaQueries[] = {
+    {"struct_size", 1, kStructSizeSQL},
+    {"struct_align", 1, kStructAlignSQL},
+    {"field_offset", 2, kFieldOffsetSQL},
+    {"enum_value", 1, kEnumValueSQL},
+    {"constant_type", 1, kConstantTypeSQL},
+    {"superclass", 1, kSuperclassSQL},
+    {"method_encoding", 3, kMethodEncodingSQL},
+    {"msgsend_variant", 3, kMsgSendVariantSQL},
+    {"method_ret_class", 3, kMethodRetClassSQL},
+    {"method_arg_classes", 3, kMethodArgClassesSQL},
+    {"posix_sig", 1, kPosixSigSQL},
+    {"posix_ret_class", 1, kPosixRetClassSQL},
+    {"posix_arg_classes", 1, kPosixArgClassesSQL},
+};
+
+llvm::Error CocoaKBDatabase::openLocked() {
+  if (attempted)
+    return openError.empty()
+               ? llvm::Error::success()
+               : llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                         openError);
+  attempted = true;
+
+  ErrorOr<MojoConfig> configOr = MojoConfig::open();
+  if (configOr.isError()) {
+    openError = "cannot read the Mojo configuration to locate the Cocoa "
+                "metadata database";
+    return llvm::createStringError(llvm::inconvertibleErrorCode(), openError);
+  }
+  // The config owns the string, so copy it before the config goes away.
+  std::string path = configOr.get().getCocoaKBPath().str();
+  if (path.empty()) {
+    openError = "no Cocoa metadata database is configured; set "
+                "MODULAR_MOJO_MAX_COCOAKB_PATH to cocoa.sqlite";
+    return llvm::createStringError(llvm::inconvertibleErrorCode(), openError);
+  }
+
+  // Read-only, and never created: a missing database is a configuration error
+  // to report, not an empty one to invent and then answer wrongly from.
+  openedPath = path;
+  int rc = sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr);
+  if (rc != SQLITE_OK) {
+    openError = "cannot open the Cocoa metadata database at '" + path +
+                "': " + std::string(db ? sqlite3_errmsg(db) : "out of memory");
+    if (db) {
+      sqlite3_close(db);
+      db = nullptr;
+    }
+    return llvm::createStringError(llvm::inconvertibleErrorCode(), openError);
+  }
+  return llvm::Error::success();
+}
+
+llvm::Expected<sqlite3_stmt *>
+CocoaKBDatabase::prepare(StringRef query, ArrayRef<StringRef> args) {
+  const CocoaKBQueryDef *def = nullptr;
+  for (const auto &candidate : kCocoaQueries)
+    if (candidate.name == query)
+      def = &candidate;
+
+  if (!def) {
+    std::string known;
+    for (const auto &candidate : kCocoaQueries)
+      known += (known.empty() ? "" : ", ") + candidate.name.str();
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "unknown Cocoa metadata query '" +
+                                       query.str() +
+                                       "'; known queries: " + known);
+  }
+
+  if (args.size() != def->argCount)
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "Cocoa metadata query '" + query.str() + "' takes " +
+            std::to_string(def->argCount) + " argument(s), got " +
+            std::to_string(args.size()));
+
+  if (auto err = openLocked())
+    return std::move(err);
+
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(db, def->sql.str().c_str(), -1, &stmt, nullptr) !=
+      SQLITE_OK)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   StringRef(sqlite3_errmsg(db)));
+
+  for (auto [index, arg] : llvm::enumerate(args))
+    sqlite3_bind_text(stmt, static_cast<int>(index + 1), arg.data(),
+                      static_cast<int>(arg.size()), SQLITE_TRANSIENT);
+  return stmt;
+}
+
+llvm::Expected<int64_t> CocoaKBDatabase::queryInt(StringRef query,
+                                                  ArrayRef<StringRef> args) {
+  std::lock_guard<std::mutex> lock(mutex);
+  auto stmt = prepare(query, args);
+  if (!stmt)
+    return stmt.takeError();
+  llvm::scope_exit cleanup([&] { sqlite3_finalize(*stmt); });
+
+  int rc = sqlite3_step(*stmt);
+  if (rc != SQLITE_ROW)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "the Cocoa metadata has no '" + query.str() +
+                                       "' for " + llvm::join(args, ", "));
+  // A NULL column means the metadata knows the entity but not this property,
+  // which is a different failure from not knowing the entity at all.
+  if (sqlite3_column_type(*stmt, 0) == SQLITE_NULL)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "the Cocoa metadata records no " +
+                                       query.str() + " for " +
+                                       llvm::join(args, ", "));
+  return sqlite3_column_int64(*stmt, 0);
+}
+
+llvm::Expected<std::string>
+CocoaKBDatabase::queryString(StringRef query, ArrayRef<StringRef> args) {
+  std::lock_guard<std::mutex> lock(mutex);
+
+  // The reproducibility pin: a compiler whose semantics depend on a database
+  // must be able to say WHICH database. Hashed lazily and cached, so tooling
+  // can record the exact metadata revision a binary was built against.
+  if (query == "db_hash") {
+    if (!args.empty())
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "'db_hash' takes no arguments");
+    if (auto err = openLocked())
+      return std::move(err);
+    if (cachedHash.empty()) {
+      llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> bufferOr =
+          llvm::MemoryBuffer::getFile(openedPath, /*IsText=*/false);
+      if (!bufferOr)
+        return llvm::createStringError(
+            llvm::inconvertibleErrorCode(),
+            "cannot read the Cocoa metadata database for hashing");
+      llvm::SHA256 sha;
+      sha.update((*bufferOr)->getBuffer());
+      cachedHash = llvm::toHex(sha.final(), /*LowerCase=*/true);
+    }
+    return cachedHash;
+  }
+  auto stmt = prepare(query, args);
+  if (!stmt)
+    return stmt.takeError();
+  llvm::scope_exit cleanup([&] { sqlite3_finalize(*stmt); });
+
+  int rc = sqlite3_step(*stmt);
+  if (rc != SQLITE_ROW || sqlite3_column_type(*stmt, 0) == SQLITE_NULL)
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "the Cocoa metadata has no '" + query.str() +
+                                       "' for " + llvm::join(args, ", "));
+
+  const auto *text = sqlite3_column_text(*stmt, 0);
+  return std::string(reinterpret_cast<const char *>(text),
+                     sqlite3_column_bytes(*stmt, 0));
+}
+
+} // namespace
+
+FailureOr<TypedAttr>
+IREvaluatorContext::evaluateCocoaKBQuery(ParamOperatorAttr op) {
+  SmallVector<StringRef> operands;
+  for (auto operand : op.getOperands()) {
+    auto str = dyn_cast<StringAttr>(operand);
+    if (!str) {
+      emitError({*errorLoc, "'cocoakb_query' operand did not narrow to a "
+                            "constant string"});
+      return failure();
+    }
+    operands.push_back(str.getValue());
+  }
+
+  StringRef query = operands.front();
+  ArrayRef<StringRef> args = ArrayRef<StringRef>(operands).drop_front();
+
+  auto &database = CocoaKBDatabase::get();
+
+  if (::isa<IndexType>(op.getType())) {
+    auto value = database.queryInt(query, args);
+    if (!value) {
+      emitError({*errorLoc, llvm::toString(value.takeError())});
+      return failure();
+    }
+    return cast<TypedAttr>(IntegerAttr::get(IndexType::get(mlirCtx), *value));
+  }
+
+  auto value = database.queryString(query, args);
+  if (!value) {
+    emitError({*errorLoc, llvm::toString(value.takeError())});
+    return failure();
+  }
+  return cast<TypedAttr>(
+      StringAttr::get(*value, StringType::get(mlirCtx)));
 }
 
 // See if we can decode the first 'numBytes' of the memory blob into a

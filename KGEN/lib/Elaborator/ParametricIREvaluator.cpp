@@ -529,6 +529,8 @@ FailureOr<TypedAttr> ParametricIREvaluator::evaluateContextSpecific(
         BoolAttr::get(op.getContext(), elaborator->options.isCrossCompilation)};
   case POC::GetEnv:
     return evaluateGetEnv(op);
+  case POC::CocoaKBQuery:
+    return evaluateCocoaKBQuery(op);
   case POC::Apply:
     return evaluateApplyLike(op, /*withResultSlot=*/false);
   case POC::ApplyResultSlot:

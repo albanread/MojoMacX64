@@ -219,6 +219,11 @@ protected:
   /// Evaluate an apply-like operator.
   FailureOr<TypedAttr> evaluateGetEnv(ParamOperatorAttr op);
 
+  /// VEGA-FORK: evaluate POC::CocoaKBQuery "cocoakb_query": look a fact up in
+  /// the Cocoa metadata database (cocoa.sqlite) so bindings can be checked
+  /// against the SDK at compile time. See COCOA_DESIGN.md.
+  FailureOr<TypedAttr> evaluateCocoaKBQuery(ParamOperatorAttr op);
+
   /// Evaluate POC::DataToStr "data_to_str" operator.
   FailureOr<TypedAttr> evaluateDataToStr(ParamOperatorAttr op, bool reset);
 

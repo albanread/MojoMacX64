@@ -117,6 +117,12 @@ StringRef MojoConfig::getMGPRTPath() {
   return getPath(STRINGIFY_MOJO_CONFIG(".mgprt_path"), "lib/libMGPRT" EXT);
 }
 
+// VEGA-FORK: overridable as MODULAR_MOJO_MAX_COCOAKB_PATH, defaulting inside
+// the package so a normal install needs no configuration.
+StringRef MojoConfig::getCocoaKBPath() {
+  return getPath(STRINGIFY_MOJO_CONFIG(".cocoakb_path"), "lib/cocoa.sqlite");
+}
+
 //===----------------------------------------------------------------------===//
 // Driver Configurations
 //===----------------------------------------------------------------------===//

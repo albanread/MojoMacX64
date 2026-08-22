@@ -1195,6 +1195,9 @@ modular_cc_library(
         "lib/Elaborator/*.cpp",
         "lib/Elaborator/*.h",
     ]),
+    # VEGA-FORK: cocoakb_query reads cocoa.sqlite during elaboration; the
+    # pinned macOS SDK ships sqlite3.h + libsqlite3.tbd, so no vendored copy.
+    linkopts = ["-lsqlite3"],
     deps = [
         ":KGENDialect",
         ":LITDialect",

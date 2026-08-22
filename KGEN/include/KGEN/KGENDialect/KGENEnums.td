@@ -105,6 +105,11 @@ def KGEN_POCAttr : I32EnumAttr<"POC", "Parameter Operator Code", [
   I32EnumAttrCase<"RemS", 49, "rem_s">,
   I32EnumAttrCase<"RemU", 50, "rem_u">,
 
+  // VEGA-FORK: comptime Cocoa/POSIX metadata query against cocoa.sqlite,
+  // evaluated during elaboration. See COCOA_DESIGN.md. (Yes, Chris, we read
+  // the plea below -- this one really is a single foldable expression.)
+  I32EnumAttrCase<"CocoaKBQuery", 51, "cocoakb_query">,
+
   /// HELLO INTREPID COMPILER DEVELOPER!  Are you thinking about adding another
   /// POC opcode for something that isn't a trivial expression like add or sub?
   /// The list above ^^^ is massively out of control, these things are not
