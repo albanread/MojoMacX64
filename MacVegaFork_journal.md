@@ -1421,3 +1421,65 @@ hand and gets wrong, and pays nothing for it. Two general KGEN fixes
 Next: prove it drives a real app — a native NSWindow Mandelbrot that times CPU
 vs GPU and renders into a Metal texture at 60fps, the Mac answer to the Windows
 D3D example.
+
+## 2026-08-22 — Cocoa Mandelbrot: the two halves meet at 60fps
+
+The capstone runs. A native macOS app, written entirely in Mojo, that computes
+a mandelbrot on the Vega II each frame and presents it through a CAMetalLayer:
+
+```
+Mandelbrot 1024 x 768 , 256 iterations
+  CPU: 149.8 ms
+  GPU: AMD Radeon Pro Vega II (Apple Metal)
+  GPU: 0.40 ms  ( 374.5 x faster )
+Rendering. Close the window to quit.
+  frame 120 — 60.3 fps
+  frame 240 — 60.2 fps
+```
+
+Locked to 60fps by the drawable's vsync, exactly like the Windows D3D example
+it answers. It is the first thing that exercises **both** halves of the fork at
+once — the AIR GPU backend computing the fractal, and the Cocoa dispatch layer
+driving AppKit and Metal — and neither strains.
+
+**It came together fast because the foundations were right.** Each risky piece
+was proven as its own spike first: `window_smoke` (an AppKit event loop pumped
+from Mojo — the frame height reading back 508 = 480 content + 28 title bar was
+the tell that the NSRect struct arg had landed correctly), then `compute_smoke`
+(CPU vs GPU, 99.86% exact agreement — the 0.14% that differ are the chaotic
+boundary band where Float32 FMA-vs-mul/add rounding shifts the escape count,
+inherent to the algorithm, not a bug). With those green the full app was
+assembly.
+
+**One gap surfaced and closed cleanly: protocol-typed objects.** Metal traffics
+in `id<MTLDevice>`, `id<MTLTexture>`, `id<MTLCommandBuffer>` — the concrete
+class is unknown at compile time, so the class-keyed `msg_send` cannot look
+them up. But a selector carries the same ABI wherever it is implemented, so two
+selector-keyed queries (majority ABI across implementing classes) plus a
+`std.objc.send` gave a protocol path that still checks dispatch, arg count and
+register file — only the receiver class is unchecked. `CAMetalLayer` and
+`CAMetalDrawable` are concrete classes already in the database, so the display
+objects stayed fully class-checked; only the true protocol calls
+(`newCommandQueue`, `replaceRegion:…`, `presentDrawable:`, `commit`) use the
+selector path.
+
+**Why the C-speed dispatch mattered here, concretely.** The render loop makes a
+couple of dozen sends per frame — event pump, drawable, texture upload, present,
+commit — 60 times a second. At the original 3660ns/send that is ~5ms/frame of
+pure binding overhead, enough to miss the frame. At 3ns it is unmeasurable, and
+the 60fps is entirely the GPU and the compositor. The optimisation the user
+pushed for is the reason the checked binding is usable in a real-time loop at
+all.
+
+The struct-argument ABI got a real workout too: the window's `NSRect` (32 bytes,
+stack), `CAMetalLayer setDrawableSize:` taking a `CGSize` (16 bytes, xmm pair),
+and `replaceRegion:` taking a 48-byte `MTLRegion` on the stack — three
+different SysV struct-argument classes, all correct through the same
+function-pointer-cast path, none written by hand.
+
+What a hand binding would have gotten wrong and this did not: the msgSend
+variant per call, the register file for each scalar, the exact argument counts,
+the struct-vs-scalar classification of three different geometry types, and the
+retain/release balance of every autoreleased NSString built for a title or a
+run-loop mode. The compiler checked all of it, and the app is ~450 lines with
+no binding boilerplate.
