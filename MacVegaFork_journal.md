@@ -438,3 +438,38 @@ corrects and enriches the record above:
   of the address-space stripping it was blamed for mid-debug (the AS0 came
   from Mojo's generic-pointer elaboration all along) and is now back in the
   emission pipeline where upstream intended it. vecadd still passes.
+
+## 2026-08-22 — Phase 4 opens: wave64 passes, and a review names the disease
+
+`WAVE64-PRIMITIVES: PASS` — `shuffle_xor` round-trips and `warp.sum(1)`
+returns 64 on the Vega II. Getting there surfaced, in order: warp ops
+reaching AIR as calls to undefined labels (the stdlib emits bare stems like
+`air.simd_shuffle_xor`; AIR's real functions are type-mangled —
+`air.simd_shuffle_xor.u.i32(i32, i16)`, mask is **i16**, harvested from a
+golden MSL probe; the backend now carries `mangleAirOps`), then
+`warp.sum` returning **32**: `_resolve_warp_size()` hardcodes
+`is_apple_gpu() → 32` ahead of its own GPUInfo fallback. One-line re-gate.
+
+Then a review (Alban) reframed the whole pass, with numbers that verify
+exactly: **92 `is_amd_gpu()` sites, zero `WARP_SIZE ==` comparisons**
+across stdlib + kernels. The tree encodes lane count as vendor identity;
+this fork's GPU is the first target where vendor (Apple path) and lane
+count (64) disagree, and the codebase had no vocabulary for it. The wave64
+logic largely already exists (`_reduce` handles `num_lanes >= 64`, CDNA
+permlane paths) — gated behind the wrong predicate. Triage is therefore
+substantially **re-gating, not authoring**:
+
+- `std.gpu.globals` now carries the missing vocabulary: `is_wave64()` /
+  `is_wave32()`.
+- `triage/warp-gating-sites.md` pre-classifies all 92 sites (heuristics:
+  24 ISA-dispatch, 14 wave-width, 55 for human eyes — review offered to
+  sort the remainder).
+- Map #3 (the `AppleMetalFamily(warp_size=32)` constant) was already
+  covered by `AMDMetalFamily`; the `_FULL_MASK = UInt(2**WARP_SIZE - 1)`
+  tripwire did not fire at WARP_SIZE=64 (module scope evaluated in the
+  warp smoke). Both now verified rather than assumed.
+- Also adopted: land the AIR legalization inside `LLVMIRDowngradePass`
+  (`kgen-metal-air`) eventually — the documented pipeline home.
+
+The basics sweep (55 tests) is running; first finds include an expected
+NVIDIA-only reject and a genuine compiler abort on `test_grid_dim`.

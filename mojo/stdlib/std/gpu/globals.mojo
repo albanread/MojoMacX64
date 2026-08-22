@@ -65,11 +65,36 @@ def _resolve_warp_size() -> Int:
     elif is_amd_gpu():
         return 64
     elif is_apple_gpu():
-        return 32
+        # VEGA-FORK: Metal drives GCN here too (wave64); ask GPUInfo instead
+        # of assuming Apple-silicon's 32.
+        return GPUInfo.from_name[_accelerator_arch()]().warp_size
     elif _accelerator_arch() == "":
         return 0
     else:
         return GPUInfo.from_name[_accelerator_arch()]().warp_size
+
+
+def is_wave64() -> Bool:
+    """VEGA-FORK: True when the target's warp/wave width is 64 lanes.
+
+    The tree historically encoded lane count as vendor identity (wave64 was
+    reachable only via `is_amd_gpu()`). This fork's primary GPU is AMD
+    silicon behind an Apple target — vendor and lane count disagree — so
+    wave-width gates must ask this, not the vendor.
+
+    Returns:
+        True when `WARP_SIZE` is 64.
+    """
+    return WARP_SIZE == 64
+
+
+def is_wave32() -> Bool:
+    """VEGA-FORK: True when the target's warp/wave width is 32 lanes.
+
+    Returns:
+        True when `WARP_SIZE` is 32.
+    """
+    return WARP_SIZE == 32
 
 
 # ===-----------------------------------------------------------------------===#
