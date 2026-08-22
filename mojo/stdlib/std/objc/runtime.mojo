@@ -8,6 +8,7 @@
 
 from std.ffi import external_call, c_char
 from std.memory import OpaquePointer
+from std.reflection import reflect
 from std.sys.info import TrivialRegisterPassable
 from std.sys._cocoakb import (
     cocoakb_msgsend_variant,
@@ -116,6 +117,48 @@ def _count_arg_classes(classes: StaticString) -> Int:
     return n
 
 
+# Classify the n-th comma-separated ABI field of `classes` without building a
+# substring (awkward at comptime): 0 = absent, 1 = purely SSE (every eightbyte
+# 'f', a float register), 2 = anything else (integer/pointer/struct/memory).
+@always_inline
+def _nth_class_kind(classes: StaticString, n: Int) -> Int:
+    var bytes = classes.as_bytes()
+    var field = 0
+    var start = 0
+    for i in range(len(bytes) + 1):
+        var at_sep = i == len(bytes) or bytes[i] == UInt8(ord(","))
+        if at_sep:
+            if field == n:
+                if i == start:
+                    return 0  # empty field
+                var all_f = True
+                for j in range(start, i):
+                    if bytes[j] != UInt8(ord("f")):
+                        all_f = False
+                return 1 if all_f else 2
+            field += 1
+            start = i + 1
+    return 0
+
+
+@always_inline
+def _type_is_float(name: StaticString) -> Bool:
+    """A conservative float test on a reflected type name: true only for the
+    scalar float SIMD types, so we never mis-flag a pointer or integer."""
+    return (
+        name == "SIMD[DType.float64, 1]"
+        or name == "SIMD[DType.float32, 1]"
+        or name == "SIMD[DType.float16, 1]"
+        or name == "SIMD[DType.bfloat16, 1]"
+    )
+
+
+@always_inline
+def _type_is_scalar_int(name: StaticString) -> Bool:
+    """True only for the plain scalar integer types we can be sure about."""
+    return name == "SIMD[DType.int, 1]" or name == "SIMD[DType.index, 1]"
+
+
 @always_inline
 def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
     Int
@@ -182,6 +225,37 @@ def msg_send[
         + String(args.__len__())
         + " were passed."
     )
+    # Per-argument register-file check: a float passed where the ABI wants an
+    # integer register (or the reverse) is a silent xmm-vs-rdi corruption. We
+    # only flag the cases we are certain of -- a scalar float vs a purely-SSE
+    # class -- and skip structs/unknowns, so there are no false positives.
+    comptime arg_classes = cocoakb_method_arg_classes[cls, selector, is_class]()
+    comptime for i in range(args.__len__()):
+        comptime name = reflect[Ts[i]].name()
+        comptime kind = _nth_class_kind(arg_classes, i)
+        # kind: 1 = float register expected, 2 = integer/pointer/struct.
+        comptime if _type_is_float(name) and kind == 2:
+            comptime assert False, (
+                "std.objc: argument "
+                + String(i)
+                + " of '"
+                + selector
+                + "' on "
+                + cls
+                + " is a float, but the ABI expects an integer/pointer"
+                + " register here. Check the argument type."
+            )
+        comptime if _type_is_scalar_int(name) and kind == 1:
+            comptime assert False, (
+                "std.objc: argument "
+                + String(i)
+                + " of '"
+                + selector
+                + "' on "
+                + cls
+                + " is an integer, but the ABI expects a float register here."
+                + " Pass a Float32/Float64."
+            )
     var stub = _stub_addr[cls, selector, is_class]()
     var s = sel[selector]().ptr()
     # Cast the stub address to the exact function-pointer type for this call
