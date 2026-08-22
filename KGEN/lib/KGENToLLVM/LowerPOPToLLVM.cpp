@@ -1478,6 +1478,33 @@ struct ConvertPOPCallLLVMIntrinsic
 
     StringRef intrinsicName = cast<StringAttr>(op.getIntrin());
 
+    // VEGA-FORK: `llvm.air.*` names are AIR builtins, not real LLVM
+    // intrinsics — they fail CallIntrinsicOp verification/translation. Lower
+    // them to calls of `air.*`-named external functions; the AIR backend
+    // later converts those calls into kernel parameters with AIR metadata.
+    if (intrinsicName.starts_with("llvm.air.")) {
+      auto module = op->getParentOfType<ModuleOp>();
+      std::string fnName = intrinsicName.drop_front(strlen("llvm.")).str();
+      auto operands =
+          expandOperands(rewriter, op.getLoc(), adaptor.getOperands(),
+                         op.getOperands().getTypes(), *getTypeConverter());
+      SmallVector<Type> argTypes;
+      for (Value v : operands)
+        argTypes.push_back(v.getType());
+      Type resType = types.empty()
+                         ? LLVM::LLVMVoidType::get(rewriter.getContext())
+                         : types[0];
+      auto fnType = LLVM::LLVMFunctionType::get(resType, argTypes);
+      auto fn = module.lookupSymbol<LLVM::LLVMFuncOp>(fnName);
+      if (!fn) {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(module.getBody());
+        fn = LLVM::LLVMFuncOp::create(rewriter, op.getLoc(), fnName, fnType);
+      }
+      rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, fn, operands);
+      return success();
+    }
+
     // Special handling for masked.load: convert alignment operand to attribute
     if (intrinsicName == "llvm.masked.load") {
       auto operands =

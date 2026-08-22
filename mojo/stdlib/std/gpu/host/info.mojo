@@ -195,6 +195,17 @@ comptime AppleMetalFamily = AcceleratorArchitectureFamily(
 )
 """Apple Metal GPU architecture family."""
 
+# VEGA-FORK: GCN (Vega/Polaris) driven through Metal — wave64, 64 KiB LDS.
+# Measured on the machine in spike S1 (see MacVegaFork_journal.md).
+comptime AMDMetalFamily = AcceleratorArchitectureFamily(
+    warp_size=64,
+    threads_per_multiprocessor=40 * 64,
+    shared_memory_per_multiprocessor=64 * _KB,
+    max_registers_per_block=64 * _K,
+    max_thread_block_size=_K,
+)
+"""AMD GCN-through-Metal architecture family (MacVegaFork)."""
+
 # ===-----------------------------------------------------------------------===#
 # AcceleratorArchitectureFamily
 # ===-----------------------------------------------------------------------===#
@@ -275,6 +286,23 @@ def _get_metal_m1_target() -> _TargetType:
         `#kgen.target<triple = "air64-apple-macosx", `,
         `stdlib_plugin = "metal", `,
         `arch = "apple-m1", `,
+        `features = "+metal3_2,+air2_7_0", `,
+        `data_layout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32", `,
+        `simd_bit_width = 128`,
+        `> : !kgen.target`,
+    ]
+
+
+def _get_metal_vega2_target() -> _TargetType:
+    """MLIR target for the Radeon Pro Vega II driven through Metal (VEGA-FORK).
+
+    Returns:
+        MLIR target configuration for the Vega II.
+    """
+    return __mlir_attr[
+        `#kgen.target<triple = "air64-apple-macosx", `,
+        `stdlib_plugin = "metal", `,
+        `arch = "metal-vega2", `,
         `features = "+metal3_2,+air2_7_0", `,
         `data_layout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32", `,
         `simd_bit_width = 128`,
@@ -445,6 +473,17 @@ comptime MetalM1 = GPUInfo.from_family(
     sm_count=8,  # M1 has 8 GPU cores
 )
 """Apple M1 GPU configuration."""
+
+comptime MetalVega2 = GPUInfo.from_family(
+    family=AMDMetalFamily,
+    name="Radeon Pro Vega II",
+    api="metal",
+    arch_name="metal-vega2",
+    compute=3.0,  # Metal 3 family (verified in S1)
+    version="metal_3",
+    sm_count=64,  # 64 CUs (Vega 20)
+)
+"""Radeon Pro Vega II through Metal (VEGA-FORK)."""
 
 comptime MetalM2 = GPUInfo.from_family(
     family=AppleMetalFamily,
@@ -1774,6 +1813,8 @@ struct GPUInfo(Copyable, Equatable, Movable, RegisterPassable, Writable):
         Returns:
             MLIR target configuration for the GPU.
         """
+        if self.name == "Radeon Pro Vega II":
+            return _get_metal_vega2_target()
         if self.name == "NVIDIA Tesla P100":
             return _get_teslap100_target()
         if self.name == "NVIDIA GeForce GTX 1060":
@@ -2099,6 +2140,7 @@ comptime _all_targets = (
     StaticString("apple-m4-metal4"),
     StaticString("apple-m5"),
     StaticString("apple-m5-metal4"),
+    StaticString("metal-vega2"),  # VEGA-FORK
     StaticString("cuda"),
 )
 
@@ -2213,6 +2255,8 @@ def _get_info_from_target[target_arch0: StaticString]() -> GPUInfo:
         return materialize[Radeon9060]()
     elif target_arch == "gfx1201":
         return materialize[Radeon9070]()
+    elif target_arch == "metal-vega2":
+        return materialize[MetalVega2]()
     elif target_arch == "apple-m1":
         return materialize[MetalM1]()
     elif target_arch == "apple-m1-metal4":

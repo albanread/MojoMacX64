@@ -1260,6 +1260,7 @@ modular_cc_library(
         [
             "lib/Compiler/ObjectCompiler/*.h",
             "lib/Compiler/ObjectCompiler/LLVM/Transforms/*.h",
+            "lib/Compiler/ObjectCompiler/LLVM/Bitcode/17/*.h",  # VEGA-FORK: AirBackend uses BitcodeWriter17
             "lib/Compiler/ObjectCompiler/Target/**/*.h",
         ],
         # Owned by :HostBackend.

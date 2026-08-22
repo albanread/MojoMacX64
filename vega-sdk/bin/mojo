@@ -4,4 +4,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export MODULAR_MOJO_MAX_COMPILERRT_PATH="$ROOT/lib/libKGENCompilerRTShared.dylib"
 export MODULAR_MOJO_MAX_IMPORT_PATH="$ROOT/pkg${MODULAR_MOJO_MAX_IMPORT_PATH:+,$MODULAR_MOJO_MAX_IMPORT_PATH}"
 export DYLD_LIBRARY_PATH="$ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+# When building executables, link VegaRT (the AsyncRT device runtime).
+if [ "${1:-}" = "build" ]; then
+  shift
+  exec "$ROOT/bin/mojo-driver" build \
+    -Xlinker "-L$ROOT/lib" -Xlinker -lVegaRT -Xlinker "-rpath" -Xlinker "$ROOT/lib" \
+    "$@"
+fi
 exec "$ROOT/bin/mojo-driver" "$@"

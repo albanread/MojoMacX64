@@ -233,11 +233,14 @@ std::vector<id> &allDevices() {
 }
 
 std::string archForName(const std::string &name) {
+  // Arch strings must classify as APPLE_GPU in the stdlib's
+  // _vendor_from_arch (substring matching: "amd"/"gfx"/"mi" would misroute
+  // device codegen to HIP paths). Hence metal-*.
   if (name.find("Vega II") != std::string::npos)
-    return "amd-vega2";
+    return "metal-vega2";
   if (name.find("580X") != std::string::npos)
-    return "amd-polaris";
-  return "amd-metal-unknown";
+    return "metal-polaris";
+  return "metal-unknown";
 }
 
 } // namespace
@@ -349,7 +352,13 @@ const char *VegaRTMetal_createBuffer(VRMetalBuf **out, void **devAddr,
   buf->ownsBuffer = true;
   buf->bytes = bytes;
   buf->isHost = host;
-  buf->gpuBase = msg<unsigned long long>(buffer, "gpuAddress");
+  // The address handed to Mojo (and used as this buffer's registry base):
+  // device buffers expose their GPU virtual address; host (shared-storage)
+  // buffers expose their CPU-dereferenceable contents pointer — Mojo reads
+  // and writes host buffers directly.
+  buf->gpuBase = host ? reinterpret_cast<uint64_t>(msg<char *>(buffer,
+                                                               "contents"))
+                      : msg<unsigned long long>(buffer, "gpuAddress");
   registerRoot(buf, allocBytes);
   *out = buf;
   *devAddr = reinterpret_cast<void *>(buf->gpuBase);

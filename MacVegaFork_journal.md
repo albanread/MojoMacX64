@@ -344,3 +344,65 @@ Next (phase 3): the target entry (`MetalVega2`, `_all_targets`, warp 64) so
 `--target-accelerator` accepts this GPU, then the AIR trio against the S1
 reference metallib — at which point ordinary Mojo GPU code compiles and
 launches through everything built today.
+
+## 2026-08-22 — Phase 3: MOJO-ON-VEGA: PASS
+
+```
+device: AMD Radeon Pro Vega II (Apple Metal)
+vecadd: 0 / 1024 wrong
+MOJO-ON-VEGA: PASS
+```
+
+Ordinary Mojo GPU code — `DeviceContext`, `enqueue_function`, `global_idx`,
+unchanged from what anyone writes for NVIDIA — compiled through the fork's
+own AIR trio and executed on the Vega II. The chain, every link from source:
+
+Mojo → KGEN elaboration → LowerPOP (`llvm.air.*` → extern-call branch) →
+**AirBackend legalization** (builtin calls → trailing kernel params with AIR
+metadata; kernel pointer params AS0→AS1 with use-graph retyping; `air.kernel`
+metadata with location_index == parameter order, exactly what VegaRT binds;
+host target-attrs scrubbed) → **PointerRewriter** → **BitcodeWriter17** →
+`xcrun metallib` → embedded per-kernel in the x86-64 host binary → VegaRT
+`loadFunction` (MTLB sniff) → `MetalEnqueueFunctionArgs` protocol →
+interval-map buffer binding → `dispatchThreadgroups` → GCN.
+
+What the day's debugging established, for the record:
+
+- **The stdlib target entry took six edit sites** and one naming trap:
+  `_vendor_from_arch` substring-matches `"amd"` *before* `"metal"`, so the
+  design's `amd-vega2` would have misrouted device codegen down HIP paths.
+  The arch token is **`metal-vega2`**.
+- `--target-accelerator` flows exactly as the sister port documented; the
+  TargetMachine for air64 is built for arm64 (the upstream comment's
+  convention) — but only via `adjustOptionsForTargetMachine`, never
+  globally: adjusting the global options wipes GPU address spaces at
+  MLIR-lowering time. And AIR kernels need AS1 pointer params, which Mojo's
+  generic-AS0 elaboration never provides — that rewrite is half of what the
+  closed MetalAIRPass must have done.
+- **`llvm-dis` lies about old bitcode.** The golden .air *looked* like
+  opaque-pointer IR; its bitstream actually carries typed POINTER records,
+  and the driver's "Failed to upgrade function bitcode" is what rejecting
+  opaque record code 25 looks like. `llvm-bcanalyzer` tells the truth.
+- **`metal -x ir` / `air-as` are not the AIR writer** — they emit modern
+  opaque bitcode the runtime rejects. The in-tree
+  **PointerRewriter + BitcodeWriter17 are a cooperating pair** (the file
+  comments even say so); together they emit the typed-record encoding.
+  `WriteBitcode17ToFile` writes the bitcode-wrapper header itself — the
+  double-wrap this caused contaminated an entire bisection round and briefly
+  convicted the innocent writer.
+- The Metal toolchain hides a full AIR binutils (`air-as`, `air-opt`,
+  `air-objdump`, and **`amdgpu-nt`** — the AIR→GCN translator as a
+  standalone tool). `amdgpu-nt` turns the driver's opaque pipeline errors
+  into real diagnostics; it also revealed the runtime accepts AIR 2.6 on
+  this GPU while the standalone tool's fallback plugin caps at 2.5.
+- The comptime kernel cache will happily serve a stale kernel while you
+  debug the backend: `MODULAR_CACHE_DIR` per iteration.
+- One more VegaRT correction en route: **host (shared-storage) buffers hand
+  Mojo their `contents` pointer** (host-dereferenceable), not their
+  gpuAddress token; the registry keys each buffer by whichever address it
+  exposed.
+
+The design's highest-risk item — R2, the AIR trio — is retired. What remains
+in phase 3/4: warp-level tests on wave64, `--emit=asm` cosmetics for the
+device lane, the gpu-lane test-suite wiring, and then the kernel-library
+triage.
