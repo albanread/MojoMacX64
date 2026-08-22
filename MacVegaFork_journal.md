@@ -1784,3 +1784,43 @@ it; the README carries the recipe.
 Verified before the demo — `sys.version` 3.12.14, numpy arrays round-tripping,
 pygame importing — then the Game of Life ran: green cells evolving in a pygame
 window, driven from Mojo on the Intel Mac.
+
+## 2026-08-22 — A Cocoa Game of Life, and two lifetime traps
+
+The pygame example runs now, but it is a poor demo: no pause, no drawing, one
+colour regardless of a cell's history. `spikes/life/life.mojo` is the Cocoa
+answer — pause/resume and single-step, draw with the mouse (erase with shift or
+the right button), clear, randomise, speed control, live stats in the title —
+and cells **coloured by age**: newborns burn white, survivors cool through cyan
+and green to deep blue, and dead cells leave a fading ember. A glider reads as
+a bright head with a warm tail; a still life sits quiet and blue. The view is
+an `NSView` subclass defined at runtime whose mouse and key handlers are Mojo
+functions; rendering is a BGRA blit into a `CAMetalLayer` drawable.
+
+**Two crashes, both about lifetime, both instructive.**
+
+`autorelease pool page corrupted` came from an early `return` *inside* a
+`with autoreleasepool():` block — the pop never ran, so the pool stack
+desynchronised. Restructured to one pool per tick with no early exit, and
+`__exit__` is now idempotent so a double pop cannot corrupt the page.
+
+The second was subtler and is a genuine Mojo trap. The stack showed
+`String::_add` → `tc_memalign` → SIGSEGV: heap corruption surfacing in the
+allocator, far from its cause. The real bug:
+
+```mojo
+var alive = List[UInt8](length=CELLS, fill=0)
+g_alive()[] = Int(alive.unsafe_ptr())   # last use of `alive`
+```
+
+**Mojo destroys a value at its LAST USE, not at end of scope.** The `List` was
+freed the instant its pointer was stashed, so every buffer dangled; the app ran
+for seconds looking healthy and then died allocating a string. Fixed by owning
+the buffers outside Mojo (`calloc` through the extern-symbol cast), which makes
+the lifetime explicit. Worth remembering for any long-lived buffer whose raw
+pointer outlives the expression that produced it — exactly what a callback-based
+UI needs.
+
+`ObjCClassBuilder` gained a `superclass` struct parameter (so
+`ObjCClassBuilder["NSView"]("LifeView")` works) and an `IMP0Bool` shape for
+zero-argument predicates like `acceptsFirstResponder`.

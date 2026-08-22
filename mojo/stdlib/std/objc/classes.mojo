@@ -22,6 +22,7 @@ comptime P = OpaquePointer[MutUntrackedOrigin]
 # The IMP shapes a Cocoa callback takes: (self, _cmd) then the message args.
 comptime IMP0 = def(P, P, /) thin abi("C") -> None
 comptime IMP1 = def(P, P, P, /) thin abi("C") -> None
+comptime IMP0Bool = def(P, P, /) thin abi("C") -> Bool
 comptime IMP1Bool = def(P, P, P, /) thin abi("C") -> Bool
 comptime IMP2 = def(P, P, P, P, /) thin abi("C") -> None
 
@@ -46,11 +47,12 @@ def _leak_cstr(s: String) -> P:
     return external_call["strdup", P](local.as_c_string_slice())
 
 
-struct ObjCClassBuilder:
+struct ObjCClassBuilder[superclass: StaticString = "NSObject"]:
     """Builds an Objective-C class at runtime.
 
     ```mojo
-    var b = ObjCClassBuilder["NSObject"]("MyDelegate")
+    var b = ObjCClassBuilder("MyDelegate")            # subclass of NSObject
+    var v = ObjCClassBuilder["NSView"]("MyView")      # or any other class
     b.add_method["applicationDidFinishLaunching:"](did_launch)   # encoding from the SDK
     b.add_method["buttonClicked:", encoding="v@:@"](clicked)      # custom selector
     var cls = b^.register()
@@ -61,8 +63,8 @@ struct ObjCClassBuilder:
     var _cls: Int
     var _name: String
 
-    def __init__[superclass: StaticString = "NSObject"](out self, name: String):
-        var sup = ObjCClass.lookup[superclass]()
+    def __init__(out self, name: String):
+        var sup = ObjCClass.lookup[Self.superclass]()
         var local = name
         var cls = external_call["objc_allocateClassPair", P](
             P(unsafe_from_address=sup.as_object().addr()),
@@ -89,6 +91,11 @@ struct ObjCClassBuilder:
     def add_method[
         selector: StaticString, encoding: StaticString = ""
     ](mut self, imp: IMP1):
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_method[
+        selector: StaticString, encoding: StaticString = ""
+    ](mut self, imp: IMP0Bool):
         self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
 
     def add_method[

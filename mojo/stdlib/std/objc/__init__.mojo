@@ -19,6 +19,7 @@ from .classes import (
     ObjCClassBuilder,
     IMP0,
     IMP1,
+    IMP0Bool,
     IMP1Bool,
     IMP2,
     new_instance,

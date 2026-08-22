@@ -386,6 +386,13 @@ struct autoreleasepool:
         )
 
     def __exit__(mut self):
+        # Guard against a double pop: popping a token twice corrupts the pool
+        # page ("autorelease pool page corrupted"), which is a hard crash far
+        # from the cause.
+        if self._token == 0:
+            return
+        var token = self._token
+        self._token = 0
         external_call["objc_autoreleasePoolPop", NoneType](
-            _RawPtr(unsafe_from_address=self._token)
+            _RawPtr(unsafe_from_address=token)
         )
