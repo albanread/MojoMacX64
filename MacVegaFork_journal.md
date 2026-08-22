@@ -1409,3 +1409,15 @@ Qwen3-30B-A3B (MoE, 3B active), where the interesting risk is that top-k
 expert routing runs through `argsort`/`top_k`/`get_rows` — the wave64-suspect
 families — and wrong routing produces fluent, subtly worse output rather than
 an obvious failure. The perplexity harness above is what will catch it.
+
+### Capstone note
+
+The C-speed dispatch result is the moment the Cocoa design fully arrived: a
+message send that is checked four ways at compile time (selector exists,
+correct objc_msgSend variant, correct argument count, correct register file)
+and costs 3ns at runtime. The compiler does the work a hand-binding does by
+hand and gets wrong, and pays nothing for it. Two general KGEN fixes
+(extern-symbol and named-global dedup) fell out, useful to any Mojo FFI code.
+Next: prove it drives a real app — a native NSWindow Mandelbrot that times CPU
+vs GPU and renders into a Metal texture at 60fps, the Mac answer to the Windows
+D3D example.
