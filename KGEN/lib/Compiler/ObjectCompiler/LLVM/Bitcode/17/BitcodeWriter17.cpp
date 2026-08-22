@@ -699,13 +699,21 @@ uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
   switch (Kind) {
   default:
   case Attribute::Captures:
+  // VEGA-FORK (triage finding): stable bitcode attribute codes above ~77
+  // postdate Apple's AIR reader — air-opt reports e.g. "Unknown attribute
+  // kind (82)" for allockind. Encode them as unsupported (dropped).
+  case Attribute::AllocAlign:
+  case Attribute::AllocatedPointer:
+  case Attribute::AllocKind:
+  case Attribute::DisableSanitizerInstrumentation:
+  case Attribute::FnRetThunkExtern:
+  case Attribute::HybridPatchable:
+  case Attribute::NoFPClass:
     // Return 0 for unknown attributes (newer LLVM attributes not supported
     // in 5.0)
     return M::KGEN::LLVM::UNSUPPORTED_ATTR_KIND_ENCODING;
   case Attribute::Alignment:
     return bitc::ATTR_KIND_ALIGNMENT;
-  case Attribute::AllocAlign:
-    return bitc::ATTR_KIND_ALLOC_ALIGN;
   case Attribute::AllocSize:
     return bitc::ATTR_KIND_ALLOC_SIZE;
   case Attribute::AlwaysInline:
@@ -720,16 +728,10 @@ uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_IN_ALLOCA;
   case Attribute::Cold:
     return bitc::ATTR_KIND_COLD;
-  case Attribute::DisableSanitizerInstrumentation:
-    return bitc::ATTR_KIND_DISABLE_SANITIZER_INSTRUMENTATION;
-  case Attribute::FnRetThunkExtern:
-    return bitc::ATTR_KIND_FNRETTHUNK_EXTERN;
   case Attribute::Hot:
     return bitc::ATTR_KIND_HOT;
   case Attribute::ElementType:
     return bitc::ATTR_KIND_ELEMENTTYPE;
-  case Attribute::HybridPatchable:
-    return bitc::ATTR_KIND_HYBRID_PATCHABLE;
   case Attribute::InlineHint:
     return bitc::ATTR_KIND_INLINE_HINT;
   case Attribute::InReg:
@@ -738,13 +740,7 @@ uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_JUMP_TABLE;
   case Attribute::MinSize:
     return bitc::ATTR_KIND_MIN_SIZE;
-  case Attribute::AllocatedPointer:
-    return bitc::ATTR_KIND_ALLOCATED_POINTER;
-  case Attribute::AllocKind:
-    return bitc::ATTR_KIND_ALLOC_KIND;
 
-  case Attribute::NoFPClass:
-    return bitc::ATTR_KIND_NOFPCLASS;
   case Attribute::Naked:
     return bitc::ATTR_KIND_NAKED;
   case Attribute::Nest:

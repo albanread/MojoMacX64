@@ -179,6 +179,41 @@ static void downgradeLifetimeIntrinsics(Module &module,
   }
 }
 
+namespace {
+
+// VEGA-FORK (triage finding, print-format cluster): the AIR encoding is
+// LLVM-5-vintage — BitcodeWriter17 hard-crashes (llvm_unreachable) on
+// `freeze` (introduced LLVM 10) and unary `fneg` (LLVM 8), which the
+// mid-level optimizer freely introduces. Standard downgrade practice
+// (cf. Julia's llvm-downgrade): freeze folds to its operand; fneg lowers
+// to fsub(-0.0, x) with fast-math flags preserved.
+void downgradeFreezeAndFNeg(llvm::Module &module) {
+  for (llvm::Function &fn : module) {
+    for (llvm::BasicBlock &bb : fn) {
+      for (llvm::Instruction &inst : llvm::make_early_inc_range(bb)) {
+        if (auto *freeze = llvm::dyn_cast<llvm::FreezeInst>(&inst)) {
+          freeze->replaceAllUsesWith(freeze->getOperand(0));
+          freeze->eraseFromParent();
+          continue;
+        }
+        auto *unary = llvm::dyn_cast<llvm::UnaryOperator>(&inst);
+        if (unary && unary->getOpcode() == llvm::Instruction::FNeg) {
+          llvm::IRBuilder<> builder(unary);
+          llvm::Value *sub = builder.CreateFSub(
+              llvm::ConstantFP::getNegativeZero(unary->getType()),
+              unary->getOperand(0));
+          if (auto *subInst = llvm::dyn_cast<llvm::Instruction>(sub))
+            subInst->copyFastMathFlags(unary);
+          unary->replaceAllUsesWith(sub);
+          unary->eraseFromParent();
+        }
+      }
+    }
+  }
+}
+
+} // namespace
+
 namespace M::KGEN {
 
 // Implementation of MetalAIRPass::run
@@ -186,6 +221,7 @@ PreservedAnalyses LLVMIRDowngradePass::run(Module &module,
                                            ModuleAnalysisManager &mam) {
 
   downgradeLifetimeIntrinsics(module, mam);
+  downgradeFreezeAndFNeg(module);
   return PreservedAnalyses::all();
 }
 

@@ -138,7 +138,35 @@ static FunctionType *getTypedFunctionType(const Function *func) {
 
   // handle known intrinsics
   if (func->isIntrinsic()) {
+    auto i8In = [&](unsigned paramIdx) {
+      return TypedPointerType::get(
+          Type::getInt8Ty(ctx),
+          fTy->getParamType(paramIdx)->getPointerAddressSpace());
+    };
     switch (func->getIntrinsicID()) {
+    // VEGA-FORK (triage finding): without typed signatures these emit `{}*`
+    // params while call args carry inferred types; Apple's typed-pointer
+    // reader type-checks INST_CALL against the explicit fnty and rejects.
+    case Intrinsic::lifetime_start:
+    case Intrinsic::lifetime_end:
+      // void @llvm.lifetime.{start,end}(i64, i8* nocapture)
+      return FunctionType::get(Type::getVoidTy(ctx),
+                               {fTy->getParamType(0), i8In(1)}, false);
+    case Intrinsic::memset:
+    case Intrinsic::memset_inline:
+      // void @llvm.memset(i8* dst, i8, i64, i1)
+      return FunctionType::get(Type::getVoidTy(ctx),
+                               {i8In(0), fTy->getParamType(1),
+                                fTy->getParamType(2), fTy->getParamType(3)},
+                               false);
+    case Intrinsic::memcpy:
+    case Intrinsic::memmove:
+    case Intrinsic::memcpy_inline:
+      // void @llvm.mem{cpy,move}(i8* dst, i8* src, i64, i1)
+      return FunctionType::get(Type::getVoidTy(ctx),
+                               {i8In(0), i8In(1), fTy->getParamType(2),
+                                fTy->getParamType(3)},
+                               false);
     case Intrinsic::vastart:
       // void @llvm.va_start(i8* <arglist>)
       return FunctionType::get(
@@ -420,16 +448,8 @@ static bool bitcastInstructionOperands(Module &module) {
       prependBitcast(module, gep, gep->getPointerOperandIndex());
       appendBitcast(module, gep);
     } else if (auto *alloca = dyn_cast<AllocaInst>(inst)) {
-      if (llvm::any_of(alloca->users(), [](User *user) {
-            auto *intr = dyn_cast<IntrinsicInst>(user);
-            return intr &&
-                   (intr->getIntrinsicID() == Intrinsic::lifetime_start ||
-                    intr->getIntrinsicID() == Intrinsic::lifetime_end);
-          })) {
-        // LLVM verifies that pointer of lifetime.start/lifetime.end comes
-        // directly from alloca
-        continue;
-      }
+      // VEGA-FORK (triage finding): lifetime-alloca exemption removed;
+      // adapters let the writer type the lifetime argument as i8*.
       appendBitcast(module, alloca);
     } else
       llvm_unreachable("Unhandled instruction");
@@ -438,25 +458,47 @@ static bool bitcastInstructionOperands(Module &module) {
   return true;
 }
 
+// VEGA-FORK (triage finding): a declaration param left as an opaque `ptr`
+// is emitted as pointer-to-empty-struct while the call argument carries its
+// inferred type; give every remaining opaque param a concrete i8 pointee.
+static FunctionType *withI8Fallback(LLVMContext &ctx, FunctionType *fTy) {
+  bool changed = false;
+  auto params = fTy->params().vec();
+  for (auto &param : params) {
+    if (auto *ptr = dyn_cast<PointerType>(param)) {
+      param = TypedPointerType::get(Type::getInt8Ty(ctx),
+                                    ptr->getAddressSpace());
+      changed = true;
+    }
+  }
+  if (!changed)
+    return fTy;
+  return FunctionType::get(fTy->getReturnType(), params, fTy->isVarArg());
+}
+
 // bitcast operands to calls, whose type can be altered by metadata attached to
 // the function
 static bool bitcastFunctionOperands(Module &module) {
   for (Function &func : module) {
     auto *fTy = func.getFunctionType();
     auto *newFTy = getTypedFunctionType(&func);
-    if (fTy == newFTy)
-      continue;
+    if (fTy == newFTy && func.isDeclaration())
+      newFTy = withI8Fallback(module.getContext(), fTy);
 
-    // convert calls to this function
+    // VEGA-FORK (triage finding): adapt EVERY pointer argument of every
+    // call site, not only those of typed-override functions — the writer
+    // types adapter bitcasts to the callee's param, so INST_CALL
+    // type-checks against Apple's reader.
     for (User *u : func.users()) {
       if (auto *ci = dyn_cast<CallInst>(u)) {
         for (unsigned idx = 0, e = ci->arg_size(); idx < e; ++idx) {
-          auto oldTy = fTy->getParamType(idx);
-          auto newTy = newFTy->getParamType(idx);
-          if (oldTy == newTy)
-            continue;
-
-          prependBitcast(module, ci, idx);
+          bool typedOverride =
+              idx < newFTy->getNumParams() &&
+              (idx >= fTy->getNumParams() ||
+               fTy->getParamType(idx) != newFTy->getParamType(idx));
+          bool pointerArg = ci->getArgOperand(idx)->getType()->isPointerTy();
+          if (typedOverride || pointerArg)
+            prependBitcast(module, ci, idx);
         }
       }
     }

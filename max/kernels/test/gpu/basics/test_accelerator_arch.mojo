@@ -39,6 +39,7 @@ def main() raises:
         or accelerator_arch == "amdgpu:gfx1201"
         or accelerator_arch == "metal:2"
         or accelerator_arch == "metal:3"
-        or accelerator_arch == "metal:4",
+        or accelerator_arch == "metal:4"
+        or accelerator_arch == "metal-vega2",  # VEGA-FORK
         "Expected specific accelerator_archs, got: " + accelerator_arch,
     )

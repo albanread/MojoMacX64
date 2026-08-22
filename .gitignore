@@ -66,7 +66,9 @@ docs/_build/
 
 # PyBuilder
 .pybuilder/
-target/
+# VEGA-FORK: was `target/` (Rust build dir) — case-insensitively swallowed
+# every KGEN .../Target/ source directory, including the whole AIR trio.
+/target/
 
 # Jupyter Notebook
 .ipynb_checkpoints

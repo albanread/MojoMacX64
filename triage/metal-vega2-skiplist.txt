@@ -15,3 +15,21 @@ test_invariant_load         # nvptx64 target test
 test_tcgen05                # Blackwell tcgen05 (nvptx64)
 test_tensor_core_fp8_mma_sync # NVIDIA tensor cores
 test_wmma_amd               # AMD ISA mma (amdgcn path, not AIR)
+# Upstream _APPLE_GPU_INCOMPATIBLE (their own Metal backend cannot run these
+# either; FIXME MOCO-2405/2366 = device print, KERN-2360 = their MetalAIRPass
+# AS-propagation bug — a class we fixed in ours):
+test_print                  # device Float64/bfloat16 + os_log print (no double on Metal)
+test_printf                 # device printf (MOCO-2405)
+test_debug_assert_gpu_error # device print path (MOCO-2405)
+test_print_elementwise      # elementwise print (MOCO-2366)
+test_capture_trait_type     # MOCO-2405
+test_init_vector_gpu        # KERN-2360 upstream; revisit — our AS propagation may already handle it
+test_metal_print            # device print output path (os_log feature work pending)
+# Other upstream vendor constraints:
+test_amd_format             # amd_gpu-constrained upstream (amdgcn format paths)
+test_sleep                  # NVIDIA-specific sleep loop fix
+test_tbc_launch_config      # h100_gpu upstream
+test_has_amd_gpu            # vendor-identity assertion (we are apple-classified)
+test_has_nvidia_gpu         # vendor-identity assertion
+# NOTE test_launch_binary is upstream-skipped on apple_gpu but PASSES on this fork.
+# NOTE test_constant_memory is nvidia-only upstream but PASSES on this fork.
