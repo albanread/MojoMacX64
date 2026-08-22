@@ -1014,3 +1014,50 @@ into `vega-sdk/pkg` — `layout`, `linalg`, `nn`, `algorithm`, `pipeline`,
 `comm`, `structured_kernels`, `internal_utils`, `extensibility`, and the
 vendor-binding stubs (`_rocblas`, `_cublas`, `_cudnn`, `_miopen`, `_cufft`).
 Every `unable to locate module` error in the kernels tree is gone.
+
+## 2026-08-22 — Cocoa P1: the compiler now reads the SDK during elaboration
+
+Pivoted to making this fork the best Cocoa compiler. The foundation is in and
+proven end to end: `spikes/s5-cocoakb/check.mojo` resolves struct layouts,
+enum values, inheritance-resolved `@encode` signatures, three `objc_msgSend`
+variants, a POSIX signature, and the database hash — **all at comptime** —
+and `must_fail.mojo` proves an unknown name is a compile error at the asking
+source location, never a wrong answer.
+
+**Mechanism.** One generic param-operator, `#kgen.param.expr<cocoakb_query,
+"<query>", "<arg>"...>`, evaluated in `IREvaluatorContext` against a
+read-only, mutex-guarded, lazily-opened handle on `cocoa.sqlite`. The
+compiler owns a fixed query table (name → SQL); Mojo passes query names,
+never SQL, so a new capability is one row plus a wrapper. Adopted wholesale
+from the sister port's `winkb` (Windows x64), re-aimed at CocoaBaseMCP's
+now-x86-64-correct database.
+
+**The thing that bit, and is worth remembering for the next opcode.** Adding
+a `POC` case is not one edit — the sister port touches **eight** sites, and
+missing any one is not a compile error in KGEN but an `llvm_unreachable`
+("unhandled opcode") at *Mojo precompile* time, which reads like a stdlib
+bug. The full set: the enum (`KGENEnums.td`), *both* evaluator dispatches
+(`ParametricIREvaluator.cpp` and `IREvaluator.cpp` — there are two), verify +
+fold + type-agreement exemption (three separate switches in `KGENAttrs.cpp`),
+the textual parser (`KGENUtils.cpp`), and the operand-type exemption list.
+Grepping the sister repo for every `WinKBQuery` occurrence was what found
+them; doing it from the four sites I remembered would have failed.
+
+**And the version bump.** A new opcode changes the compiler's bytecode
+version, so **every** `.mojoc` (std, max, layout, linalg, nn, …) is
+"incompatible with the current version" until rebuilt — not just the ones
+that use the feature. Rebuilt all sixteen SDK packages; GPU stack reverified
+(matmul 2.39 TFLOP/s, test_random, shuffle, prefix_sum green).
+
+**Why the x86-64 database matters most here.** The crown-jewel query is
+`msgsend_variant`. On arm64 every send is plain `objc_msgSend`; on x86-64 a
+MEMORY-class return (any aggregate > 16 bytes — `NSRect` is 32) *must* go
+through `objc_msgSend_stret` with a hidden buffer pointer in `rdi` and `self`
+shifted to `rsi`, and a `long double` through `_fpret`. Get it wrong and the
+stack corrupts silently. `NSValue rectValue` resolving to `objc_msgSend_stret`
+in the spike is the proof this is right, and it is a distinction upstream
+Mojo (arm64-only Apple GPUs) has no concept of.
+
+Next (P2): `std.objc` — an `msg_send` that selects the stub with `comptime
+if` over `cocoakb_msgsend_variant`, so no human ever picks it; smoke test an
+NSString round-trip on the host.
