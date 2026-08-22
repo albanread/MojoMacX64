@@ -482,8 +482,28 @@ void deviceizeCapturedPointers(llvm::Module &m) {
           sources.push_back(&inst);
       }
     for (llvm::Instruction *src : sources) {
-      src->mutateType(llvm::PointerType::get(c, 1));
-      llvm::SmallVector<llvm::Value *, 16> retype{src};
+      // Insert an explicit addrspacecast rather than mutating the type:
+      //  - an extractvalue's type is recomputed from its aggregate, so a
+      //    mutation does not survive serialization, and the mismatch gets
+      //    reconciled downstream as a ptrtoint/inttoptr round trip;
+      //  - inttoptr DESTROYS POINTER PROVENANCE, which is precisely what
+      //    AMD's getPtrRsrcId needs to find the buffer resource. An
+      //    addrspacecast keeps the chain intact.
+      llvm::Instruction *insertPt = src->getNextNode();
+      if (!insertPt)
+        continue;
+      llvm::IRBuilder<> b(insertPt);
+      llvm::Value *cast = b.CreateAddrSpaceCast(
+          src, llvm::PointerType::get(c, 1), src->getName() + ".dev");
+      // replaceUsesWithIf demands identical types, which an addrspacecast
+      // deliberately does not have; rewrite the uses directly.
+      llvm::SmallVector<llvm::Use *, 8> uses;
+      for (llvm::Use &u : src->uses())
+        if (u.getUser() != cast)
+          uses.push_back(&u);
+      for (llvm::Use *u : uses)
+        u->set(cast);
+      llvm::SmallVector<llvm::Value *, 16> retype{cast};
       propagatePointerAS(retype);
     }
   }

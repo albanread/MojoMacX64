@@ -95,6 +95,46 @@ functions' parameters.
 **If you take one thing from this document: when a vendor toolchain reports a
 transport error, go read the crash reports.**
 
+### Device pointers must arrive as bound resources, not addresses
+
+> **`MEASURED`** — the architectural consequence of the above, and the
+> largest single constraint we found.
+
+Fixing address spaces is necessary but **not sufficient**. A kernel that
+takes device pointers as **direct buffer arguments** works. A kernel that
+receives them **inside a captured struct** — a raw 64-bit `gpuAddress`
+written into a constant buffer with `setBytes` — crashes the AMD plugin no
+matter how the pointer is typed, because there is no descriptor behind a raw
+address.
+
+This is easy to misread, because the equivalent MSL works:
+
+```metal
+struct Handle { device float *p; uint n; };
+kernel void k(constant Handle &h [[buffer(0)]], uint id [[thread_position_in_grid]]) {
+  if (id < h.n) h.p[id] = 1.0f;      // compiles and runs on Vega II
+}
+```
+
+That succeeds because Metal treats it as a real **argument buffer** and
+encodes a resource reference into it. Hand-writing an address into bytes is
+not the same thing, even though it is indistinguishable in the IR.
+
+**Implication:** if your frontend packs kernel captures into a flat argument
+blob (most do), you need `MTLArgumentEncoder`-built argument buffers, or you
+must hoist captured pointers into real kernel buffer parameters — which
+requires the host and the compiler to agree on binding indices. Budget for
+this before porting a closure-heavy kernel library.
+
+Two provenance notes that cost us time:
+
+- **`inttoptr` destroys provenance.** If any pass reconstructs a pointer
+  through an integer, `getPtrRsrcId` cannot trace it, even when the address
+  space is right. Use `addrspacecast`.
+- **Mutating an `extractvalue`'s type does not survive serialization** — the
+  type is recomputed from its aggregate, and the mismatch tends to reappear
+  downstream as exactly that `ptrtoint`/`inttoptr` round trip.
+
 ### Apple's front-end compiler crashes on Radeon, and that is normal
 
 The public record has three independent reports of Metal shader-compiler

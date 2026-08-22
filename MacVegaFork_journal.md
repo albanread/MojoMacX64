@@ -699,3 +699,54 @@ Filed as backlog from the digest:
 - **B5** — the `getMetalKernelArgType` i64→i32 kernel-argument correction,
   already on our watchpoint list, is confirmed as load-bearing across *every*
   constant-emission path.
+
+## 2026-08-22 — fast_div/random: the limit is architectural, and now named
+
+Chased the last crash class to the bottom. Three layers came off:
+
+1. **`deviceizeCapturedPointers` was not sticking.** Mutating an
+   `extractvalue`'s type does not survive serialization — the type is
+   recomputed from the aggregate — and the mismatch got reconciled downstream
+   as a `ptrtoint` → `inttoptr` round trip. **`inttoptr` destroys pointer
+   provenance**, which is exactly what `getPtrRsrcId` needs to find the
+   buffer resource. Replaced type mutation with an explicit
+   **`addrspacecast`** (and direct `Use::set` rewriting, since
+   `replaceUsesWithIf` demands identical types). `inttoptr` in the emitted
+   kernel: **2 → 0**, provenance chain intact, `air-opt -verify` clean.
+
+2. **It still crashes.** With every store now `addrspace(1)`, provenance
+   preserved, and the module verifying, AMD's plugin still null-derefs in
+   `getPtrRsrcId`.
+
+3. **Because address space was never the real question.** The evidence was
+   already on the bench: `vecadd`, which takes device pointers as **direct
+   kernel buffer arguments**, has worked since day one. Every kernel that
+   fails takes its device pointers **inside a captured struct**, delivered as
+   raw `gpuAddress` bytes via `setBytes`.
+
+**On AMD under Metal, a device pointer must arrive as a bound resource.** A
+raw 64-bit address sitting in a constant buffer is just data; there is no
+descriptor behind it, and no amount of address-space labelling creates one.
+Apple silicon accepts raw addresses because it has flat addressing — the same
+divergence as before, one level up.
+
+Note the golden-MSL probe that appeared to contradict this: `device float *p`
+inside a `constant Handle&` compiles and runs fine on the Vega II. That works
+because it is a real **argument buffer** — Metal encoded a resource reference
+into it. Our path bypasses that machinery entirely.
+
+**So the fix is argument buffers**, not codegen: capture structs carrying
+device pointers must be built with an `MTLArgumentEncoder` (or the pointers
+hoisted into real kernel buffer parameters, which needs host/device agreement
+on binding indices). That is a runtime + protocol change of real size, not a
+legalizer tweak, and it is now the single largest known gap.
+
+Affected: `test_fast_div`, `test_random`, `test_function_mts`,
+`test_static_layout_capture_argcount` — i.e. **the `elementwise` /
+captured-closure kernel family**, which is a large share of `max/kernels`.
+Kernels taking buffers directly are unaffected and continue to pass.
+
+The `addrspacecast` work is kept regardless: `inttoptr` in device code is a
+provenance bug on any target, and the AS1 typing is correct per the AIR
+address-space spec. No regressions (warp64, ballot64, shuffle, prefix_sum,
+vecadd, add_constant, sum, laneid, constant_memory, launch_binary all pass).
