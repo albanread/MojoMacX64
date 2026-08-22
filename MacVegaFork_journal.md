@@ -473,3 +473,89 @@ substantially **re-gating, not authoring**:
 
 The basics sweep (55 tests) is running; first finds include an expected
 NVIDIA-only reject and a genuine compiler abort on `test_grid_dim`.
+
+## 2026-08-22 — Phase 4 day one: 8-agent triage, and a .gitignore that ate the compiler
+
+The basics sweep went from **13 → 22 passing** on the Vega II. An 8-agent
+triage workflow root-caused the failure clusters in parallel; findings were
+applied centrally and verified on hardware. What it produced, in order of
+consequence:
+
+**The AIR trio was never committed.** Upstream's `.gitignore` carries a bare
+`target/` rule (Rust build dir). On this case-insensitive filesystem it
+matched every `KGEN/.../Target/` *source* directory, so `git add -A`
+silently skipped `AirTraits`, `AirLowering`, `AirBackend` — and upstream's
+own `HostBackend`/`TargetBackend`/`HostLowering`, carried in the working
+tree since the import. Every Phase-3 commit that claimed to add the trio
+recorded only its tracked collaborators. Found because `git stash push`
+refused a file git had never heard of, mid-bisect. Rule anchored to
+`/target/`; 21 files recovered (`b8380ce`). **Check `git ls-files` after
+adding a directory whose name collides with a build convention.**
+
+**A compile-time data race in our own lowering.** Two agents independently
+converged on it: the `llvm.air.*` branch inserted module-level declarations
+from inside `LowerPOPToLLVM` — a pass MLIR runs *concurrently across
+functions* — racing the symbol table whenever two kernels shared a builtin.
+Fixed via upstream's own extension hooks (`isLoweredInGlobalPOPPass` +
+`populateLowerGlobalPOPToLLVMPatterns`), which also required expanding
+KGEN's struct-packed operands and mangling AIR type suffixes at
+*declaration* time (one `air.simd_shuffle` symbol shared across `i32` and
+`f16` payloads trips LLVM's signature assert).
+
+**A launch-protocol ambiguity of our own making.** `DeviceExternalFunction`
+passed `argSizes=null` with plain args — exactly VegaRT's discriminator for
+the `MetalEnqueueFunctionArgs` wrapper, so it read a `DeviceBuffer` struct
+as a wrapper and faulted. External launches now pass real per-arg sizes;
+the plain path classifies device pointers through the allocation registry;
+the wrapper branch validates instead of crashing. `test_launch_binary`
+passes — fork-produced metallibs load and launch as external binaries,
+which upstream's own Metal backend cannot do (`_APPLE_GPU_INCOMPATIBLE`).
+
+**Address-space numbering is NVIDIA's.** `AddressSpace.CONSTANT=4,
+LOCAL=5` are NVPTX's enum, hardcoded in vendor-neutral stdlib code; AIR
+wants constant=2, private=0. `GLOBAL=1`/`SHARED=3` coincide by luck, which
+is why device buffers and barriers worked from day one. The legalizer now
+remaps and propagates. Static constant memory verified on hardware.
+
+**A latent bug in vendored upstream code.** `ValueEnumerator{17,19,21}`
+were copied from an LLVM that kept `SwitchInst` case values as operands;
+they are now stored out-of-line, so the operand walk missed them while the
+writer still emitted them — `"Value not in slotcalculator!"` for any kernel
+SimplifyCFG turned into a `switch`. Present in all three vendored copies.
+
+**More LLVM-vintage landmines**, all in the published `MetalAIRPass`:
+`freeze` (LLVM 10) and unary `fneg` (LLVM 8) hard-crash BitcodeWriter17 —
+its own message says *"for LLVM 5.0"*; GEP no-wrap flags (LLVM 19) survive
+into AIR and break the GCN compiler; seven attribute kinds whose bitcode
+codes postdate Apple's reader now route to the unsupported encoding.
+
+### Two of my own fixes were wrong, and the tests caught both
+
+- A wrapper-header "size self-heal" declared trailing alignment padding as
+  payload; Apple's reader parsed padding as records and every kernel with
+  padding broke. The delta-8 observation that motivated it was a red
+  herring — the writer's size field legitimately excludes padding.
+- Mapping LLVM min/max/abs/float intrinsics to `air.*` runtime names
+  (harvested from golden `metal -c` probes, correct names, correct
+  attributes) **regressed `test_shuffle`**. The driver handles `llvm.*`
+  intrinsics natively; the remapping was unnecessary and harmful. Reverted.
+  *Do not retry this.*
+
+### Still open
+
+`test_fast_div`, `test_random`: compile clean, driver reports "Compilation
+failed due to an interrupted compilation" at pipeline creation. Disproved:
+LLVM-intrinsic availability, i128 (comptime-folded host-side), GEP flags.
+`test_static_layout_capture_argcount`: wrong values (-1.0 vs 1.0).
+Also noted: **`amdgpu-nt` is no longer usable as a diagnostic** — `air-as`
+stamps its own AIR version, so the standalone tool always sees 2.6 against
+its 2.5 plugin.
+
+### Skip list, with upstream's blessing
+
+Cross-checking `max/kernels/test/gpu/basics/BUILD.bazel` showed upstream
+already marks the whole print family `_APPLE_GPU_INCOMPATIBLE` (FIXMEs
+MOCO-2405/2366) — their own Metal backend cannot run them either, and
+KERN-2360 is *their* MetalAIRPass address-space propagation bug, a class we
+fixed in ours. Two upstream-skipped tests now pass here: `test_launch_binary`
+(apple-incompatible upstream) and `test_constant_memory` (nvidia-only).
