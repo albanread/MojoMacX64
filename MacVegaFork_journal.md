@@ -1497,3 +1497,68 @@ Colouring on the GPU keeps the 2.4M cosines/frame off the CPU and the loop
 stays at 60fps. So the entire pipeline — compute and colour — is Mojo compiled
 to AIR; there is no shader anywhere, which is a step past the example it
 answers.
+
+## 2026-08-22 — MoE on the Vega II: a 30B that outruns an 8B, and a statistic that nearly lied
+
+Qwen3-30B-A3B (Q4_K_M, 17.28 GiB, 128 experts / 8 active) runs on the Vega II,
+and the result is better than the dense case on every axis:
+
+```
+                       prefill (pp512)   generation (tg64)
+MoE 30B-A3B, Vega II        88.5              46.6
+MoE 30B-A3B, Xeon          119.8              30.2
+dense 8B,    Vega II        48.4              32.9
+```
+
+**A 30B model generating 1.4× faster than an 8B**, because only ~3B parameters
+and 8 of 128 experts are active per token. It also nearly closes the prefill
+embarrassment from the previous entry: the CPU's lead shrinks from 1.94× to
+1.35×, since MoE prefill computes a sixteenth of the expert FLOPs and so
+suffers far less from the mat-vec fallback.
+
+The open question from the last entry was whether top-k routing — which runs
+through `argsort`/`top_k`/`get_rows`, the wave64-suspect families — was
+silently selecting wrong experts. Wrong routing does not crash or babble; it
+produces fluent, subtly worse text. Perplexity against the CPU backend said:
+
+```
+Vega II : PPL = 23.4508      CPU : PPL = 23.2909      delta +0.69%
+```
+
+versus **+0.18% on the dense 8B control** — nearly four times larger, and in
+the wrong direction. That looked like a hit.
+
+**It was not, and how it wasn't is the lesson.** `llama-perplexity` prints
+*cumulative* perplexity, not per-chunk. Read as per-chunk, the series shows a
++2.5% first chunk decaying monotonically to +0.69% — a tidy "error that
+starts big and dilutes" story that is entirely an artifact of averaging.
+Recovering the actual per-chunk NLL (`n·log(cumₙ) − (n−1)·log(cumₙ₋₁)`)
+inverts the conclusion:
+
+- the signs are **mixed** — the GPU is *better* on 3 of 12 chunks (−0.75%,
+  −0.23%, −0.02%), where broken routing would be worse nearly everywhere;
+- the mean per-chunk delta is +0.0068 NLL against a stdev of 0.0115, i.e.
+  **t = 2.06, p ≈ 0.064**; the 9/12 sign split is binomial p ≈ 0.15;
+- the largest single chunk is 0.85% NLL, where a wrong expert costs percent­s.
+
+Two supporting checks: `TOP_K` and `ARGSORT` both pass at **`ne = 128`**,
+exactly this model's expert count (445/445 and 97/97), and re-running the GPU
+perplexity at a different `ubatch` returns a **bit-identical** number, so the
+GPU path is deterministic and the delta is systematic rather than run noise.
+
+Best explanation is expert flips on near-ties: when two of 128 experts score
+within floating-point rounding, the two backends choose differently. Both
+choices are legitimate. At ≤0.7% the residual sits below Q4_K_M's own ~1–3%
+quantization cost, so it is immaterial — though p = 0.064 is not "proven
+identical", and a 4× corpus would settle it if it ever matters.
+
+**The transferable lesson is about instruments, not MoE.** A summary statistic
+that aggregates — cumulative anything — will manufacture a monotone trend out
+of a single early outlier, and a monotone trend reads as a mechanism. The
+check that saved it was cheap: differentiate the cumulative series before
+believing its shape, and look at the *signs* of the residuals, because noise
+straddles zero and a bug does not. Worth applying to our own kernel timings,
+which are reported the same way.
+
+Practical outcome: Qwen3-30B-A3B Q4_K_M is now the default model on this box —
+faster and more capable than the 8B, with ~14 GB of headroom left for context.
