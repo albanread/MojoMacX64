@@ -107,19 +107,20 @@ def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
     return the runtime address of that stub. A non-register return is a
     compile error."""
     comptime variant = cocoakb_msgsend_variant[cls, selector, is_class]()
-    comptime assert (
-        variant == "objc_msgSend" or variant == "objc_msgSend_fpret"
-    ), (
+    comptime assert variant != "?", (
         "std.objc: '"
         + selector
         + "' on "
         + cls
-        + " resolves to "
-        + variant
-        + ", which needs the struct-return path (objc_msgSend_stret), not yet"
-        + " implemented (P2.1). A struct-return message cannot use the"
-        + " register path safely."
+        + " has an @encode signature the ABI classifier could not model, so"
+        + " std.objc cannot pick a dispatch stub for it. Call it by hand with"
+        + " a checked external_call if you know the layout."
     )
+    # objc_msgSend / _fpret / _stret are all reached through the same
+    # per-signature function-pointer cast below; the C ABI does the register
+    # allocation, the x87 return, or the hidden sret pointer + self/_cmd shift
+    # according to the RETURN TYPE R the caller declares. The database only has
+    # to tell us WHICH entry point, which it does.
     # RTLD_DEFAULT is (void*)-2 on macOS.
     var rtld_default = OpaquePointer[MutUntrackedOrigin](
         unsafe_from_address=Int(-2)
@@ -132,7 +133,7 @@ def _stub_addr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
 
 
 def msg_send[
-    R: RegisterPassable, cls: StaticString, selector: StaticString, is_class: Bool = False, *Ts: AnyType
+    R: AnyType, cls: StaticString, selector: StaticString, is_class: Bool = False, *Ts: AnyType
 ](obj: ObjCObject, *args: *Ts) -> R:
     """Send `selector` to `obj`, returning `R`.
 
