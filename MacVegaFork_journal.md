@@ -1306,3 +1306,106 @@ unchecked Cocoa call.
 
 The two KGEN dedup fixes are general — any Mojo code referencing a shared
 external symbol, or using a fixed-name host global as a cache, benefits.
+
+## 2026-08-22 — The same disease in another codebase: llama.cpp on the Vega II
+
+A detour, but a load-bearing one. `llama.cpp`'s Metal backend now runs
+Qwen3-8B-Q4_K_M entirely on the Vega II, correctly, at **50 t/s prefill and
+32.4 t/s generation** — 2.3× the 24-thread Xeon for generation. Fork at
+[albanread/IntelMacLlamaCpp](https://github.com/albanread/IntelMacLlamaCpp).
+
+The reason it belongs in this journal: **it is an independent confirmation of
+the diagnosis in the Phase 4 entry above, arrived at from the opposite
+direction.** That entry named the disease as the tree encoding *lane count as
+vendor identity*. ggml has the identical bug, in the identical shape:
+
+```objc
+dev->props.has_simdgroup_reduction  = [dev supportsFamily:MTLGPUFamilyApple7];
+```
+
+which is `_resolve_warp_size()`'s `is_apple_gpu() → 32` wearing a different
+hat — a capability inferred from vendor family rather than measured. Two
+codebases, written by different people for different purposes, made the same
+substitution. The Vega II is simply the first machine where the substitution
+is false, so it is the first machine where both break. Our fix is the same
+shape too: probe the width (compile a trivial kernel, read the pipeline's
+`threadExecutionWidth`), then inject it as `N_SIMDWIDTH` rather than trusting
+a family check.
+
+Four bug classes, of which the third is the one worth remembering:
+
+1. **Device selection.** `MTLCreateSystemDefaultDevice()` returns the GPU
+   driving the display — on this Mac Pro the 8 GB 580X, which reports Metal 2,
+   so `has_simdgroup_reduction` is false and the whole backend silently
+   degrades to nothing. The 32 GB Vega II is invisible until asked for by name.
+2. **Wave64 arithmetic**, ~14 kernel families. Two distinct shapes: lane→block
+   mapping (`nypsg = 32/nxpsg`), and — subtler — *pointer advances left at a
+   literal stride* after the loop stride became width-dependent. `q3_K` and
+   `q5_K` both stride `ib += N_SIMDWIDTH/8` (8 lanes' worth on wave64) while
+   still advancing `y1 += 4 * QK_K`. `q6_K` was immune only because it
+   recomputes `yy + i*QK_K` fresh each iteration.
+3. **A race, not arithmetic.** With every kernel numerically correct, output
+   was *still* garbage — and a **different** garbage each run. The AMD driver
+   does not enforce `memoryBarrierWithScope:` between concurrently dispatched
+   kernels; Apple's TBDR does. Restricting concurrent dispatch to Apple GPUs
+   costs 4.6% and fixes it. **Nondeterminism across runs is the tell that
+   separates a scheduling bug from a maths bug** — worth reaching for early,
+   because it partitions the search space in one experiment.
+4. `set_tensor` asserting on non-page-aligned host pointers, which is simply
+   an unexercised discrete-GPU path.
+
+**The testing lesson generalizes to us directly.** Upstream's op suite
+exercises k-quant matmul at `k = 256` only — `nb = 1`, one block per row, one
+loop iteration, so every tiling and stride variant is trivially correct.
+Qwen3-8B uses `k = 4096` and `12288` (`nb = 16`, `48`). The result:
+
+```
+q5_K, q3_K: pass all 1161 MUL_MAT tests; relative error ~1.0 at real sizes
+```
+
+A green suite proved nothing until the tested shapes matched the shapes the
+workload uses. Our own `basics` sweep has the same hazard — it verifies that
+warp primitives work, not that they work at the tile counts a real kernel
+drives. Worth an audit pass.
+
+For proving numerical correctness end-to-end, perplexity against the CPU
+backend on identical text turned out to be the only honest instrument:
+
+```
+Vega II (Metal) : PPL = 23.2535 +/- 1.52
+CPU reference   : PPL = 23.2960 +/- 1.53      delta 0.18%, inside the bars
+```
+
+That gap is floating-point reduction-order noise. The failure mode it exists
+to catch is the one nothing else catches: subtly-wrong results that still read
+as fluent text.
+
+**And a number that sharpens our own priorities.** llama.cpp's prefill on this
+card sustains roughly **0.8 TFLOP/s** effective (2·N·tokens/s) — **about 6% of
+the card's ~14.1 TFLOPS peak** — while the naive tiled Mojo matmul from the
+entry above already does **2.37 TFLOP/s** on the same silicon. Worse: the Xeon
+beats it at prompt processing (94 vs 48 t/s at 512 tokens), and does so at
+**1.54 TFLOP/s**, roughly 60% of its own AVX-512 peak via Accelerate. A CPU
+running near its ceiling is outrunning a GPU running at a sixteenth of its
+own, for one reason: `has_simdgroup_mm` is gated on
+Apple7, so every prompt matmul falls back to mat-*vec* kernels computing one
+output column at a time. It is not a hardware limit — our own backend beats it
+threefold with a kernel written in an afternoon. **A wave64 `mul_mm` built on
+`simd_shuffle` rather than `simdgroup_matrix` is the single highest-value
+piece of unclaimed performance on this card**, in either project.
+
+One operational hazard, learned the hard way: **do not run the full
+`test-backend-ops` suite on this machine.** Both GPUs share
+`IOAcceleratorFamily2`, so a compute hang on the headless Vega II stalls the
+580X that is driving the display, and the userspace watchdog kills WindowServer
+after 40 seconds. It presents as a crash but is not a panic — the spin dump
+shows WindowServer wedged in `AMDRadeonX4000` (the *other* card's driver)
+while we were computing on the Vega. Per-op with a timeout, always.
+
+Still open: `iq2_xxs` is measurably wrong at large k and `iq2_xs` hangs the
+GPU, so the whole IQ quant family is off-limits here pending triage; the
+K-quants and `mxfp4` are verified at real shapes. Next up is
+Qwen3-30B-A3B (MoE, 3B active), where the interesting risk is that top-k
+expert routing runs through `argsort`/`top_k`/`get_rows` — the wave64-suspect
+families — and wrong routing produces fluent, subtly worse output rather than
+an obvious failure. The perplexity harness above is what will catch it.
