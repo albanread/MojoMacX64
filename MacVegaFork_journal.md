@@ -1061,3 +1061,59 @@ Mojo (arm64-only Apple GPUs) has no concept of.
 Next (P2): `std.objc` — an `msg_send` that selects the stub with `comptime
 if` over `cocoakb_msgsend_variant`, so no human ever picks it; smoke test an
 NSString round-trip on the host.
+
+## 2026-08-22 — Cocoa P2+P3: callable Cocoa, and no-leak by default
+
+std.objc now calls Cocoa. `objc_smoke` does a full NSString round-trip
+(class-method send with a C-string arg, `length` = 26, `UTF8String` back to
+the original text) and `ownership_test` cycles **1,000,000 NSMutableArrays at
+a flat ~10 MB RSS** — proven leak-free — plus explicit shared ownership and
+autorelease-from-a-function. Every selector and ABI stub came from the
+database; none is hand-written.
+
+**The dispatch problem, and the fix.** `objc_msgSend` is one C symbol called
+with a different signature at every call site, but `external_call` declares
+one LLVM type per symbol name — a second signature is a hard error ("existing
+function with conflicting signature", confirmed with a two-line repro). Every
+serious ObjC bridge solves this the same way and so do we: take the *address*
+of the stub and call it through a per-signature function-pointer cast. Mojo
+spells the cast `def(id, SEL, /, *args) thin abi("C") -> R` — the `/` making
+the two fixed params positional-only so the argument pack can follow — and
+std.ffi's own `DLHandle` callable uses exactly this shape, which is where the
+idiom came from. The stub address comes from `dlsym(RTLD_DEFAULT, variant)`,
+with `variant` chosen at comptime from the database; a struct-return
+(`objc_msgSend_stret`) is a compile error until P2.1, never a silent stack
+smash.
+
+**No-leak ownership.** `ObjCRef` owns a +1 and releases in `__deinit__`, so an
+object's lifetime follows the Mojo value — the default is *no leak*, and you
+opt out with `.autorelease()`, not into ownership. It's move-only with an
+explicit `.copy()`, so a share (a retain) is always visible in the code. The
+primitives are `objc_retain/release/autorelease` — the ARC entry points Clang
+emits — so it interoperates with ARC.
+
+**Two things that bit:**
+
+- **Foundation must be linked.** `objc_getClass("NSString")` returns *nil*
+  with only `-lobjc`, because the class isn't registered until Foundation
+  loads. The wrapper now links `-framework Foundation`. This is a real gotcha:
+  the symbol resolves, the call succeeds, and you get a null class — no error,
+  just nil everywhere downstream.
+- **Retain-count probing lies.** My first ownership test read
+  `CFGetRetainCount(a.object())` between operations and crashed intermittently
+  — because `a.object()` materializes temporaries that perturb Mojo's ASAP
+  destruction ordering, so the probe *changes* what it measures. The sound
+  test is behavioral: cycle a million objects and watch RSS stay flat. Lesson
+  for a value-semantics language: don't measure destruction timing with
+  something that itself creates values.
+
+**Trait/idiom drift from the sister port's era**, all mechanical once found:
+`@register_passable("trivial")` → `@fieldwise_init struct X(TrivialRegister
+Passable)`; `owned self` → `deinit self`; custom copy is `__init__(out self,
+*, copy: Self)`; `Pointer` is non-null by design so nullable C handles are
+stored as `Int` and reconstructed with `unsafe_from_address`; `constrained[…]`
+→ `comptime assert`.
+
+P4 (deferred): comptime `@encode` parser + Mojo-type encoder for
+argument-level type checking, and the `objc_msgSend_stret` sret path for
+struct returns (NSRect/NSRange-returning selectors).
