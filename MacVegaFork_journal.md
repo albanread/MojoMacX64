@@ -1222,3 +1222,39 @@ The Cocoa dispatch path now checks: selector exists (P1), correct ABI stub
 (P2), and correct argument count (this) — all at compile time, all from one
 database. Remaining depth: per-argument type category, a selector cache, and
 more bridged classes.
+
+## 2026-08-22 — Cocoa: register-file type checking, and NSNumber round-trips
+
+The argument-*type* gap is now closed, conservatively. `msg_send` compares
+each Mojo argument's type against the SysV class the database recorded for that
+position and rejects a **register-file mismatch** — a float where the ABI wants
+an integer/pointer register, or an integer where it wants a float register.
+That's the dangerous case: at runtime the call *succeeds* but reads the wrong
+register file (xmm vs rdi), so it's a silent wrong answer. Now:
+
+```
+argument 0 of 'numberWithDouble:' on NSNumber is an integer, but the ABI
+expects a float register here. Pass a Float32/Float64.
+```
+
+**Conservative by design.** It flags only what it's certain of — a scalar float
+SIMD type (via `reflect[Ts[i]].name()` matching `SIMD[DType.floatNN, 1]`)
+against a purely-SSE class, and a plain scalar `Int` against a float class.
+Structs, vectors, and unclassifiable types are skipped, never mis-flagged. The
+whole point is zero false positives: verified against all existing spikes,
+which pass objects, C-strings, 32-byte structs, and integers without one.
+
+Building it surfaced the useful primitives: `reflect[T].name()` yields a
+comptime type-name string (`Int` reflects as `SIMD[DType.int, 1]`, which is a
+quirk worth knowing), a `comptime for i in range(args.__len__())` walks the
+pack, and the ABI-class field is classified in place rather than by building a
+comptime substring (which the StaticString constructors don't make easy).
+
+`typecheck_test` also proves NSNumber works: a double (3.14159) and an integer
+(42) round-trip through `numberWithDouble:`/`doubleValue` and
+`numberWithInteger:`/`integerValue`. Another class bound in a few lines.
+
+**The Cocoa dispatch path now verifies four things at compile time**, all from
+one database: the selector exists, the correct objc_msgSend variant, the
+correct argument count, and the correct register file per argument. That is a
+meaningfully safer FFI than hand-written bindings, which check none of them.
