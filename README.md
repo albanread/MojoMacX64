@@ -46,6 +46,18 @@ machinery, all under Apache 2.0 with LLVM Exceptions. That is a rare and
 generous act. Thank you to everyone who built Mojo and then gave it
 away. 🔥
 
+## Notes for others: AIR on AMD GPUs
+
+Targeting Apple's AIR for an **AMD GPU through Metal** is close to
+undocumented territory. [AIR_on_AMD.md](AIR_on_AMD.md) collects what we
+learned doing it — the public reverse-engineering record digested and
+credited, plus everything we measured on real hardware: why AMD's Metal
+plugin crashes on generic pointers (and where the crash log is), the
+address-space trap that CUDA-shaped frontends walk into, AIR's real
+type-mangled runtime symbols, the LLVM-vintage constructs that break the
+bitcode writer, bugs in the vendored downgrade writer itself, and which
+tools lie to you. Written to be useful even if you never touch Mojo.
+
 ## High-level plan
 
 Full design with file-level detail: [PORT_DESIGN.md](PORT_DESIGN.md).
