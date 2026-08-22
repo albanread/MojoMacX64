@@ -1117,3 +1117,42 @@ stored as `Int` and reconstructed with `unsafe_from_address`; `constrained[…]`
 P4 (deferred): comptime `@encode` parser + Mojo-type encoder for
 argument-level type checking, and the `objc_msgSend_stret` sret path for
 struct returns (NSRect/NSRange-returning selectors).
+
+## 2026-08-22 — Cocoa P4: struct returns, and the C ABI does the work
+
+The struct-return path I'd deferred as "P2.1, not yet implemented" turned out
+to need **no new machinery** — just the removal of the restriction that
+rejected it. This is the nicest kind of finding.
+
+`objc_msgSend`, `objc_msgSend_fpret`, and `objc_msgSend_stret` are all reached
+through the *same* per-signature function-pointer cast. The C ABI lowering
+does whatever the declared **return type** requires: register allocation for
+a scalar, x87 for a `long double`, or the hidden sret pointer (plus the
+self→rsi / _cmd→rdx shift that the `_stret` entry point itself performs) for a
+struct larger than 16 bytes. The database's only job is to name *which* entry
+point; everything else follows from `R`.
+
+I proved it with raw `external_call` first (a 32-byte CGRect round-tripping
+through `+valueWithRect:` and `-rectValue`), then two edits made the library
+path work: `_stub_addr` stops rejecting `objc_msgSend_stret` (only unmodelable
+`?` stays a compile error), and `msg_send`'s `R` relaxes from
+`RegisterPassable` to `AnyType`. `stret_test` now round-trips a CGRect through
+`msg_send` with the stub chosen entirely by the database.
+
+**An ABI subtlety worth keeping**, straight from the classifier: `NSRange`
+(16 bytes, classified `gg`) returns in the **rax:rdx register pair through
+plain `objc_msgSend`** — *not* stret. Only aggregates **strictly larger than
+16 bytes** (`NSRect` = 32 = `s`) go through `objc_msgSend_stret`. The 16-byte
+boundary is the SysV MEMORY threshold, and getting it wrong (routing a 16-byte
+return to stret, or a 24-byte one to the register path) corrupts the stack
+silently — which is exactly why reading it from a per-method classifier rather
+than guessing from the type name is the whole point of this design.
+
+Cocoa now has: checked layouts/enums/selectors (P1), calling with
+database-selected dispatch (P2), no-leak RAII ownership (P3), and struct
+returns/arguments (P4). What remains is depth, not new mechanism: a comptime
+`@encode` parser to check argument *types* against the selector (today the
+count and the return are checked, the arg types are trusted), a
+`sel_registerName` cache, and higher-level sugar (NSString<->String bridging,
+typed wrappers for common AppKit/Foundation classes) — all queries and
+convenience over the four working layers.
