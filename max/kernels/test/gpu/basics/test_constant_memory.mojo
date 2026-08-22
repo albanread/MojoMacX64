@@ -16,6 +16,7 @@ from max.gpu.host import ConstantMemoryMapping, DeviceContext
 from max.gpu.host.compile import _compile_code
 from std.gpu import thread_idx
 from std.memory import unsafe_stack_allocation
+from std.sys import has_apple_gpu_accelerator
 from std.testing import assert_equal, assert_true
 
 
@@ -29,11 +30,18 @@ def test_constant_memory_compile(ctx: DeviceContext) raises:
             n, Float32, address_space=AddressSpace.CONSTANT
         ]()
 
-    assert_true(".const .align 4 .b8 " in _compile_code[_alloc[20]]())
-    assert_true(
-        "internal addrspace(4) global [20 x float]"
-        in _compile_code[_alloc[20], emission_kind="llvm"]()
-    )
+    comptime if has_apple_gpu_accelerator():
+        # VEGA-FORK: AIR constant memory is addrspace(2); PTX asserts N/A.
+        assert_true(
+            "addrspace(2) global [20 x float]"
+            in _compile_code[_alloc[20], emission_kind="asm"]()
+        )
+    else:
+        assert_true(".const .align 4 .b8 " in _compile_code[_alloc[20]]())
+        assert_true(
+            "internal addrspace(4) global [20 x float]"
+            in _compile_code[_alloc[20], emission_kind="llvm"]()
+        )
 
 
 def test_constant_mem(ctx: DeviceContext) raises:
@@ -171,4 +179,9 @@ def main() raises:
         test_constant_memory_compile(ctx)
         test_constant_mem(ctx)
         test_constant_mem_via_func(ctx)
-        test_external_constant_mem(ctx)
+        comptime if has_apple_gpu_accelerator():
+            # VEGA-FORK: dynamic constant upload (copyToConstantMemory) has
+            # no baked-AIR analogue yet; static globals are covered above.
+            print("== test_external_constant_mem (skipped on AIR)")
+        else:
+            test_external_constant_mem(ctx)
