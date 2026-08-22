@@ -1,11 +1,31 @@
-load("//bazel:api.bzl", "modular_cc_library")
+load("//bazel:api.bzl", "modular_cc_binary", "modular_cc_library")
 
 # VEGA-FORK: VegaRT — our implementation of the AsyncRT device ABI, replacing
 # the closed AsyncRTMojoBindings/MGPRT from the (arm64-only) modular wheel.
-# See VegaRT.cpp and ABI-NOTES.md.
+# CPU backend in VegaRT.cpp; Metal backend (Vega II / 580X) in VegaRTMetal.cpp.
 modular_cc_library(
     name = "MojoBindings",
-    srcs = ["VegaRT.cpp"],
+    srcs = [
+        "VegaRT.cpp",
+        "VegaRTMetal.cpp",
+    ],
+    hdrs = ["VegaRTInternal.h"],
+    linkopts = [
+        "-framework",
+        "Metal",
+        "-framework",
+        "CoreFoundation",
+        "-lobjc",
+    ],
     visibility = ["//visibility:public"],
     alwayslink = True,
+)
+
+# Headerless ABI smoke: drives the runtime exactly as Mojo's external_calls
+# will find it — local prototypes only, no shared header. MSL saxpy on the
+# first Metal device (the Vega II), verified element by element.
+modular_cc_binary(
+    name = "vegart_metal_smoke",
+    srcs = ["vegart_metal_smoke.c"],
+    deps = [":MojoBindings"],
 )

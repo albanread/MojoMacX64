@@ -27,6 +27,8 @@
 // never a link failure or a silent wrong answer.
 //===----------------------------------------------------------------------===//
 
+#include "VegaRTInternal.h"
+
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
@@ -98,24 +100,34 @@ struct VRStream : RefCounted {
 
 struct VRContext : RefCounted {
   int id = 0;
-  std::string api;       // "cpu" for now, "metal" in phase 2b
+  std::string api;       // "cpu" or "metal"
   std::string arch;      // reported through deviceApi/archName-family queries
   std::string name;
   VRStream *defaultStream = nullptr;
+  VRMetalCtx *metal = nullptr; // set when api == "metal"
 
   VRContext() { defaultStream = new VRStream{{}, this}; }
-  ~VRContext() { vrRelease(defaultStream); }
+  ~VRContext() {
+    vrRelease(defaultStream);
+    VegaRTMetal_destroyContext(metal);
+  }
 };
 
 struct VRBuffer : RefCounted {
   VRContext *ctx = nullptr;      // retained
   const VRBuffer *parent = nullptr; // retained, for sub-buffer views
-  void *ptr = nullptr;
+  void *ptr = nullptr;           // host memory (cpu) or gpuAddress token (metal)
   size_t bytes = 0;
   bool ownsMemory = false;
   bool isHostBuffer = false;
+  VRMetalBuf *mtl = nullptr;     // set when the owning context is metal
 
   ~VRBuffer();
+};
+
+struct VRFunction : RefCounted {
+  VRMetalFunc *mtl = nullptr;
+  ~VRFunction() { VegaRTMetal_destroyFunction(mtl); }
 };
 
 struct VREvent : RefCounted {
@@ -137,6 +149,7 @@ using DeviceStream = VRStream;
 using DeviceEvent = VREvent;
 using DeviceTimer = VRTimer;
 using DeviceContextScope = VRScope;
+using DeviceFunction = VRFunction;
 
 } // namespace
 
@@ -145,7 +158,9 @@ extern "C" void AsyncRT_DeviceContext_release(const DeviceContext *ctx);
 
 namespace {
 VRBuffer::~VRBuffer() {
-  if (ownsMemory && ptr)
+  if (mtl)
+    VegaRTMetal_destroyBuffer(mtl);
+  else if (ownsMemory && ptr)
     free(ptr);
   vrRelease(const_cast<VRBuffer *>(parent));
   AsyncRT_DeviceContext_release(ctx);
@@ -178,8 +193,23 @@ AsyncRT_DeviceContext_create(const DeviceContext **result, const char *api,
     *result = ctx;
     return VR_OK;
   }
-  return vrErrorf("VegaRT: device api '%s' is not available yet "
-                  "(have: cpu; metal arrives in phase 2b)",
+  if (want == "metal" || want == "gpu") {
+    char name[256], arch[64];
+    VRMetalCtx *mctx = nullptr;
+    if (const char *err =
+            VegaRTMetal_createContext(&mctx, id, name, sizeof(name), arch,
+                                      sizeof(arch)))
+      return err;
+    auto *ctx = new VRContext();
+    ctx->id = id;
+    ctx->api = "metal";
+    ctx->arch = arch;
+    ctx->name = name;
+    ctx->metal = mctx;
+    *result = ctx;
+    return VR_OK;
+  }
+  return vrErrorf("VegaRT: device api '%s' is not available (have: cpu, metal)",
                   want.c_str());
 }
 
@@ -195,7 +225,9 @@ extern "C" int32_t AsyncRT_DeviceContext_numberOfDevices(const char *kind) {
   std::string k = kind ? kind : "default";
   if (k == "cpu" || k == "default")
     return 1;
-  return 0; // no GPUs until the Metal backend lands
+  if (k == "gpu" || k == "metal")
+    return VegaRTMetal_deviceCount();
+  return 0;
 }
 
 extern "C" int64_t AsyncRT_DeviceContext_id(const DeviceContext *ctx) {
@@ -236,6 +268,8 @@ extern "C" const char *
 AsyncRT_DeviceContext_getAttribute(int *result, const DeviceContext *ctx,
                                    int attr) {
   // CUDA-numbered attribute codes (see device_attribute.mojo).
+  if (ctx->metal && VegaRTMetal_getAttribute(ctx->metal, attr, result) == 0)
+    return VR_OK;
   switch (attr) {
   case 1: { // MAX_THREADS_PER_BLOCK: a CPU "block" is one thread
     *result = 1;
@@ -266,6 +300,8 @@ AsyncRT_DeviceContext_getAttribute(int *result, const DeviceContext *ctx,
 extern "C" const char *
 AsyncRT_DeviceContext_getMemoryInfo(const DeviceContext *ctx, size_t *freeMem,
                                     size_t *total) {
+  if (ctx->metal)
+    return VegaRTMetal_memInfo(ctx->metal, freeMem, total);
   uint64_t mem = 0;
   size_t len = sizeof(mem);
 #if defined(__APPLE__)
@@ -284,8 +320,10 @@ extern "C" const char *AsyncRT_DeviceContext_runHealthcheck(DeviceContext *) {
   return VR_OK;
 }
 
-extern "C" const char *AsyncRT_DeviceContext_synchronize(const DeviceContext *) {
-  return VR_OK; // synchronous backend: everything already completed
+extern "C" const char *AsyncRT_DeviceContext_synchronize(const DeviceContext *ctx) {
+  if (ctx->metal)
+    return VegaRTMetal_synchronize(ctx->metal);
+  return VR_OK; // synchronous cpu backend: everything already completed
 }
 
 extern "C" const char *
@@ -363,6 +401,18 @@ AsyncRT_DeviceContext_createBuffer_async(const DeviceBuffer **result,
                                          const DeviceContext *ctx, size_t len,
                                          size_t elem_size) {
   size_t bytes = len * elem_size;
+  if (ctx->metal) {
+    VRMetalBuf *mbuf = nullptr;
+    void *devAddr = nullptr;
+    if (const char *err = VegaRTMetal_createBuffer(&mbuf, &devAddr, ctx->metal,
+                                                   bytes, /*host=*/false))
+      return err;
+    auto *mb = makeBuffer(ctx, devAddr, bytes, /*owns=*/false, false);
+    mb->mtl = mbuf;
+    *result = mb;
+    *device_ptr = devAddr;
+    return VR_OK;
+  }
   // Always non-null, even for zero-length: the Mojo wrapper unwraps the
   // pointer unconditionally (device_context.mojo:1517).
   void *p = malloc(bytes ? bytes : 1);
@@ -380,6 +430,18 @@ AsyncRT_DeviceContext_createHostBuffer(const DeviceBuffer **result,
                                        const DeviceContext *ctx, size_t len,
                                        size_t elem_size) {
   size_t bytes = len * elem_size;
+  if (ctx->metal) {
+    VRMetalBuf *mbuf = nullptr;
+    void *devAddr = nullptr;
+    if (const char *err = VegaRTMetal_createBuffer(&mbuf, &devAddr, ctx->metal,
+                                                   bytes, /*host=*/true))
+      return err;
+    auto *mb = makeBuffer(ctx, devAddr, bytes, /*owns=*/false, true);
+    mb->mtl = mbuf;
+    *result = mb;
+    *device_ptr = devAddr;
+    return VR_OK;
+  }
   void *p = malloc(bytes ? bytes : 1); // non-null even when empty; see above
   if (!p)
     return vrErrorf("VegaRT: host allocation of %zu bytes failed", bytes);
@@ -406,6 +468,20 @@ AsyncRT_DeviceBuffer_createSubBuffer(const DeviceBuffer **result,
   if (offBytes + bytes > buf->bytes)
     return vrErrorf("VegaRT: sub-buffer [%zu, %zu) exceeds parent size %zu",
                     offBytes, offBytes + bytes, buf->bytes);
+  if (buf->mtl) {
+    VRMetalBuf *msub = nullptr;
+    void *devAddr = nullptr;
+    if (const char *err = VegaRTMetal_createSubBuffer(&msub, &devAddr,
+                                                      buf->mtl, offBytes,
+                                                      bytes))
+      return err;
+    auto *sub = makeBuffer(buf->ctx, devAddr, bytes, false, buf->isHostBuffer);
+    sub->mtl = msub;
+    sub->parent = vrRetain(const_cast<VRBuffer *>(buf));
+    *result = sub;
+    *device_ptr = devAddr;
+    return VR_OK;
+  }
   auto *sub = makeBuffer(buf->ctx, static_cast<char *>(buf->ptr) + offBytes,
                          bytes, /*owns=*/false, buf->isHostBuffer);
   sub->parent = vrRetain(const_cast<VRBuffer *>(buf));
@@ -440,6 +516,10 @@ AsyncRT_DeviceBuffer_context(const DeviceBuffer *buffer) {
 
 extern "C" const char *AsyncRT_DeviceBuffer_hostPtr(void **result,
                                                     const DeviceBuffer *buffer) {
+  if (buffer->mtl) {
+    *result = VegaRTMetal_hostPtr(buffer->mtl); // null for private buffers
+    return VR_OK;
+  }
   // CPU backend: all memory is host memory.
   *result = buffer->ptr;
   return VR_OK;
@@ -462,6 +542,8 @@ AsyncRT_DeviceBuffer_reassignOwnershipTo(const DeviceBuffer *buf,
 extern "C" const char *
 AsyncRT_DeviceContext_HtoD_async(const DeviceContext *, const DeviceBuffer *dst,
                                  const void *src) {
+  if (dst->mtl)
+    return VegaRTMetal_copyHtoD(dst->mtl, src, dst->bytes);
   if (dst->bytes)
     memcpy(dst->ptr, src, dst->bytes);
   return VR_OK;
@@ -470,6 +552,8 @@ AsyncRT_DeviceContext_HtoD_async(const DeviceContext *, const DeviceBuffer *dst,
 extern "C" const char *
 AsyncRT_DeviceContext_DtoH_async(const DeviceContext *, void *dst,
                                  const DeviceBuffer *src) {
+  if (src->mtl)
+    return VegaRTMetal_copyDtoH(dst, src->mtl, src->bytes);
   if (src->bytes)
     memcpy(dst, src->ptr, src->bytes);
   return VR_OK;
@@ -479,6 +563,8 @@ extern "C" const char *
 AsyncRT_DeviceContext_DtoD_async(const DeviceContext *, const DeviceBuffer *dst,
                                  const DeviceBuffer *src) {
   size_t n = dst->bytes < src->bytes ? dst->bytes : src->bytes;
+  if (dst->mtl && src->mtl)
+    return VegaRTMetal_copyDtoD(dst->mtl, src->mtl, n);
   if (n)
     memcpy(dst->ptr, src->ptr, n);
   return VR_OK;
@@ -493,6 +579,8 @@ extern "C" const char *
 AsyncRT_DeviceContext_setMemory_async(const DeviceContext *,
                                       const DeviceBuffer *dst, uint64_t val,
                                       size_t val_size) {
+  if (dst->mtl)
+    return VegaRTMetal_fill(dst->mtl, val, val_size);
   char *p = static_cast<char *>(dst->ptr);
   size_t n = dst->bytes;
   switch (val_size) {
@@ -639,20 +727,98 @@ extern "C" void AsyncRT_DeviceTimer_release(const DeviceTimer *timer) {
 #define VR_STUB_ZERO(name, type)                                               \
   extern "C" type name() { return (type)0; }
 
-// Kernel loading and launch — arrives with the Metal backend / AIR trio.
-VR_STUB_ERR(AsyncRT_DeviceContext_loadFunction)
+// Kernel loading and launch: real on Metal (MSL source or metallib bytes,
+// per the sniff-the-blob rule); an error on CPU, where there is no device.
+extern "C" const char *AsyncRT_DeviceContext_loadFunction(
+    const DeviceFunction **result, const DeviceContext *ctx,
+    const char *moduleName, const char *functionName, const char *data,
+    size_t dataLen, int32_t maxDynamicSharedBytes, const char *debugLevel,
+    int32_t optimizationLevel) {
+  (void)moduleName;
+  (void)debugLevel;
+  (void)optimizationLevel;
+  if (!ctx->metal)
+    return vrErrorf("VegaRT: loadFunction requires a metal context (api is "
+                    "'%s')",
+                    ctx->api.c_str());
+  VRMetalFunc *mfn = nullptr;
+  if (const char *err = VegaRTMetal_loadFunction(
+          &mfn, ctx->metal, functionName, data, dataLen, maxDynamicSharedBytes))
+    return err;
+  auto *fn = new VRFunction();
+  fn->mtl = mfn;
+  *result = fn;
+  return VR_OK;
+}
+
+// Metal launch protocol (decoded from _device_context_metal.mojo): `args`
+// holds one element — a pointer to MetalEnqueueFunctionArgs, whose leading
+// fields are {void **args; const uint64_t *sizes; const bool *isDevicePtr;}.
+extern "C" const char *AsyncRT_DeviceContext_enqueueFunctionDirect(
+    const DeviceContext *ctx, const DeviceFunction *func, uint32_t gridX,
+    uint32_t gridY, uint32_t gridZ, uint32_t blockX, uint32_t blockY,
+    uint32_t blockZ, uint32_t sharedMemBytes, void *attributes,
+    uint32_t numAttributes, void *const *args, uint32_t argCount,
+    const uint64_t *argSizes) {
+  (void)attributes;
+  if (numAttributes)
+    return vrErrorf("VegaRT: launch attributes not supported yet (%u given)",
+                    numAttributes);
+  if (!ctx->metal)
+    return vrErrorf("VegaRT: kernel launch requires a metal context (api is "
+                    "'%s')",
+                    ctx->api.c_str());
+  struct MetalArgsView {
+    void *const *addrs;
+    const uint64_t *sizes;
+    const bool *isDevicePtr;
+  };
+  const uint32_t grid[3] = {gridX, gridY, gridZ};
+  const uint32_t block[3] = {blockX, blockY, blockZ};
+  if (argSizes == nullptr && argCount > 0 && args != nullptr) {
+    // Metal wrapper path: single MetalEnqueueFunctionArgs pointer.
+    const auto *mv = static_cast<const MetalArgsView *>(args[0]);
+    return VegaRTMetal_launch(ctx->metal, func->mtl, grid, block,
+                              sharedMemBytes, mv->addrs, mv->sizes,
+                              mv->isDevicePtr, argCount);
+  }
+  // Plain path: per-arg pointers and sizes, no device-pointer flags (all
+  // scalar bytes). Used by our own smoke tests.
+  return VegaRTMetal_launch(ctx->metal, func->mtl, grid, block, sharedMemBytes,
+                            args, argSizes, nullptr, argCount);
+}
+
+extern "C" void AsyncRT_DeviceFunction_retain(const DeviceFunction *fn) {
+  vrRetain(const_cast<VRFunction *>(fn));
+}
+
+extern "C" void AsyncRT_DeviceFunction_release(const DeviceFunction *fn) {
+  vrRelease(const_cast<VRFunction *>(fn));
+}
+
+extern "C" const char *
+AsyncRT_DeviceFunction_getAttribute(int32_t *result, const DeviceFunction *fn,
+                                    int32_t attr_code) {
+  *result = 0;
+  return vrErrorf("VegaRT: DeviceFunction_getAttribute(%d) not implemented",
+                  attr_code);
+}
+
+extern "C" const char *
+AsyncRT_DeviceContext_metal_device(void **result, const DeviceContext *ctx) {
+  if (!ctx->metal)
+    return vrErrorf("VegaRT: metal_device on non-metal context");
+  return VegaRTMetal_mtlDevice(ctx->metal, result);
+}
+
 VR_STUB_ERR(AsyncRT_DeviceContext_selectStream)
-VR_STUB_ERR(AsyncRT_DeviceFunction_getAttribute)
 VR_STUB_ERR(AsyncRT_DeviceFunction_copyToConstantMemory)
-VR_STUB_VOID(AsyncRT_DeviceFunction_release)
-VR_STUB_VOID(AsyncRT_DeviceFunction_retain)
 VR_STUB_ERR(AsyncRT_occupancyMaxActiveBlocksPerMultiprocessor)
 
 // Vendor-specific escapes: not this machine's APIs.
 VR_STUB_ERR(AsyncRT_DeviceContext_cuda_context)
 VR_STUB_ERR(AsyncRT_DeviceContext_cuda_current_context)
 VR_STUB_ERR(AsyncRT_DeviceContext_hip_device)
-VR_STUB_ERR(AsyncRT_DeviceContext_metal_device) // real in phase 2b
 VR_STUB_ERR(AsyncRT_DeviceFunction_cuda_module)
 VR_STUB_ERR(AsyncRT_DeviceFunction_hip_module)
 VR_STUB_ERR(AsyncRT_DeviceStream_cuda_stream)
@@ -709,16 +875,22 @@ VR_STUB_VOID(AsyncRT_DeviceMulticastBuffer_retain)
 
 // Raw-pointer sized copies (used by DevicePointer paths).
 extern "C" const char *
-AsyncRT_DeviceContext_HtoD_async_sized(const DeviceContext *, void *dst,
+AsyncRT_DeviceContext_HtoD_async_sized(const DeviceContext *ctx, void *dst,
                                        const void *src, size_t bytes) {
+  if (ctx->metal)
+    return VegaRTMetal_copyRawHtoD(ctx->metal,
+                                   reinterpret_cast<uint64_t>(dst), src, bytes);
   if (bytes)
     memcpy(dst, src, bytes);
   return VR_OK;
 }
 
 extern "C" const char *
-AsyncRT_DeviceContext_DtoH_async_sized(const DeviceContext *, void *dst,
+AsyncRT_DeviceContext_DtoH_async_sized(const DeviceContext *ctx, void *dst,
                                        const void *src, size_t bytes) {
+  if (ctx->metal)
+    return VegaRTMetal_copyRawDtoH(ctx->metal, dst,
+                                   reinterpret_cast<uint64_t>(src), bytes);
   if (bytes)
     memcpy(dst, src, bytes);
   return VR_OK;
@@ -739,6 +911,10 @@ extern "C" void AsyncRT_DeviceContext_archName(void *resultStringRef,
 extern "C" const char *
 AsyncRT_DeviceContext_maxSingleAllocationSize(const DeviceContext *ctx,
                                               size_t *result) {
+  if (ctx->metal) {
+    *result = VegaRTMetal_maxAlloc(ctx->metal); // 3.5 GiB on the Vega II (S1)
+    return VR_OK;
+  }
   size_t total = 0, freeMem = 0;
   AsyncRT_DeviceContext_getMemoryInfo(ctx, &freeMem, &total);
   *result = total; // host heap: bounded by physical memory
@@ -768,7 +944,6 @@ extern "C" void AsyncRT_DeviceEvent_retain(const DeviceEvent *event) {
 
 // Kernel launches, ranged host functions, Metal capture, and tensor maps
 // arrive with later phases; linkable, legible stubs meanwhile.
-VR_STUB_ERR(AsyncRT_DeviceContext_enqueueFunctionDirect)
 VR_STUB_ERR(AsyncRT_DeviceContext_enqueueHostFunctionRange)
 VR_STUB_ERR(AsyncRT_DeviceContext_setMetalPrintEnabled)
 VR_STUB_ERR(AsyncRT_DeviceContext_startMetalTraceCapture)

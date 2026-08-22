@@ -285,3 +285,62 @@ doing exactly what it was designed to do:
 Next: phase 2b — `MetalDevice` behind the same ABI, `MTLCommandQueue`
 streams, blit copies, and the MSL-source `loadFunction` path so the runtime
 runs kernels on the Vega II before the AIR trio exists.
+
+## 2026-08-22 — Phase 2b: the runtime runs kernels on the Vega II
+
+`VegaRTMetal.cpp` (~600 lines) — the Metal backend, written in plain C++
+over raw `objc_msgSend` casts (the metal-cpp technique) so no Objective-C++
+toolchain support had to exist. The hermetic sysroot already ships
+Metal/CoreFoundation/Foundation — upstream included them deliberately.
+
+The acceptance gate, a headerless C smoke driving the ABI exactly as Mojo's
+`external_call` will find it:
+
+```
+metal devices: 2
+device: AMD Radeon Pro Vega II (Apple Metal)
+memory: 32.0 GiB total, maxAlloc 3.5 GiB, warp 64
+buffers: x@0x400400000 y@0x400800000 (private, HBM2)
+pipeline: built from MSL source
+saxpy: 0/1048576 wrong
+memset: verified zero
+VEGART METAL SMOKE: ALL PASS
+```
+
+Decisions that made it work:
+
+- **Device pointers are `MTLBuffer.gpuAddress` values**, and a global
+  interval map resolves any address back to (buffer, offset). Kernel
+  launches use it to bind pointer args with `setBuffer` — which also makes
+  the resource resident — without trusting any struct layout we don't own
+  (specifically the Mojo `Optional` inside `MetalEnqueueFunctionArgs`, whose
+  buffers list we therefore never need to read).
+- **The Metal launch protocol** (decoded from `_device_context_metal.mojo`):
+  on Metal, `enqueueFunctionDirect`'s `args` carries one pointer to a
+  `MetalEnqueueFunctionArgs{addrs, sizes, is_device_ptr, …}` — distinguished
+  at runtime by `argSizes == null`. Scalars bind with `setBytes`, pointers
+  with resolved `setBuffer`; argument index is the buffer slot.
+- **Discrete semantics as designed** (§5.4): device buffers
+  `storageModePrivate` in HBM2, host buffers `storageModeShared`, every
+  HtoD/DtoH a staging blit, `fillBuffer` for uniform-byte memsets and a
+  pattern-staging fallback otherwise. Still synchronous under the async
+  names — the same completion model the CPU lane validated.
+- `loadFunction` sniffs the blob: `MTLB` magic → `newLibraryWithData`,
+  else MSL source → `newLibraryWithSource`. The runtime is fully testable
+  before the AIR trio exists, exactly as the sister port prescribed.
+- Device ordering ranks Metal3-family then working-set size: the Vega II is
+  device 0, the 580X device 1, deterministically.
+
+Two -Werror lessons from the repo's warning set: no global constructors
+(function-local statics via leaked `new`), and no const-dropping casts even
+through `id`. And one self-inflicted: adding a "late additions" stub block
+without deleting the stub the real implementation replaces.
+
+CPU lane regression: still 5/5. Runtime status: buffers/copies/kernels
+proven on both backends; still stubbed with legible errors — graphs,
+multicast, streams-as-parallelism, occupancy, function attributes.
+
+Next (phase 3): the target entry (`MetalVega2`, `_all_targets`, warp 64) so
+`--target-accelerator` accepts this GPU, then the AIR trio against the S1
+reference metallib — at which point ordinary Mojo GPU code compiles and
+launches through everything built today.
