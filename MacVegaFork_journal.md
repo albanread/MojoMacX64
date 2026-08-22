@@ -551,6 +551,21 @@ Also noted: **`amdgpu-nt` is no longer usable as a diagnostic** — `air-as`
 stamps its own AIR version, so the standalone tool always sees 2.6 against
 its 2.5 plugin.
 
+### Verified scoreboard
+
+Final sweep after the day's fixes: **23 passing** (from 13), and every
+remaining failure is accounted for — foreign-ISA features, upstream's own
+`_APPLE_GPU_INCOMPATIBLE` set, SDK package gaps, or the three open items
+below. Notably `test_init_vector_gpu` — skip-listed as upstream's
+KERN-2360 MetalAIRPass address-space bug — **passes here**, so our
+address-space work fixed that class outright.
+
+Passing: accelerator_arch (+cli, +cli_kernels), add_constant, barrier,
+cast_roundtrip, constant_memory, dim, gpu_mem_alloc_validation, grid_dim,
+has_sm100_or_newer, id, info, init_vector_gpu, laneid, launch_binary,
+prefix_sum, shuffle, simd_reduction, strided_load, sum, targetinfo,
+verify_buffers_gpu.
+
 ### Skip list, with upstream's blessing
 
 Cross-checking `max/kernels/test/gpu/basics/BUILD.bazel` showed upstream

@@ -5,7 +5,7 @@ test_semaphore              # PTX named hardware barriers (nvvm.barrier)
 test_producer_consumer      # mbarrier objects (llvm.nvvm.mbarrier.*, H100 CI)
 test_cluster_dims_attribute # Hopper thread-block clusters
 test_cluster_sync           # Hopper thread-block clusters
-test_grid_dependence_control# nvptx64 target test
+test_grid_dependence_control  # nvptx64 target test
 test_is_sm90                # nvptx64 target test
 test_load_width_codegen     # nvptx64 target test
 test_sync                   # nvptx64 target test
@@ -23,7 +23,6 @@ test_printf                 # device printf (MOCO-2405)
 test_debug_assert_gpu_error # device print path (MOCO-2405)
 test_print_elementwise      # elementwise print (MOCO-2366)
 test_capture_trait_type     # MOCO-2405
-test_init_vector_gpu        # KERN-2360 upstream; revisit — our AS propagation may already handle it
 test_metal_print            # device print output path (os_log feature work pending)
 # Other upstream vendor constraints:
 test_amd_format             # amd_gpu-constrained upstream (amdgcn format paths)
@@ -40,3 +39,7 @@ test_random                 # device RNG kernels
 test_static_layout_capture_argcount  # runtime value mismatch (-1.0 vs 1.0)
 # Disproved for these: LLVM-intrinsic availability (driver handles llvm.umax
 # natively), i128 (comptime-folded host-side), GEP no-wrap flags (fixed).
+# SDK package gaps (kernels-library packages not yet in vega-sdk/pkg, not bugs):
+test_function_mts           # needs 'extensibility' package
+test_wmma                   # needs 'linalg' package (also nvidia_gpu upstream)
+test_kernel_with_list       # device-side malloc/free (Metal has no device heap); PTX-specific CHECKs
