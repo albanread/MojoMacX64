@@ -1393,9 +1393,18 @@ def _vote_apple_helper[ret_type: DType](vote: Bool) -> Scalar[ret_type]:
 
     # AIR has a dedicated 32-bit ballot intrinsic; narrowing the 64-bit
     # `simd_ballot`/`simd_vote` form instead crashes the Metal shader
-    # compiler at pipeline-state creation.
-    var mask32 = llvm_intrinsic["llvm.air.simd_ballot.i32", UInt32](vote)
-    return mask32.cast[ret_type]()
+    # compiler at pipeline-state creation — on 32-lane Apple-silicon
+    # SIMD-groups.
+    #
+    # VEGA-FORK: on wave64 GCN behind Metal, the 32-bit form silently drops
+    # lanes 32-63; `air.simd_ballot.i64(i1) -> i64` is what Apple's own MSL
+    # frontend emits for this hardware (golden probe, review credit: Alban).
+    comptime if WARP_SIZE == 64:
+        var mask64 = llvm_intrinsic["llvm.air.simd_ballot.i64", UInt64](vote)
+        return mask64.cast[ret_type]()
+    else:
+        var mask32 = llvm_intrinsic["llvm.air.simd_ballot.i32", UInt32](vote)
+        return mask32.cast[ret_type]()
 
 
 @always_inline
