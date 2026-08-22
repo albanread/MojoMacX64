@@ -689,18 +689,6 @@ public:
                                           /*GenerateHash=*/false,
                                           /*ModHash=*/nullptr);
     }
-    // WriteBitcode17ToFile's wrapper size field can undercount by the
-    // trailing alignment words on some modules; Apple's loader requires the
-    // header to match the file exactly ("Unexpected bitcode file"). Patch
-    // the size field to the real payload length.
-    if (bc.size() >= 20) {
-      uint32_t magic = 0;
-      memcpy(&magic, bc.data(), 4);
-      if (magic == 0x0B17C0DE) {
-        uint32_t realSize = static_cast<uint32_t>(bc.size() - 20);
-        memcpy(bc.data() + 12, &realSize, 4);
-      }
-    }
     llvm::SmallString<128> llPath, libPath;
     if (llvm::sys::fs::createTemporaryFile("vega-kernel", "air", llPath))
       return Error("failed to create temporary .air file");
