@@ -1903,3 +1903,80 @@ draft costs nearly three full passes and the draft model is pure overhead. The m
 kernels still run at roughly 16% of the card's memory bandwidth; making that region efficient
 would speed up generation directly *and* make speculation profitable. That is the next piece
 of unclaimed performance, and it is a bigger one than the mat-mul was.
+
+## 2026-08-23 — Generation +27%, from a constant that was tuned for the wrong wave
+
+Prefill was the loud problem, so it got the mat-mul. Generation turned out to have a much
+cheaper win sitting in a `#define`.
+
+The diagnosis came from measuring each mat-vec kernel against the card's ~830 GB/s copy
+ceiling rather than against itself:
+
+```
+f32   675 GB/s   81%          q4_K   219 GB/s   26%
+f16   654 GB/s   79%          q6_K   191 GB/s   23%
+q4_0  428 GB/s   52%          q5_K    90 GB/s   11%
+```
+
+**That table is the whole diagnosis.** The float kernels nearly saturate the card, so the
+memory path, the dispatch and the wave64 work distribution were all fine — only the
+*quantised* kernels were starved. A single measurement against an absolute ceiling separated
+"the GPU is slow" from "these particular kernels are slow", which no amount of comparing our
+numbers to our own earlier numbers would have done.
+
+The cause is `N_R0_*`: how many src0 rows one simdgroup accumulates, which sets how far the
+activation-vector load is amortised. The stock values are tuned for 32-wide Apple waves, and
+the correlation was already sitting in the numbers above — q4_0 has `nr0=4` and reaches 52%,
+q4_K has `2` and reaches 26%, q5_K has `1` and reaches 11%. Raising it to 8:
+
+```
+q4_K  219 -> 369    q2_K  123 -> 216    q5_0  344 -> 395
+q5_K   90 -> 139    q3_K   92 -> 129    q4_0  428 -> 460
+q6_K  191 -> 208
+```
+
+End to end: **dense 8B generation 33.2 -> 42.0 t/s, MoE 46.4 -> 49.9.** Perplexity is
+bit-identical at 10.5168, which is what you want from a change that only redistributes work.
+The constants are keyed on the probed wave width rather than replaced, so Apple GPUs keep
+their tuning — `N_SIMDWIDTH` is already injected at shader-compile time and the host picks the
+matching variant.
+
+Two results worth carrying forward. **`nsg` does nothing** — 1, 2 and 4 simdgroups give
+369/368/368 GB/s — so the entire effect is `nr0`, and an hour spent tuning `nsg` would have
+been an hour wasted. And **`nr0` is non-monotonic**: 8 is optimal, 16 and 32 are both worse as
+register pressure starts to cost more than the amortisation buys. A hill-climb from the stock
+value would have found it; an assumption that "more is better" would have overshot badly.
+
+**A methodological note, because this bit me twice in one session.** My first parameter sweep
+returned four identical results for four different configurations. The cause was zsh: `set --
+$cfg` does *not* word-split an unquoted parameter the way bash does, so every configuration
+built the same binary and I was reading one number four times. It looked like a clean "this
+parameter has no effect" result. The only reason I caught it is that the numbers were
+*suspiciously* identical rather than merely close. Sweeps need a check that the thing under
+test actually changed — I now dump the patched constants alongside each result.
+
+Also re-measured everything the tuning invalidated rather than leaving stale figures in the
+docs: KV quantisation is still harmful and now costs 61% of generation, and speculative
+decoding got **worse** — throughput at batch 4 is now 0.92x of batch 1, because single-token
+decode sped up 27% while small batches did not. Faster scalar decode makes speculation less
+attractive, not more.
+
+And the concurrency question was re-opened honestly: it was plausible that the
+nondeterministic garbage which forced serial dispatch had really been the broken wave64
+kernels, all of which are now fixed. It was not. With concurrency forced on, three identical
+greedy runs still produce three *different* wrong answers. `memoryBarrierWithScope:` is simply
+not enforced between concurrent dispatches on this driver; serialisation stays, at ~6%.
+
+Where the card now stands, against where it started:
+
+```
+                   prefill            generation
+dense 8B       48 -> 163 t/s        33 -> 42 t/s
+MoE 30B-A3B    88 -> 175 t/s        46 -> 50 t/s
+```
+
+The remaining gap in generation is **~2x and is a memory access pattern, not a constant**.
+q4_K now reaches 44% of the card's bandwidth against ~80% for f16. A K-quant super-block
+scatters quants, high bits and packed scales across 144 bytes and eight threads read different
+fields of it, where f16 reads contiguous `half4x4`. Closing it means loading blocks
+cooperatively before dequantising — a kernel rewrite, and the next real piece of work here.
