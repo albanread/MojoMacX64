@@ -18,15 +18,14 @@ contributions, please see the following docs.
   concrete development goals as we work towards an even more robust and
   feature-rich standard library.
 
-## Contributing to the Mojo standard library
+## Contributing
 
-As a contributor, your efforts and expertise are invaluable in driving the
-evolution of the Mojo standard library. The [Mojo contributor
-guide](../CONTRIBUTING.md) provides all the information necessary to make
-meaningful contributions—from understanding the submission process to
-adhering to best practices:
+This tree is part of an unofficial fork and **does not accept contributions**.
+See the [repository README](../../README.md) for what this fork is and is not.
 
-- [Mojo contributor guide](../CONTRIBUTING.md)
+The Mojo standard library is developed at
+[modular/modular](https://github.com/modular/modular), which is where
+contributions to it belong.
 
 ## Getting started
 
@@ -37,10 +36,6 @@ For additional information, the FAQ page is your go-to resource.
 - [Mojo standard library development](./docs/development.md)
 - [FAQ](./docs/faq.md)
 
-## Code of conduct
-
-[Code of conduct](../../CODE_OF_CONDUCT.md)
-
 ## License
 
 Apache License v2.0 with LLVM Exceptions
@@ -49,7 +44,6 @@ See the license file in the repository for more details.
 
 ## Support
 
-For any inquiries, bug reports, or feature requests, please [open an
-issue](https://github.com/modular/modular/issues) on the GitHub repository. See
-the [Mojo contributor guide](../CONTRIBUTING.md) for guidelines on filing good
-bugs.
+This fork is unsupported and carries no warranty. Bugs in the Mojo standard
+library itself belong upstream at
+[modular/modular](https://github.com/modular/modular).

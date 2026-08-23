@@ -19,19 +19,10 @@ guide](https://max.modular.com/get-started).
 
 ## Contributing
 
-Thanks for your interest in contributing to MAX!
+This tree is part of an unofficial fork and **does not accept contributions**.
+See the [repository README](../README.md) for what this fork is and is not.
 
-We welcome contributions to this repo on the
-[`main`](https://github.com/modular/modular/tree/main)
-branch. Please first read our [Contributor
-Guide](https://github.com/modular/modular/blob/main/max/CONTRIBUTING.md).
-
-If you want to report issues or request features, [please create a GitHub
-issue here](https://github.com/modular/modular/issues)—also see our [guide to
-submitting good bug reports](./CONTRIBUTING.md#submitting-bugs).
-
-## Contact us
-
-If you'd like to chat with the team and other community members, please send a
-message to our [Discord channel](https://discord.gg/modular) and [our
-forum board](https://forum.modular.com/).
+MAX itself is developed at
+[modular/modular](https://github.com/modular/modular), which is where bug
+reports, feature requests and pull requests for MAX belong. Please do not
+file issues about this fork there.

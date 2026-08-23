@@ -2,8 +2,11 @@
 
 This document covers the essentials of developing for the standard library.
 
-If this is your first time contributing, first read everything in
-the [Mojo contributor guide](../../CONTRIBUTING.md).
+> [!NOTE]
+> This is an unofficial fork that does not accept contributions. What follows
+> is kept because it describes how to *build and test* the standard library,
+> which is still useful here. Changes meant for Mojo itself belong upstream at
+> [modular/modular](https://github.com/modular/modular).
 
 ## Set up your environment
 
@@ -18,7 +21,7 @@ To get started, you need to do the following:
    utilities required for GPU programming.
 2. If you're using VS Code,
    [Install the Mojo VS Code extension](https://marketplace.visualstudio.com/items?itemName=modular-mojotools.vscode-mojo).
-3. [Fork the repo and create a branch](../../../CONTRIBUTING.md#step-2-create-a-pull-request).
+3. Create a branch for your work.
 
 Now you're ready to start developing.
 
@@ -121,16 +124,10 @@ Or you can use a package manager like `pixi` or `uv` to run the
 You can also consider setting up your editor to automatically format
 Mojo, Python, and MDX files upon saving.
 
-### Raising a PR
+Congratulations! You've now got an idea on how to build the standard library
+and test your changes.
 
-If you think you have a worthwhile change to propose, check the guidance in the
-[Mojo contributor guide](../../CONTRIBUTING.md).
-
-If your changes are ready to go, follow the steps to
-[create a pull request](../../../CONTRIBUTING.md#step-2-create-a-pull-request).
-
-Congratulations! You've now got an idea on how to contribute to the standard
-library, test your changes, and raise a PR.
-
-If you're still having issues, reach out on [Discord](https://modul.ar/discord)
+This fork does not take pull requests. If the change is one Mojo itself should
+have, take it upstream to
+[modular/modular](https://github.com/modular/modular).
 or ask a question in the [Modular forum](https://forum.modular.com/).

@@ -24,8 +24,11 @@ to build MAX graphs, see the [`python/max/nn/`](/max/python/max/nn) directory.
 
 ## Contributing
 
-We're accepting kernel contributions. See the [kernels contributing
-guide](./CONTRIBUTING.md) for details.
+This tree is part of an unofficial fork and **does not accept contributions**.
+See the [repository README](../../README.md) for what this fork is and is not.
+
+Kernel contributions belong upstream at
+[modular/modular](https://github.com/modular/modular).
 
 ## License
 
@@ -35,5 +38,6 @@ See the license file in the repository for more details.
 
 ## Support
 
-For any inquiries, bug reports, or feature requests, please [open an
-issue](https://github.com/modular/modular/issues) on the GitHub repository.
+This fork is unsupported and carries no warranty. Issues with MAX or Mojo
+themselves belong upstream at
+[modular/modular](https://github.com/modular/modular).

@@ -11,11 +11,6 @@ inside the MAX framework, then read on.
 getting started guide for development in the MAX framework codebase,
 introducing the Bazel build system.
 
-- [contributing-models.md](contributing-models.md)—**Contributing new model
-architectures**: How to add a new model architecture (directory layout,
-`arch.py`, `model.py`, config, weight adapters) and register it for `max
-serve`.
-
 - [accuracy-debugging.md](accuracy-debugging.md)—**Debug MAX model accuracy**:
 Compare intermediate tensor outputs between a MAX pipeline and the PyTorch
 (Hugging Face) reference model using `debug_model` and `compare_tensors` to find

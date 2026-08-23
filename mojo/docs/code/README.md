@@ -42,5 +42,6 @@ this repo. As such, we recommend you preview your edits in an IDE that can
 render Markdown and MDX files, such as VS Code, including the
 [VS Code environment in GitHub](https://github.dev/modular/modular/blob/main/).
 
-For more information about how to contribute, see the
-[Contributor Guide](../../CONTRIBUTING.md).
+This is an unofficial fork and does not accept contributions. Documentation
+fixes belong upstream at
+[modular/modular](https://github.com/modular/modular).

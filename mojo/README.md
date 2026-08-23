@@ -1,13 +1,13 @@
 <div align="center">
     <img src="https://modular-assets.s3.amazonaws.com/images/mojo_github_logo_bg.png?20250905">
 
-  [About Mojo] | [Get started] | [API docs] | [Contributing] | [Changelog]
+  [About Mojo] | [Get started] | [API docs] | [Upstream] | [Changelog]
 </div>
 
 [About Mojo]: https://mojolang.org/
 [Get started]: https://mojolang.org/docs/manual/get-started/
 [API docs]: https://mojolang.org/docs/std/
-[Contributing]: ./CONTRIBUTING.md
+[Upstream]: https://github.com/modular/modular
 [Changelog]: https://mojolang.org/releases/
 
 # Mojo language 🔥
@@ -43,16 +43,13 @@ programming](https://max.modular.com/gpu/intro-tutorial/).
 
 ## Contributing
 
-Thanks for your interest in contributing to Mojo!
+This tree is part of an unofficial fork and **does not accept contributions**.
+See the [repository README](../README.md) for what this fork is and is not.
 
-We welcome contributions to this repo for Mojo on the
-[`main`](https://github.com/modular/modular/tree/main)
-branch. Please first read our [Contributor
-Guide](https://github.com/modular/modular/blob/main/mojo/CONTRIBUTING.md).
-
-If you want to report issues or request features, [please create a GitHub
-issue here](https://github.com/modular/modular/issues)—also see our [guide to
-submitting good bug reports](./CONTRIBUTING.md#submitting-bugs).
+Mojo itself is developed at
+[modular/modular](https://github.com/modular/modular), which is where bug
+reports, feature requests and pull requests for the language belong. Please
+do not file issues about this fork there.
 
 ## Contact us
 

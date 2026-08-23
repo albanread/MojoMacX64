@@ -16,10 +16,9 @@ details, see
 
 ### 2. I hit a bug! What do I do?
 
-Don’t Panic! 😃 Check out our
-[bug submission guide](../../../CONTRIBUTING.md#submitting-bugs) to make sure
-you include all the essential information to avoid unnecessary delays in
-getting your issues resolved.
+Don’t Panic! 😃 This fork is an unsupported experiment and has no bug-tracking
+process. If the bug is in Mojo itself rather than in this port, report it
+upstream at [modular/modular](https://github.com/modular/modular/issues).
 
 ## Standard library code
 

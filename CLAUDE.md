@@ -209,19 +209,15 @@ Many benchmarks and tests use compile-time defines:
 - `get_defined_bool[flag_name]=true/false`
 - `get_defined_dtype[type]=float16/float32`
 
-## Contributing Areas
+## Contributions
 
-Currently accepting contributions for:
+**This repository is an unofficial fork and does not accept contributions.**
+There is no contributor guide, no CLA, no code of conduct and no PR process —
+the upstream ones were removed because they described a project this is not.
 
-- Mojo standard library (`/mojo/stdlib/`)
-- MAX accelerator library (`/max/kernels/`)
-- MAX API and models (`/max/`)
-- Code examples (`/max/examples/`, `/mojo/examples/`)
-- Mojo documentation (`/mojo/docs/`)
-
-Each area has its own guidelines in the nearest `CONTRIBUTING.md`; the root
-`CONTRIBUTING.md` is the full contributor guide. Other areas are not open for
-external contributions.
+Changes intended for Mojo or MAX themselves belong upstream at
+[modular/modular](https://github.com/modular/modular). Do not add contribution
+guidance, issue templates or PR templates back to this tree.
 
 ## Platform Support
 

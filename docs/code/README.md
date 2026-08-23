@@ -74,6 +74,6 @@ Both directories hold tested MAX code, but they serve different owners:
 
 ## Contributing
 
-If you see something in the documentation or a code example that's incorrect or
-could be improved, we'd love to accept your contributions. For more information,
-see the [Contributor Guide](../../CONTRIBUTING.md).
+This tree is part of an unofficial fork and **does not accept contributions**.
+Documentation fixes belong upstream at
+[modular/modular](https://github.com/modular/modular).
