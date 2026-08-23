@@ -1980,3 +1980,67 @@ q4_K now reaches 44% of the card's bandwidth against ~80% for f16. A K-quant sup
 scatters quants, high bits and packed scales across 144 bytes and eight threads read different
 fields of it, where f16 reads contiguous `half4x4`. Closing it means loading blocks
 cooperatively before dequantising — a kernel rewrite, and the next real piece of work here.
+
+## 2026-08-23 — Eight models, a load-width defect, and being wrong about quantisation
+
+Broadened the testing beyond Qwen to see what the Metal work actually holds up against.
+Eight model/quant combinations, four architectures, dense and MoE, each checked against the
+**CPU backend on identical text** rather than eyeballed:
+
+```
+Gemma-4-26B-A4B (MoE) QAT Q4_K_XL  13 GB   241 / 49 t/s    vs CPU -1.56%
+Qwen3-30B-A3B   (MoE) Q4_K_M       17 GB   179 / 52        vs CPU +0.28%
+gpt-oss-20b     (MoE) MXFP4        12 GB   231 / 62        vs CPU -0.02%
+Qwen3-8B              Q4_K_M      4.7 GB   162 / 47        bit-identical
+Gemma-3-12B           Q6_K        9.7 GB   127 / 21        vs CPU +0.01%
+Llama-3.1-8B          Q8_0        8.5 GB   176 / 32        vs CPU -0.00%
+Llama-3.2-3B          Q5_K_M      2.3 GB   317 / 54        vs CPU -0.00%
+Llama-3.2-3B          f16         6.4 GB   426 / 59        vs CPU -0.00%
+```
+
+Everything works, including Gemma 3's interleaved sliding-window attention and Gemma 4's
+dual head dimensions. **Generation tracks active parameters, not model size** — the three
+MoE models take the top of that column despite being the largest.
+
+**A load-width defect, found by a diagnostic worth reusing.** Gemma-3-12B Q6_K generated at
+only 15 t/s, and profiling each kernel against the card's ~830 GB/s ceiling showed why: f32
+and f16 reach ~80% of it, q4_K 44%, q5_K 11%. The question was whether the K-quants were
+ALU-bound or memory-bound, and the way to settle it was to **delete the arithmetic**:
+stripping almost everything out of the q5_K inner loop while leaving every load in place made
+it **2.5% faster**. A kernel that does not care whether you remove its maths is not
+ALU-bound. Comparing with q4_K then showed the difference plainly — q4_K reads quants as
+`uint16_t`, q5_K and q6_K read them as `uint8_t`: twice the transactions at half the width.
+Converting both gave 139 → 206 and 208 → 328 GB/s, and Gemma-3-12B went 15.0 → 20.6 t/s with
+bit-identical perplexity.
+
+**And then I was wrong about something, in a way worth recording.** Gemma 4 scored a
+perplexity of ~17000 where Gemma 3 scored 8.9, on the same corpus. Alban suggested the
+quantisation-aware build; I argued against it, reasoning that quantisation moves perplexity
+by fractions of a percent and could not possibly account for a 1900x gap, and went looking
+for a backend or architecture fault instead. I ruled out — carefully and correctly — the
+tokenizer (byte-identical to Gemma 3, same vocabulary), BOS handling, missing architecture
+support, context length (broken at 128 through 2048 alike), and our own Metal code (the CPU
+path shows it too). All true, all beside the point.
+
+The QAT build scores **777 instead of 16097**, and is *smaller and faster* as well: 13 GB
+against 16, and 49 t/s against 39. The alarming +11% GPU-vs-CPU gap I had been chasing as a
+possible backend bug collapsed to −1.56% with better weights.
+
+The mechanism is one this journal already contains, and I failed to connect it. **An MoE
+router is a small tensor making a discrete decision about which experts fire.** Quantisation
+error there does not perturb an output slightly; it changes which weights are used at all.
+That is the same near-tie sensitivity recorded a few entries ago when explaining why MoE
+greedy decoding diverges faster than dense — I had the mechanism, applied it to numerical
+noise, and did not think to apply it to quantisation. Dense models have no equivalent
+pressure point, which is exactly why the intuition I was reasoning from did not transfer.
+
+**Rule: for MoE, prefer a QAT build or go up a quantisation level. And when an MoE model
+scores far worse than expected, suspect the weights before the backend.**
+
+Two smaller notes. `-no-cnv` no longer suppresses the chat template — it was removed as a
+CLI flag upstream — which is why Gemma 4 generated coherently throughout while scoring raw
+text catastrophically; the two go through different paths, and it hid the problem for a
+while. And a round of kernel measurements was silently corrupted by a colleague using the
+same GPU: the untouched q4_K control appeared to lose 64% of its bandwidth. Without a
+control in the same run it would have read as a catastrophic regression in code I had not
+touched. Every performance table since carries one.
