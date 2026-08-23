@@ -363,6 +363,52 @@ The wider lesson for anyone shaping IR here: **~19% of peak is reachable from
 an ordinary tiled kernel with no vendor intrinsics at all.** Reach for the
 exotic path only after measuring the plain one.
 
+### Narrow loads leave most of your bandwidth on the floor
+
+Byte-at-a-time reads of packed data cost far more on this card than the
+instruction count suggests. Two kernels reading the same bytes, differing only
+in access width, differ by ~50% in achieved bandwidth.
+
+> **`MEASURED`** — llama.cpp's K-quant mat-vec kernels, against the card's
+> ~830 GB/s ceiling. `q4_K` read its quants as `uint16_t`; `q5_K` and `q6_K`
+> read the same data as `uint8_t`.
+>
+> | kernel | before | after | of ceiling |
+> |---|---:|---:|---:|
+> | `q5_K` | 139 GB/s | **206 GB/s** | 11% → 25% |
+> | `q6_K` | 208 GB/s | **328 GB/s** | 25% → 40% |
+>
+> The change is only the load width — same bytes, same arithmetic, same
+> results bit-for-bit. Halving the number of transactions bought ~50%.
+
+Packed 4-bit data makes this easy to get wrong, because the natural way to
+write the unpack is per-byte. Read the widest aligned unit the layout permits
+and shift the fields out of registers. Check alignment first: a 210-byte block
+whose sub-arrays start at 0 and 128 is safe for 16-bit loads; one starting at
+an odd offset is not.
+
+### Diagnostic: delete the arithmetic
+
+Before optimising a kernel, settle whether it is ALU-bound or memory-bound —
+and the fastest way is destructive. **Strip the arithmetic out of the inner
+loop while leaving every load in place**, and time the wreckage. It computes
+nonsense; that does not matter.
+
+> **`MEASURED`** — gutting the `q5_K` inner loop this way made it **2.5%
+> faster**. A kernel indifferent to the removal of its own maths is not
+> ALU-bound, and no amount of instruction-level cleverness will help it. That
+> one measurement redirected the work to the loads, where the 50% was.
+
+The result is unambiguous in a way profiler counters are not, and it takes
+about two minutes. Note also what it rules *out*: had the kernel sped up
+sharply, the arithmetic would have been worth attacking.
+
+> **Corollary for measurement generally:** keep an untouched kernel in the
+> same run as a control. One of our sweeps showed `q4_K` — code we had not
+> modified — apparently losing 64% of its bandwidth. A colleague had started
+> using the same GPU. Without the control it would have read as a
+> catastrophic regression in code that had not changed.
+
 ---
 
 ## Layer 3: IR content and metadata
