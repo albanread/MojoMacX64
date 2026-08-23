@@ -12,7 +12,13 @@ local.bazelrc
 /bazel-*
 /MODULE.bazel.lock
 /external
-build/
+# VEGA-FORK: build output at the repo ROOT only (bazelisk lands in ./build,
+# and .bazelrc imports build/wrapper.bazelrc). Was a bare `build/`, which git
+# matches at any depth -- and under macOS core.ignorecase it also matched
+# `Build/`. Same failure as `target/` below, and it cost
+# KGEN/tools/mojo/Build/ (mojo-build.cpp + tablegen, without which
+# //KGEN:mojo does not even analyse) plus KGEN/test/mojo-tool/build/.
+/build/
 develop-eggs/
 dist/
 downloads/
