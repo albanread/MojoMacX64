@@ -209,6 +209,17 @@ limit (SDL #15241). Validate against the **pipeline's own**
 `maxTotalThreadsPerThreadgroup` before dispatch and treat a silent no-op as a
 real failure mode.
 
+> **`MEASURED`** — a related trap that is not about exceeding the limit.
+> llama.cpp dispatches most kernels as `(simd_width, n_simdgroups, 1)` but one
+> path hard-codes `(128, 1, 1)`, which is four simdgroups *only at width 32*.
+> At width 64 that threadgroup is half the size the kernel was written for, so
+> the threads responsible for staging one operand simply did not exist and the
+> kernel multiplied uninitialised memory — NaNs, no error.
+>
+> **Derive threadgroup size from the probed wave width**, never from a constant
+> that assumes it. A too-small threadgroup is as silent as a too-large one, and
+> reads as a data bug rather than a dispatch bug.
+
 ### Atomics may miscompile without explicit aliasing metadata
 
 The LLVM RFC author found Apple's on-device compiler reordering memory across
@@ -219,6 +230,56 @@ plus `!alias.scope` / `!noalias`) and marking affected loads `volatile`.
 **Open question:** that work was almost certainly done on Apple silicon.
 Whether it reproduces on GCN is unverified here. Budget for it before any
 lock-free kernel work.
+
+### `uint64 x short` is miscompiled — the short lands in the high word
+
+> **`MEASURED`** — found in llama.cpp's Metal backend on the Vega II; probe is
+> four addressing forms written from inside one kernel.
+
+Multiplying a 64-bit stride by a **`short`** index produces a wrong product on
+Apple's AMD backend. The short's value ends up scaled by 2^32:
+
+```metal
+// nb12 is uint64_t (a byte stride), i12 is a short holding 128
+args.nb12 * i12        // -> 4398046511104   == nb12 << 32
+args.nb12 * (int)i12   // -> 131072          == nb12 * 128   (correct)
+```
+
+Same address, two spellings, two answers:
+
+```
+((device const float *) src1)[32768]                   -> 0.5   (correct)
+*(device const T1 *)(src1 + nb11*i11 + nb12*i12)       -> NaN
+```
+
+This is the atomics class of bug — **wrong results, not errors** — and it is
+brutal to localise because the symptom looks structural. Ours presented as
+"output is correct up to token 127 and garbage from 128 onward", identical for
+2, 4, 8 and 16 experts, independent of matrix size and of which tile or expert
+owned the token. Every geometric explanation it suggests is wrong: 128 is
+simply where a `short` index first pushes the miscompiled product past
+anything the allocation covers.
+
+**Rule: any index that multiplies a stride must be `int` or wider.** Do not use
+`short` for loop or tile indices that reach pointer arithmetic, however small
+their range. The sibling kernel in the same file was immune purely because it
+happened to use `int`.
+
+### `memoryBarrierWithScope:` is not enforced between concurrent dispatches
+
+> **`MEASURED`** — llama.cpp's Metal backend, Vega II.
+
+Encoding with `MTLDispatchTypeConcurrent` and separating dependent kernels
+with `memoryBarrierWithScope:MTLBarrierScopeBuffers` is honoured on Apple's
+TBDR parts and **is not** here. The result was nondeterministic garbage —
+*different* garbage on each run of an identical, deterministic workload.
+
+That non-determinism is itself the useful signal: **a result that changes
+between runs of a deterministic kernel is a scheduling bug, not an arithmetic
+one**, and that single observation partitions the search space before any code
+is read. Falling back to serial dispatch cost ~4.6% throughput and fixed it.
+Ending and restarting the encoder at each barrier point is *not* a substitute —
+it discards encoder state that multi-dispatch operations rely on.
 
 ---
 
@@ -231,7 +292,7 @@ lock-free kernel work.
 | SIMD (wave) width | **64** | **64** |
 | GPU family | Metal 3 + Mac2 | Mac2 only |
 | Max MSL accepted by runtime | 3.2 | 3.2 |
-| `simdgroup_matrix` | **no** — compiles, then fails at *pipeline creation* ("SC compilation failure") | no |
+| `simdgroup_matrix` | **no** — compiles, then fails at *pipeline creation* ("SC compilation failure" / "call to an undefined label") | no |
 | `double` | **no** — rejected at source compile | no |
 | `bfloat` | **compiles and builds pipelines** (numerics unverified) | same |
 | Threadgroup memory | 64 KiB | 64 KiB |
@@ -267,6 +328,40 @@ Consequence for portable code: **lane count is not vendor identity.** A
 codebase that reaches wave64 paths via `is_amd_gpu()` will take the wrong
 branch here, because this GPU is AMD silicon behind an Apple-classified
 target. Gate on the width, not the vendor.
+
+> **`MEASURED`** — independently confirmed in a second, unrelated codebase.
+> llama.cpp's Metal backend makes the same substitution in a different
+> spelling: `has_simdgroup_reduction` and `has_simdgroup_mm` are derived from
+> `supportsFamily:MTLGPUFamilyApple7`, and its shaders hard-code
+> `#define N_SIMDWIDTH 32`. Two projects, written independently for different
+> purposes, both encoded lane count as vendor identity — which suggests the
+> mistake is the natural one to make, not a local lapse. The repair is the
+> same in both: probe the width (compile a trivial kernel, read the
+> pipeline's `threadExecutionWidth`) and thread it through as a value.
+
+### Matrix maths without `simdgroup_matrix`
+
+`simdgroup_matrix` being unavailable does not cost you matrix throughput; it
+costs you the *intrinsic*. A plain register-tiled GEMM — threadgroup-staged
+tiles, accumulators in registers, no matrix intrinsics, the 64-wide wavefront
+used as 64 independent lanes — recovers most of it.
+
+> **`MEASURED`** — a 64x32 tile with 4x2 accumulators per thread, K stepped in
+> 32s, 4 simdgroups of 64 lanes, operands staged k-major so the inner loop
+> reads four rows as one `half4` and two columns as one `half2`.
+>
+> | | achieved |
+> |---|---|
+> | This kernel, in llama.cpp | **~2.67 TFLOP/s** (~19% of fp32 peak) |
+> | Our naive tiled Mojo matmul (`spikes/matmul/`) | 2.37 TFLOP/s (~17%) |
+> | The mat-vec fallback it replaced | ~0.8 TFLOP/s (~6%) |
+>
+> Prompt processing went from 48 to 163 tokens/s on an 8B model and 88 to 179
+> on a 30B MoE — and from *losing* to the host Xeon to beating it by ~1.7x.
+
+The wider lesson for anyone shaping IR here: **~19% of peak is reachable from
+an ordinary tiled kernel with no vendor intrinsics at all.** Reach for the
+exotic path only after measuring the plain one.
 
 ---
 
@@ -535,7 +630,9 @@ Ordered by how much they would change a plan.
 
 1. **Do the atomics/aliasing miscompiles reproduce on GCN**, or are they
    Apple-silicon-specific? Unverified here; the class produces wrong answers
-   rather than errors.
+   rather than errors. Note that a *different* silent miscompile on this
+   backend is now confirmed (see `uint64 x short` above), so the class is
+   demonstrably live on GCN even if that specific instance is not.
 2. **Does Apple's AMD backend ever select `v_dot4_i32_i8`?** Only
    answerable by benchmarking an integer-dot idiom against a scalar loop.
 3. **Is the LLVM-18 downgrade target better than 17** for current macOS? Ours
@@ -544,6 +641,11 @@ Ordered by how much they would change a plan.
    largest untapped catalogue of AMD-Metal workarounds.
 5. **Does `bfloat` compute correctly on GCN under Metal?** It compiles and
    builds pipelines here (a surprise), but numerics are unverified.
+6. **How wide is the `uint64 x short` miscompile?** We hit it in a stride
+   multiply. Whether other narrow-integer operands (`ushort`, `char`) or other
+   64-bit operations are affected is unknown, and the failure mode is silent.
+   Until someone maps it, treat narrow integers as unsafe anywhere near
+   64-bit arithmetic.
 
 ---
 
