@@ -1824,3 +1824,82 @@ UI needs.
 `ObjCClassBuilder` gained a `superclass` struct parameter (so
 `ObjCClassBuilder["NSView"]("LifeView")` works) and an `IMP0Bool` shape for
 zero-argument predicates like `acceptsFirstResponder`.
+
+## 2026-08-23 — The wave64 mat-mul lands: prefill 3.4x, and a compiler bug underneath
+
+The gap named in the two previous entries is closed. `llama.cpp` on the Vega II now has a
+mat-mul, and prompt processing is transformed:
+
+```
+                        before        after
+Qwen3-8B    pp512      48.4 t/s    162.9 t/s   (3.4x)
+            pp2048     45.3        156.7       (3.5x)
+Qwen3-30B   pp512      88.4        179.2       (2.0x)
+  -A3B      pp2048     76.4        172.2       (2.3x)
+generation  (both)     unchanged
+```
+
+**The GPU now beats the 24-thread Xeon at prompt processing** (93.9 t/s), reversing the
+embarrassment recorded earlier, and the partial-offload advice that existed only because the
+CPU was faster is retired — `-ngl 99` now wins on both axes.
+
+`kernel_mul_mm_w64` is deliberately unremarkable: a register-tiled GEMM with **no matrix
+intrinsics**, so the 64-wide wavefront is used as 64 independent lanes. 64x32 output tile,
+K stepped in 32s, 4x2 accumulators per thread in registers, A and B staged k-major so the
+inner loop reads four rows as one `half4` and two columns as one `half2`. Shared memory is
+byte-identical to the kernel it replaces, so the host allocation never changed. It reaches
+**~2.67 TFLOP/s, ~19% of the card's fp32 peak** — slightly ahead of the 2.37 TFLOP/s our own
+naive tiled Mojo kernel hit, which is a satisfying cross-check between the two projects.
+
+**The interesting part is the MoE variant, which was wrong for a long time.** The failure
+signature was maddening: output correct up to token 127 and garbage from token 128 onward,
+identical whether the model had 2, 4, 8 or 16 experts, independent of matrix size, and
+independent of which tile or which expert owned that token. Every hypothesis it suggested —
+partial tiles, tiles-per-expert, an undercounted `tokens-per-expert`, a grid that stopped
+early — was tested and killed.
+
+The cause was not in the kernel logic at all. **AMD's Metal compiler miscompiles
+`uint64_t * short`**, placing the short operand in the high word:
+
+```
+args.nb12 * i12        // i12 is a short holding 128
+  -> 4398046511104     // nb12 << 32, not nb12*128 == 131072
+args.nb12 * (int)i12   // correct
+```
+
+The B pointer therefore pointed far outside the buffer and the tile multiplied uninitialised
+memory. 128 is simply where a `short` index first pushes the miscompiled product beyond
+anything the allocation covers — which is why the boundary looked like a tiling artefact and
+was nothing of the sort. The dense kernel was immune only because it happened to use `int`
+throughout. Fixing it is a two-word change; finding it was not.
+
+**What actually found it was refusing to keep theorising.** A standalone reproducer that runs
+the same graph on CPU and Metal and diffs per column, with hand-built id patterns, converted
+a vague "one column in n is wrong" into a precise question. Then, in order: a constant-write
+probe showed the column *was* being written, with zero; an end-of-kernel probe showed the
+suspect threadgroups ran to completion with correct bounds; an in-kernel dump showed the ids,
+strides, column and offset were all correct. That left one contradiction — `src1[32768]`
+read 0.5 while `y[0]` read NaN *at the same address* — and comparing four addressing forms
+in-kernel isolated the miscompile in a single run.
+
+Two lessons, both about method rather than GPUs. First: **when every input to a computation
+is verifiably correct and the output is still wrong, stop trusting the language and start
+testing the code generator.** Second, less comfortable: two of my confident intermediate
+conclusions ("`neh1` is undercounted", "tiles beyond four never launch") were artefacts of my
+own instrumentation — debug writes clobbered by the kernel's real output, and a `grep` that
+counted verdict lines mangled by interleaved pipeline-compile messages. Bad instruments
+manufacture facts, and they do it most convincingly when you are already deep in a hunt.
+
+Correctness, since none of this counts otherwise: `MUL_MAT` passes 2129/2163 (all 34 failures
+being pre-existing `iq2_xxs` breakage on the mat-vec path), `MUL_MAT_ID` passes 1087/1087,
+and wikitext-2 perplexity over 80 chunks is 9.6627 against 9.6356 on CPU — marginally closer
+to the reference than the mat-vec path it replaced.
+
+Still open, and now precisely characterised: **speculative decoding remains a ~40% loss even
+with mat-mul available.** Not draft quality (acceptance 0.60-0.65, mean accepted length ~2.8),
+and not the missing mat-mul. Throughput simply does not improve at the batch sizes speculation
+produces — 1.13x at batch 4, against 2.99x at 32 and 4.88x at 128 — so verifying a 3-token
+draft costs nearly three full passes and the draft model is pure overhead. The mat-*vec*
+kernels still run at roughly 16% of the card's memory bandwidth; making that region efficient
+would speed up generation directly *and* make speculation profitable. That is the next piece
+of unclaimed performance, and it is a bigger one than the mat-mul was.
