@@ -454,6 +454,12 @@ The result is unambiguous in a way profiler counters are not, and it takes
 about two minutes. Note also what it rules *out*: had the kernel sped up
 sharply, the arithmetic would have been worth attacking.
 
+> **Corollary for tooling:** if your shader or IR is embedded into the binary at
+> build time, a stale binary silently runs stale kernels — nothing warns you at
+> load. We nearly published numbers from a build timestamped 84 minutes before the
+> last kernel commit. Compare binary mtime against source mtime before trusting any
+> measurement, and rebuild when in doubt; it is cheaper than the doubt.
+
 > **Corollary for measurement generally:** keep an untouched kernel in the
 > same run as a control. One of our sweeps showed `q4_K` — code we had not
 > modified — apparently losing 64% of its bandwidth. A colleague had started

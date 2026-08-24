@@ -2130,3 +2130,55 @@ with per-rule permit/log/fail), routing int↔float casts through `air.convert`,
 and binding from the kernel's argument contract via pipeline reflection rather
 than classifying argument values — which is the durable fix for the heuristic
 already flagged as a wart in `VegaRTMetal`.
+
+## 2026-08-24 — The largest model that fits, and a quant that got faster by getting bigger
+
+Alban asked what the largest model this 32 GB card can hold actually is. Worth answering
+with arithmetic rather than folklore, so: Metal reports `recommendedMaxWorkingSetSize =
+34343 MB` — exactly 32 GiB — and `hasUnifiedMemory = false`. Because the 580X drives the
+display, the Vega II pays no framebuffer tax and all of it is available to compute.
+
+Weights, KV cache and ~1.5 GiB of compute buffer share it. At the bits-per-weight our own
+files imply (Qwen3-30B-A3B is 17.3 GiB for 30.5B = 4.54 bpw) that leaves ~29.5 GiB of
+weights: about **52B at Q4_K_M**, 37B at Q6_K, 30B at Q8_0. Two things bound it further —
+`Q2_K` destroys an MoE router, and the IQ family, which is how everyone else crams 70B into
+32 GB, is broken on this card. That escape hatch is closed to us.
+
+One measurement I did not expect: **KV cache varies 9x between architectures we already
+run** — 48 KiB/token for gpt-oss-20b, 96 for Qwen3-30B, 384 for Gemma-3-12B, 420 for
+Gemma-4-26B. Both Gemmas use sliding-window attention so the real allocation is a fraction
+of the naive figure, but the shape of the model, not just its size, decides how much context
+you can afford.
+
+**Then the result that inverted the intuition.** We pulled Qwen3-30B-A3B at Q6_K to see what
+the extra headroom buys. I predicted, in writing, that prefill would be roughly flat and
+generation would drop to 38-42 t/s. Both wrong:
+
+| Qwen3-30B-A3B | Q4_K_M | Q6_K |
+|---|---:|---:|
+| size | 17.3 GiB | 23.4 GiB |
+| prefill | 176.8 | **207.5** (+17%) |
+| generation | 50.9 | 46.7 (−8%) |
+| perplexity (24 chunks) | 8.659 | **8.284** (−4.3%) |
+
+The larger quant is *faster at prefill* and better in quality, for 8% of generation. The
+likely mechanism: q4_K packs its scales as 6-bit fields needing per-sub-block unpacking,
+while q6_K uses plain 8-bit scales. Since we already established these kernels are not
+ALU-bound, reading more bytes while doing less work per byte is the better trade. It also
+explains why q6_K gained more from the 16-bit load change than q4_K did. **Rule: on this
+card, if the VRAM is free, take the higher quant.**
+
+**A near-miss worth recording.** Before benchmarking I noticed the binaries were timestamped
+84 minutes *earlier* than the last `ggml-metal` commit. This build has
+`GGML_METAL_EMBED_LIBRARY=ON`, which compiles the shader source into the executable — so a
+stale binary silently runs stale kernels with no warning at load time. I rebuilt (43 s) and
+re-measured Gemma-3-12B: 20.44 t/s against the published 20.6, and far above the pre-fix
+15.0, which proved the published figure was sound. But the check was worth doing, and the
+general point stands: **when shaders are embedded at build time, staleness is invisible at
+runtime.** Timestamps are the only warning you get.
+
+The same discipline applied to the comparison itself. The Q4 baseline in the README was
+measured on the older binary, and its perplexity used 80 chunks against Q6_K's 24 — so the
+two absolute figures were never comparable. Re-ran Q4 on the current build at 24 chunks
+before believing anything. The README's perplexity column now carries an explicit **n**,
+because it had been quietly mixing both.
