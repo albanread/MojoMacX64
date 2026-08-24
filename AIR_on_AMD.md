@@ -216,11 +216,20 @@ are about the *encoding*; findings that do not are about the *hardware*:
 | reaching a raw address | `addrspacecast`, preserving the provenance `getPtrRsrcId` needs | `inttoptr` — AIR has no generic space and Apple's own compiler uses it |
 | `sitofp`/`uitofp`/`fptoui` | **accepted** — verified correct output | rejected; must be `air.convert.*` |
 | vector `llvm.fma` | **accepted** | kills pipeline creation; must be `air.fma` |
+| unresolved `llvm.*` **call** | "SC compilation failure: there is a call to an undefined label" at pipeline creation | kills the compiler service, no diagnostic |
+| unresolved `llvm.*` **declare**, never called | **harmless** — module compiles, links and runs | fatal on its own |
 | SIMD width | 64 | 32 |
 | memory | discrete; staging blits | unified; plain `memcpy` |
 
 The first row is the one to internalise: **the same defect is loud on AMD and
-invisible on Apple silicon.** If you are targeting both, build the static
+invisible on Apple silicon.** The two `llvm.*` rows are the exception that
+proves it, and they are worth reading together: AMD gives you a real sentence
+for the call, and forgives the dead declaration entirely; Apple gives you
+nothing for either, and does not forgive. Neither machine is the strict one —
+they are strict about *different things*, which is exactly why a finding ported
+from the other tree has to be reproduced before it is believed. We erase dead
+`llvm.*` declarations anyway: an unused declaration is free to drop, and
+leniency measured on one driver build is not a property to depend on. If you are targeting both, build the static
 checker — on Apple it is the only thing that will tell you, and on AMD it turns
 your worst diagnostic into an ordinary compile error.
 

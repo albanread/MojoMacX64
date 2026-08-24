@@ -301,6 +301,26 @@ void expandVectorInterleave(llvm::Module &module) {
   }
 }
 
+// Erase unused llvm.* declarations left behind by the expansions above.
+//
+// Measured on the Vega II: a dead declare is harmless here -- a module still
+// declaring llvm.vector.interleave2 with no call to it compiles, links and
+// runs correctly. On Apple silicon the sibling port measured the opposite:
+// the declaration alone is enough to fail. We are not relying on our driver
+// staying lenient, and an unused declaration is by definition free to drop.
+//
+// Restricted to the `llvm.` prefix: those names never appear in the kernel
+// metadata, so use_empty() is the whole story for them. Host externals are
+// left alone -- they resolve at link, not here.
+void eraseDeadIntrinsicDeclarations(llvm::Module &module) {
+  llvm::SmallVector<llvm::Function *, 8> dead;
+  for (llvm::Function &fn : module)
+    if (fn.isDeclaration() && fn.use_empty() && fn.getName().starts_with("llvm."))
+      dead.push_back(&fn);
+  for (llvm::Function *fn : dead)
+    fn->eraseFromParent();
+}
+
 void downgradeModernConstructs(llvm::Module &module) {
   downgradePoison(module);
   expandVectorInterleave(module);
@@ -337,6 +357,7 @@ void downgradeModernConstructs(llvm::Module &module) {
       }
     }
   }
+  eraseDeadIntrinsicDeclarations(module);
 }
 
 } // namespace
