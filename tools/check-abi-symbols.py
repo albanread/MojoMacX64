@@ -110,8 +110,14 @@ if "--table" in sys.argv:
                 f"of {len(rows)} symbols across both directions."]
     notes = ROOT / "AsyncRT" / "lib" / "MojoBindings" / "ABI-NOTES.md"
     text = notes.read_text()
-    head, sep, _ = text.partition("# All called symbols (census):")
-    assert sep, "census marker not found in ABI-NOTES.md"
+    # Cut at whichever marker this file still carries: the original hand-written
+    # census on the first run, the generated heading on every run after. Without
+    # the second the generator eats its own marker and can only ever run once.
+    for marker in ("# All called symbols (census):", "# Capability table"):
+        head, sep, _ = text.partition(marker)
+        if sep:
+            break
+    assert sep, "no census or capability-table marker found in ABI-NOTES.md"
     notes.write_text(head + "# Capability table\n\n" + "\n".join(out) + "\n")
     print(f"ABI-NOTES.md capability table regenerated: {impl}/{len(rows)} implemented")
     sys.exit(0)
