@@ -2343,3 +2343,45 @@ thing on the merits — his is better, and saying so costs nothing true — and 
 strongest possible answer to anyone who later notices how similar the two patch sets are.
 The dates are public and checkable; being the ones who raised it is worth more than any
 argument made afterwards.
+
+### Two more, from finishing the accounting properly
+
+I nearly stopped after the barrier and interleave fixes. Going back through
+their remaining commits one at a time turned up two more that were ours as well.
+
+**The dead-declaration divergence.** They measured a dead `llvm.*` declaration
+— declared, never called — as fatal on its own. I reproduced it here before
+porting the fix, and got the opposite: after the interleave expansion our module
+still declares `llvm.vector.interleave2.v8f32` with no call anywhere, and it
+compiles, links and runs. So the two machines are strict about *different*
+things: AMD gives a real sentence for the unresolved call and forgives the dead
+declare; Apple gives nothing for either and forgives neither. We erase the
+declaration anyway — it is unused by definition, and leniency measured on one
+driver build is not a property to depend on.
+
+**A truncated ABI symbol, which we did share.** The runtime defined
+`AsyncRT_cuda_tensorMapEncodeIm`; Mojo calls `AsyncRT_cuda_tensorMapEncodeIm2col`.
+A link failure waiting for the first build that reaches the im2col TMA path,
+invisible only because nothing we build gets there yet.
+
+`tools/check-abi-symbols.py` now checks parity both ways — 121 called, 125
+defined, 4 unused — and regenerates the capability table in ABI-NOTES.md, which
+until now was a flat list of 137 names that said nothing about what any of them
+*does*. 69 of 125 implemented; the rest are honest stubs.
+
+Three things that only showed up by building it:
+
+- The **call** scan must be multi-line — their trap, and real here too: a
+  same-line grep finds **14 of 121** and reports success.
+- The **definition** scan must be multi-line as well, which they did not hit.
+  clang-format wraps the return type onto its own line, so `extern "C"` and the
+  symbol are never on the same line. My first regex reported **34 false missing
+  symbols**, including ones that plainly link today. A checker that cries wolf
+  34 times is worse than no checker, and I would have shipped it if I had not
+  looked at the list and thought "that cannot be right".
+- The generator ate its own marker and could only run once. Caught by running
+  it twice.
+
+The pattern from the last entry held for all of it: **reproduce here first.**
+Two of the four findings this round changed shape on contact with our hardware
+— one was not our bug at all, one was worse than advertised.
