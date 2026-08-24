@@ -1,7 +1,14 @@
 # bench — the cross-port matmul benchmark
 
-`matmul_sram_bench.mojo` is **vendored, byte-identical**, from the shared
-oracles repository at commit `09fbdbe`. It is not maintained here.
+Both benchmarks here are **vendored, byte-identical**, from the shared oracles
+repository (`matmul_sram_bench.mojo` at `09fbdbe`, `matmul_reg_bench.mojo` at
+`233dea6`). Neither is maintained here.
+
+- `matmul_sram_bench.mojo` — naive 32×32 tiling, two threadgroup reads per FMA.
+  Bound by threadgroup bandwidth; it ranks memory subsystems, not compilers.
+- `matmul_reg_bench.mojo` — 64×64 tile, 4×4 outputs per thread. 1.95× the naive
+  kernel at 2048³ here, and leaves ALU, threadgroup and DRAM all near a quarter,
+  so it is the one that is actually sensitive to codegen. **Compete on this one.**
 
     git@github.com:albanread/oracles.git  —  bench/matmul_sram_bench.mojo
 
@@ -10,7 +17,12 @@ source on different hardware and the results are only comparable while nobody
 has quietly tuned their copy. `diff` against upstream before trusting a
 number, and send changes there rather than making them here.
 
-Our recorded results live upstream too, as `bench/RESULTS-vega2.md`.
+Our recorded results live upstream too, as `bench/RESULTS-vega2.md` and
+`bench/RESULTS-vega2-reg.md`.
+
+Note the register-blocked kernel is a **regression at 512³** (0.97×): its 64×64
+tile launches a quarter as many threadgroups, which on 64 CUs is exactly one
+each, leaving no occupancy to hide latency. Run all five shapes.
 
 ## Running it
 
