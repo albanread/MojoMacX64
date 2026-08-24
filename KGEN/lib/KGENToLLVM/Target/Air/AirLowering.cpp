@@ -41,8 +41,14 @@ std::optional<std::string> airSuffixFor(mlir::Type ty) {
       return std::string(".u.i16");
     case 32:
       return std::string(".u.i32");
-    case 64:
-      return std::string(".u.i64");
+      // No 64-bit case. MSL rejects simd-group ops on 64-bit types outright,
+      // so no air.*.u.i64 symbol exists to call, and naming one that does not
+      // exist does not fail cleanly -- see the driver-crash note on
+      // needsAirTypeSuffix. warp.mojo already splits 64-bit payloads into two
+      // 32-bit halves. (Ballot is the exception and is unaffected: the stdlib
+      // emits `llvm.air.simd_ballot.i64` fully suffixed, so it never reaches
+      // this function. Its width follows the SIMD width -- .i64 here on
+      // wave64, .i32 on a 32-lane Apple GPU.)
     }
   }
   if (auto vt = llvm::dyn_cast<mlir::VectorType>(ty)) {
@@ -58,11 +64,26 @@ std::optional<std::string> airSuffixFor(mlir::Type ty) {
 
 // Families whose AIR runtime symbols carry a type suffix. Kept in sync with
 // the backend's copy in AirBackend.cpp.
+// Getting a name in this list wrong is expensive to diagnose. An AIR symbol
+// that does not exist, or one called with the wrong signature, is not reported
+// as an error anywhere in the toolchain: it survives `metal -x ir -c` AND
+// `metallib`, then takes down the driver's compiler service at pipeline
+// creation with
+//
+//   Compilation failed due to an interrupted connection:
+//   XPC_ERROR_CONNECTION_INTERRUPTED
+//
+// which is the same symptom as a dozen unrelated defects. If you see it,
+// suspect a symbol name or signature here before anything else.
 bool needsAirTypeSuffix(llvm::StringRef name) {
   static const llvm::StringRef stems[] = {
       "air.simd_shuffle_xor", "air.simd_shuffle_down", "air.simd_shuffle_up",
-      "air.simd_shuffle", "air.simd_sum", "air.simd_prefix_sum",
-      "air.simd_min", "air.simd_max", "air.simd_product", "air.simd_ballot",
+      "air.simd_shuffle", "air.simd_sum",
+      // Apple's real prefix-sum symbols. There is no `air.simd_prefix_sum`;
+      // MSL spells these simd_prefix_exclusive_sum / simd_prefix_inclusive_sum
+      // and the golden probe emits air.simd_prefix_exclusive_sum.f32.
+      "air.simd_prefix_exclusive_sum", "air.simd_prefix_inclusive_sum",
+      "air.simd_min", "air.simd_max", "air.simd_product", "air.simd_ballot", "air.simd_ballot",
       "air.cos", "air.sin", "air.tan", "air.acos", "air.asin", "air.atan",
       "air.cosh", "air.sinh", "air.tanh", "air.exp", "air.exp2", "air.exp10",
       "air.log", "air.log2", "air.log10", "air.sqrt", "air.rsqrt",
@@ -127,8 +148,30 @@ public:
     // parameters, and barriers are unsuffixed in AIR.
     if (needsAirTypeSuffix(fnName)) {
       mlir::Type keyTy = !operands.empty() ? operands[0].getType() : resType;
-      if (auto suffix = airSuffixFor(keyTy))
-        fnName += *suffix;
+      auto suffix = airSuffixFor(keyTy);
+      if (!suffix)
+        return op.emitError()
+               << "'" << fnName << "' needs an AIR type suffix but the operand "
+               << "type has none. Leaving the stem bare names a symbol AIR "
+               << "does not define, which nothing diagnoses -- it survives "
+               << "metallib and kills the driver's compiler service at "
+               << "pipeline creation.";
+      // AIR carries SEPARATE signed and unsigned integer symbols
+      // (air.simd_min.s.i32 vs air.simd_min.u.i32), and an LLVM-dialect
+      // integer is signless, so the `.u.` above is a guess. That guess is
+      // sound for sum/product/prefix-sums/shuffles, where two's-complement
+      // makes both symbols compute identical bits. It is NOT sound for
+      // min/max: min(-1, 5) is -1 signed and 5 unsigned. Refuse rather than
+      // silently reduce the wrong way.
+      if (llvm::isa<mlir::IntegerType>(keyTy) &&
+          (fnName.rfind("air.simd_min", 0) == 0 ||
+           fnName.rfind("air.simd_max", 0) == 0))
+        return op.emitError()
+               << "integer '" << fnName << "' cannot be lowered: AIR has "
+               << "separate .s. and .u. symbols and an LLVM integer is "
+               << "signless, so the signedness is unavailable here. Emit the "
+               << "fully-suffixed name from the stdlib instead.";
+      fnName += *suffix;
     }
     auto fn = symtab.lookup<mlir::LLVM::LLVMFuncOp>(fnName);
     if (!fn) {

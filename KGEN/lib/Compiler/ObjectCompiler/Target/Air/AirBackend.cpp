@@ -53,6 +53,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Support/FileSystem.h"
@@ -519,8 +520,11 @@ bool needsAirTypeSuffix(llvm::StringRef name) {
   static const llvm::StringRef stems[] = {
       // shuffles / simd-group ops
       "air.simd_shuffle_xor", "air.simd_shuffle_down", "air.simd_shuffle_up",
-      "air.simd_shuffle", "air.simd_sum", "air.simd_prefix_sum",
-      "air.simd_min", "air.simd_max", "air.simd_product",
+      "air.simd_shuffle", "air.simd_sum",
+      // No `air.simd_prefix_sum` exists; AIR spells them
+      // air.simd_prefix_exclusive_sum / air.simd_prefix_inclusive_sum.
+      "air.simd_prefix_exclusive_sum", "air.simd_prefix_inclusive_sum",
+      "air.simd_min", "air.simd_max", "air.simd_product", "air.simd_ballot",
       // math
       "air.cos", "air.sin", "air.tan", "air.acos", "air.asin", "air.atan",
       "air.cosh", "air.sinh", "air.tanh", "air.exp", "air.exp2", "air.exp10",
@@ -634,13 +638,145 @@ void deviceizeCapturedPointers(llvm::Module &m) {
   }
 }
 
+// Re-resolve overloaded memory intrinsics after address-space retyping.
+//
+// llvm.memcpy/memmove/memset encode their pointers' address spaces IN THE NAME
+// (llvm.memcpy.p0.p0.i64). Retyping an argument to addrspace(1) without
+// re-resolving leaves the call disagreeing with its own callee:
+//
+//   Call parameter type does not match function signature!
+//     call void @llvm.memcpy.p0.p0.i64(ptr %a, ptr addrspace(1) %b, ...)
+//
+// The AIR reader reports that only as "Invalid record". Same family as the
+// other retyping fallout, but here the consumer is a declaration whose
+// identity depends on the types, so the fix is to look up the right overload
+// rather than cast the operand back.
+void refreshOverloadedMemIntrinsics(llvm::Module &m) {
+  llvm::SmallVector<llvm::CallInst *, 8> calls;
+  for (llvm::Function &fn : m)
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb)
+        if (auto *call = llvm::dyn_cast<llvm::CallInst>(&inst))
+          if (llvm::Function *callee = call->getCalledFunction())
+            switch (callee->getIntrinsicID()) {
+            case llvm::Intrinsic::memcpy:
+            case llvm::Intrinsic::memcpy_inline:
+            case llvm::Intrinsic::memmove:
+            case llvm::Intrinsic::memset:
+            case llvm::Intrinsic::memset_inline:
+              calls.push_back(call);
+              break;
+            default:
+              break;
+            }
+  for (llvm::CallInst *call : calls) {
+    llvm::Intrinsic::ID id = call->getCalledFunction()->getIntrinsicID();
+    bool isSet = id == llvm::Intrinsic::memset ||
+                 id == llvm::Intrinsic::memset_inline;
+    llvm::SmallVector<llvm::Type *, 3> tys;
+    tys.push_back(call->getArgOperand(0)->getType()); // dst
+    if (!isSet)
+      tys.push_back(call->getArgOperand(1)->getType()); // src
+    tys.push_back(call->getArgOperand(2)->getType()); // length
+    llvm::Function *want =
+        llvm::Intrinsic::getOrInsertDeclaration(&m, id, tys);
+    if (want != call->getCalledFunction())
+      call->setCalledFunction(want);
+  }
+}
+
+// Drop addrspacecasts whose source and destination spaces are equal.
+//
+// Such a cast is invalid IR outright, and metallib rejects the WHOLE module
+// for it rather than naming the instruction. They arise whenever one pass
+// retypes a pointer that another pass had already cast.
+void dropNoOpAddrSpaceCasts(llvm::Module &m) {
+  llvm::SmallVector<llvm::AddrSpaceCastInst *, 8> dead;
+  for (llvm::Function &fn : m)
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb)
+        if (auto *cast = llvm::dyn_cast<llvm::AddrSpaceCastInst>(&inst))
+          if (cast->getSrcAddressSpace() == cast->getDestAddressSpace())
+            dead.push_back(cast);
+  for (llvm::AddrSpaceCastInst *cast : dead) {
+    cast->replaceAllUsesWith(cast->getPointerOperand());
+    cast->eraseFromParent();
+  }
+}
+
+// Fail early, in-process, with the verifier's own words.
+//
+// Invalid IR is not reported usefully downstream: the AIR reader says only
+// "Invalid record", or the module survives every file-level check and takes
+// down the driver's compiler service at pipeline creation. Running the
+// verifier here turns that into a named diagnostic at the point of emission.
+std::optional<std::string> verifyBeforeEmit(llvm::Module &m,
+                                            llvm::StringRef stage) {
+  std::string msg;
+  llvm::raw_string_ostream os(msg);
+  if (!llvm::verifyModule(m, &os))
+    return std::nullopt;
+  return ("AIR module fails LLVM verification after " + stage +
+          ". This is invalid IR, not an AIR restriction -- the AIR reader "
+          "would report it only as \"Invalid record\", or the driver's "
+          "compiler service would die at pipeline creation. Verifier says:\n" +
+          msg)
+      .str();
+}
+
 // Full-module AIR legalization.
+// Inline every internal helper into its caller.
+//
+// This must run BEFORE any address-space legalization, not after. AIR has no
+// call stack and Metal kernels are fully inlined regardless, so it costs
+// nothing -- but doing it afterwards means every legalization pass reasons
+// about a module that is about to change shape:
+//
+//   - deviceizeCapturedPointers never sees code the inliner brings in later,
+//     leaving device pointers generic. On AMD that is a null resource
+//     descriptor and a dead compiler service; on a unified-memory GPU the
+//     same IR silently reads zero.
+//   - propagatePointerAS retypes a defined callee's parameter with
+//     mutateType, which changes the ARGUMENT but not the enclosing
+//     FunctionType, and the two then disagree ("Argument value does not match
+//     function argument type!").
+//   - a kernel reaching threadgroup memory through a helper cannot have the
+//     extern global rewritten to a parameter at all, because the parameter
+//     does not exist inside the callee.
+//
+// Inline first and the whole question stops arising.
+void inlineInternalHelpers(llvm::Module &m) {
+  for (llvm::Function &fn : m)
+    if (!fn.isDeclaration() && fn.hasLocalLinkage()) {
+      fn.removeFnAttr(llvm::Attribute::NoInline);
+      fn.addFnAttr(llvm::Attribute::AlwaysInline);
+    }
+  llvm::PassBuilder pb;
+  llvm::LoopAnalysisManager lam;
+  llvm::FunctionAnalysisManager fam;
+  llvm::CGSCCAnalysisManager cgam;
+  llvm::ModuleAnalysisManager mam;
+  pb.registerModuleAnalyses(mam);
+  pb.registerCGSCCAnalyses(cgam);
+  pb.registerFunctionAnalyses(fam);
+  pb.registerLoopAnalyses(lam);
+  pb.crossRegisterProxies(lam, fam, cgam, mam);
+  llvm::ModulePassManager mpm;
+  mpm.addPass(llvm::AlwaysInlinerPass());
+  mpm.run(m, mam);
+}
+
 llvm::Error legalizeModule(llvm::Module &m) {
   llvm::LLVMContext &c = m.getContext();
   m.setTargetTriple(llvm::Triple(kAirTriple));
+  // FIRST: every pass below reasons about the inlined shape.
+  inlineInternalHelpers(m);
   mangleAirOps(m);
   remapAddressSpaces(m);
   deviceizeCapturedPointers(m);
+  // Both clean up after the address-space retyping above.
+  refreshOverloadedMemIntrinsics(m);
+  dropNoOpAddrSpaceCasts(m);
 
   // Metal has no 64-bit floats anywhere (MSL has no `double`); emitting the
   // type produces bitcode the AIR reader rejects opaquely. Diagnose cleanly.
@@ -738,7 +874,12 @@ llvm::Error legalizeModule(llvm::Module &m) {
     fn.removeFnAttr("target-cpu");
     fn.removeFnAttr("target-features");
     fn.removeFnAttr("tune-cpu");
-    fn.setDSOLocal(false);
+    // Only external declarations, to match the golden sample. LLVM requires
+    // local linkage to imply dso_local ("GlobalValue with local linkage or
+    // non-default visibility must be dso_local!"), so clearing it on internal
+    // helpers produced invalid IR that the AIR reader silently tolerated.
+    if (!fn.hasLocalLinkage())
+      fn.setDSOLocal(false);
     for (llvm::Argument &arg : fn.args()) {
       arg.removeAttr(llvm::Attribute::Captures);
       arg.removeAttr(llvm::Attribute::Range);
@@ -849,6 +990,18 @@ public:
     if (llvm::Error err = legalizeModule(module))
       return Error("AIR legalization failed");
 
+    // Gate: invalid IR must not reach the encoder. Downstream it is reported
+    // only as "Invalid record", or it survives every file-level check and
+    // kills the driver's compiler service at pipeline creation -- a symptom
+    // shared by a dozen unrelated defects. VEGA_AIR_NO_VERIFY=1 downgrades
+    // this to a warning if it ever blocks work it should not.
+    if (auto bad = verifyBeforeEmit(module, "AIR legalization")) {
+      if (::getenv("VEGA_AIR_NO_VERIFY"))
+        llvm::errs() << "[air-verify] " << *bad << "\n";
+      else
+        return Error(*bad);
+    }
+
     // Downgrade modern IR constructs to what the LLVM-17-era AIR reader
     // accepts (in-tree pass, built for exactly this).
     {
@@ -865,14 +1018,6 @@ public:
       llvm::ModulePassManager mpm;
       // Metal kernels are conventionally fully inlined, and AMD's backend
       // cannot trace a buffer resource across a call boundary — a store
-      // through a pointer that arrived as a callee parameter crashes its
-      // lowering. Force every internal helper into its caller.
-      for (llvm::Function &fn : module)
-        if (!fn.isDeclaration() && fn.hasLocalLinkage()) {
-          fn.removeFnAttr(llvm::Attribute::NoInline);
-          fn.addFnAttr(llvm::Attribute::AlwaysInline);
-        }
-      mpm.addPass(llvm::AlwaysInlinerPass());
       // The published Metal emission machinery, by its own declarations:
       // BitcodeWriter17.cpp:15 — "for writing Metal bitcode"; Apple's AIR
       // reader is LLVM-18-based (BitcodeWriter17.cpp ~1765) and requires
