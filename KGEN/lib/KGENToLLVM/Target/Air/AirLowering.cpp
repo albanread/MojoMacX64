@@ -96,6 +96,27 @@ bool needsAirTypeSuffix(llvm::StringRef name) {
   return false;
 }
 
+// Which AIR families carry cross-thread meaning.
+//
+// Read off `xcrun metal -S -emit-llvm`: Apple declares barriers and cross-lane
+// ops `convergent mustprogress nounwind willreturn`; plain math carries no
+// convergent. `convergent` is what stops the optimiser sinking, hoisting or
+// CLONING the call across divergent control flow.
+//
+// Missing it is a silent wrong-answer bug, not a crash. Loop unswitching
+// specialises a loop body per predicate, and a tiled kernel's guards
+// (`row < M`, `col < N`) are per-lane -- so on a ragged tile edge each
+// specialised copy got its OWN barrier, the lanes taking different branches
+// reached different barrier instances, and the threadgroup never
+// synchronised. Measured here on a 100x100x64 tiled matmul: 9 barrier calls
+// across 5 `.us` unswitch blocks, and 24 wrong values at the ragged edge.
+bool isConvergentAirFamily(llvm::StringRef name) {
+  return name.starts_with("air.wg.barrier") ||
+         name.starts_with("air.simdgroup_barrier") ||
+         name.starts_with("air.threadgroup_barrier") ||
+         name.starts_with("air.simd_") || name.starts_with("air.quad_");
+}
+
 class ConvertAirIntrinsicToCall
     : public mlir::ConvertOpToLLVMPattern<POP::CallLLVMIntrinsicOp> {
 public:
@@ -181,6 +202,15 @@ public:
       fn = mlir::LLVM::LLVMFuncOp::create(
           rewriter, op.getLoc(), fnName,
           mlir::LLVM::LLVMFunctionType::get(resType, argTypes));
+      // Set HERE, at declaration creation, not in the object backend. The
+      // attribute only does anything if it is present when the optimiser
+      // runs; setting it after the pipeline has finished yields an emitted
+      // module that looks correct and is useless.
+      if (isConvergentAirFamily(fnName)) {
+        fn.setConvergent(true);
+        fn.setNoUnwind(true);
+        fn.setWillReturn(true);
+      }
       symtab.insert(fn); // single-threaded pass: safe by construction
     }
     rewriter.replaceOpWithNewOp<mlir::LLVM::CallOp>(op, fn, operands);
