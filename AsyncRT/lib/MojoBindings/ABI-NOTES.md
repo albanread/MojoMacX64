@@ -104,141 +104,136 @@ void AsyncRT_DeviceStream_release(const DeviceStream *stream)
 void AsyncRT_DeviceStream_retain(const DeviceStream *stream)
 void AsyncRT_DeviceTimer_release(const DviceTimer *timer)
 
-# All called symbols (census):
-AsyncRT_AndThen
-AsyncRT_AsyncValue_createFromDeviceBuffer
-AsyncRT_AsyncValue_release
-AsyncRT_AsyncValue_retain
-AsyncRT_AsyncValue_retainBufferStorage
-AsyncRT_AsyncValue_retainHandle
-AsyncRT_Complete
-AsyncRT_CompletionFlag_devicePtr
-AsyncRT_CreateAsync_Error
-AsyncRT_DestroyChain
-AsyncRT_DestroySpinWaiter
-AsyncRT_DeviceBuffer_bytesize
-AsyncRT_DeviceBuffer_context
-AsyncRT_DeviceBuffer_createSubBuffer
-AsyncRT_DeviceBuffer_hostPtr
-AsyncRT_DeviceBuffer_reassignOwnershipTo
-AsyncRT_DeviceBuffer_release
-AsyncRT_DeviceBuffer_release_ptr
-AsyncRT_DeviceBuffer_retain
-AsyncRT_DeviceContextScope_create
-AsyncRT_DeviceContextScope_release
-AsyncRT_DeviceContext_DtoD_async
-AsyncRT_DeviceContext_DtoD_async_no_cross_stream_sync
-AsyncRT_DeviceContext_DtoH_async
-AsyncRT_DeviceContext_DtoH_async_sized
-AsyncRT_DeviceContext_HtoD_async
-AsyncRT_DeviceContext_HtoD_async_sized
-AsyncRT_DeviceContext_allPeerAccessEnabled
-AsyncRT_DeviceContext_archName
-AsyncRT_DeviceContext_canAccess
-AsyncRT_DeviceContext_computeCapability
-AsyncRT_DeviceContext_create
-AsyncRT_DeviceContext_createBuffer_async
-AsyncRT_DeviceContext_createBuffer_owning
-AsyncRT_DeviceContext_createExternalStream
-AsyncRT_DeviceContext_createGraphBuilder
-AsyncRT_DeviceContext_createGraphBuilderWithPool
-AsyncRT_DeviceContext_createGraphMemoryPool
-AsyncRT_DeviceContext_createHostBuffer
-AsyncRT_DeviceContext_createStream
-AsyncRT_DeviceContext_cuda_context
-AsyncRT_DeviceContext_cuda_current_context
-AsyncRT_DeviceContext_deviceApi
-AsyncRT_DeviceContext_deviceName
-AsyncRT_DeviceContext_enableAllPeerAccess
-AsyncRT_DeviceContext_enablePeerAccess
-AsyncRT_DeviceContext_enqueueFunctionDirect
-AsyncRT_DeviceContext_enqueueHostFunction
-AsyncRT_DeviceContext_enqueueHostFunctionRange
-AsyncRT_DeviceContext_enqueue_event
-AsyncRT_DeviceContext_enqueue_wait_for_context
-AsyncRT_DeviceContext_eventCreate
-AsyncRT_DeviceContext_getApiVersion
-AsyncRT_DeviceContext_getAttribute
-AsyncRT_DeviceContext_getMemoryInfo
-AsyncRT_DeviceContext_hip_device
-AsyncRT_DeviceContext_id
-AsyncRT_DeviceContext_isCompatible
-AsyncRT_DeviceContext_loadFunction
-AsyncRT_DeviceContext_maxSingleAllocationSize
-AsyncRT_DeviceContext_metal_device
-AsyncRT_DeviceContext_numStreams
-AsyncRT_DeviceContext_numberOfDevices
-AsyncRT_DeviceContext_release
-AsyncRT_DeviceContext_retain
-AsyncRT_DeviceContext_runHealthcheck
-AsyncRT_DeviceContext_selectStream
-AsyncRT_DeviceContext_setAsCurrent
-AsyncRT_DeviceContext_setMemory_async
-AsyncRT_DeviceContext_setMetalPrintEnabled
-AsyncRT_DeviceContext_startMetalTraceCapture
-AsyncRT_DeviceContext_startTimer
-AsyncRT_DeviceContext_stopMetalTraceCapture
-AsyncRT_DeviceContext_stopTimer
-AsyncRT_DeviceContext_stream
-AsyncRT_DeviceContext_streamPriorityRange
-AsyncRT_DeviceContext_strfree
-AsyncRT_DeviceContext_supportsMulticast
-AsyncRT_DeviceContext_synchronize
-AsyncRT_DeviceEvent_release
-AsyncRT_DeviceEvent_retain
-AsyncRT_DeviceEvent_synchronize
-AsyncRT_DeviceFunction_copyToConstantMemory
-AsyncRT_DeviceFunction_cuda_module
-AsyncRT_DeviceFunction_getAttribute
-AsyncRT_DeviceFunction_hip_module
-AsyncRT_DeviceFunction_release
-AsyncRT_DeviceFunction_retain
-AsyncRT_DeviceGraphBuilder_add
-AsyncRT_DeviceGraphBuilder_addCopyDeviceToDevice
-AsyncRT_DeviceGraphBuilder_addCopyDeviceToHost
-AsyncRT_DeviceGraphBuilder_addCopyHostToDevice
-AsyncRT_DeviceGraphBuilder_addEmpty
-AsyncRT_DeviceGraphBuilder_addFunctionDirect
-AsyncRT_DeviceGraphBuilder_addInPlaceInput
-AsyncRT_DeviceGraphBuilder_addInput
-AsyncRT_DeviceGraphBuilder_addOutput
-AsyncRT_DeviceGraphBuilder_addSetMemory
-AsyncRT_DeviceGraphBuilder_instantiate
-AsyncRT_DeviceGraphBuilder_lastNodeIdOrNone
-AsyncRT_DeviceGraphBuilder_numInputs
-AsyncRT_DeviceGraphBuilder_numOutputs
-AsyncRT_DeviceGraphBuilder_recordingContext
-AsyncRT_DeviceGraphBuilder_release
-AsyncRT_DeviceGraphMemoryPool_release
-AsyncRT_DeviceGraphMemoryPool_retain
-AsyncRT_DeviceGraph_createBuffer
-AsyncRT_DeviceGraph_release
-AsyncRT_DeviceGraph_replay
-AsyncRT_DeviceGraph_retain
-AsyncRT_DeviceMulticastBuffer_allocate
-AsyncRT_DeviceMulticastBuffer_multicastBufferFor
-AsyncRT_DeviceMulticastBuffer_unicastBufferFor
-AsyncRT_DeviceStream_cuda_stream
-AsyncRT_DeviceStream_enqueueFunctionDirect
-AsyncRT_DeviceStream_enqueueHostFunc
-AsyncRT_DeviceStream_enqueueWaitOnHostValue
-AsyncRT_DeviceStream_eventRecord
-AsyncRT_DeviceStream_hip_stream
-AsyncRT_DeviceStream_release
-AsyncRT_DeviceStream_retain
-AsyncRT_DeviceStream_synchronize
-AsyncRT_DeviceStream_waitForEvent
-AsyncRT_DeviceTimer_release
-AsyncRT_Execute
-AsyncRT_GetCurrentCPUDevice
-AsyncRT_GetOrCreateCPUDevice
-AsyncRT_InitializeChain
-AsyncRT_InitializeSpinWaiter
-AsyncRT_ParallelismLevel
-AsyncRT_ReleaseCPUDevice
-AsyncRT_SpinWaiter_Wait
-AsyncRT_Wait
-AsyncRT_Wait_Timeout
-AsyncRT_cuda_tensorMapEncodeIm
-AsyncRT_cuda_tensorMapEncodeTiled
-AsyncRT_occupancyMaxActiveBlocksPerMultiprocessor
+# Capability table
+
+<!-- GENERATED by tools/check-abi-symbols.py --table; do not edit -->
+
+| symbol | what it does when called | called from Mojo |
+|---|---|---|
+| `AsyncRT_AndThen` | stub — returns “not implemented” | no |
+| `AsyncRT_AsyncValue_createFromDeviceBuffer` | stub — returns 0 | yes |
+| `AsyncRT_AsyncValue_release` | stub — no-op | yes |
+| `AsyncRT_AsyncValue_retain` | stub — no-op | yes |
+| `AsyncRT_AsyncValue_retainBufferStorage` | stub — returns 0 | yes |
+| `AsyncRT_AsyncValue_retainHandle` | stub — returns 0 | yes |
+| `AsyncRT_CompletionFlag_devicePtr` | stub — returns 0 | yes |
+| `AsyncRT_DeviceBuffer_bytesize` | implemented | yes |
+| `AsyncRT_DeviceBuffer_context` | implemented | yes |
+| `AsyncRT_DeviceBuffer_createSubBuffer` | implemented | yes |
+| `AsyncRT_DeviceBuffer_hostPtr` | implemented | yes |
+| `AsyncRT_DeviceBuffer_reassignOwnershipTo` | implemented | yes |
+| `AsyncRT_DeviceBuffer_release` | implemented | yes |
+| `AsyncRT_DeviceBuffer_release_ptr` | implemented | yes |
+| `AsyncRT_DeviceBuffer_retain` | implemented | yes |
+| `AsyncRT_DeviceContextScope_create` | implemented | yes |
+| `AsyncRT_DeviceContextScope_release` | implemented | yes |
+| `AsyncRT_DeviceContext_DtoD_async` | implemented | yes |
+| `AsyncRT_DeviceContext_DtoD_async_no_cross_stream_sync` | implemented | yes |
+| `AsyncRT_DeviceContext_DtoH_async` | implemented | yes |
+| `AsyncRT_DeviceContext_DtoH_async_sized` | implemented | yes |
+| `AsyncRT_DeviceContext_HtoD_async` | implemented | yes |
+| `AsyncRT_DeviceContext_HtoD_async_sized` | implemented | yes |
+| `AsyncRT_DeviceContext_allPeerAccessEnabled` | implemented | yes |
+| `AsyncRT_DeviceContext_archName` | implemented | yes |
+| `AsyncRT_DeviceContext_canAccess` | implemented | yes |
+| `AsyncRT_DeviceContext_computeCapability` | implemented | yes |
+| `AsyncRT_DeviceContext_create` | implemented | yes |
+| `AsyncRT_DeviceContext_createBuffer_async` | implemented | yes |
+| `AsyncRT_DeviceContext_createBuffer_owning` | implemented | yes |
+| `AsyncRT_DeviceContext_createExternalStream` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_createGraphBuilder` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_createGraphBuilderWithPool` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_createGraphMemoryPool` | stub — returns 0 | yes |
+| `AsyncRT_DeviceContext_createHostBuffer` | implemented | yes |
+| `AsyncRT_DeviceContext_createStream` | implemented | yes |
+| `AsyncRT_DeviceContext_cuda_context` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_cuda_current_context` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_deviceApi` | implemented | yes |
+| `AsyncRT_DeviceContext_deviceName` | implemented | yes |
+| `AsyncRT_DeviceContext_enableAllPeerAccess` | implemented | yes |
+| `AsyncRT_DeviceContext_enablePeerAccess` | implemented | yes |
+| `AsyncRT_DeviceContext_enqueueFunctionDirect` | implemented | yes |
+| `AsyncRT_DeviceContext_enqueueHostFunction` | implemented | yes |
+| `AsyncRT_DeviceContext_enqueueHostFunctionRange` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_enqueue_event` | implemented | yes |
+| `AsyncRT_DeviceContext_enqueue_wait_for_context` | implemented | yes |
+| `AsyncRT_DeviceContext_eventCreate` | implemented | yes |
+| `AsyncRT_DeviceContext_getApiVersion` | implemented | yes |
+| `AsyncRT_DeviceContext_getAttribute` | implemented | yes |
+| `AsyncRT_DeviceContext_getMemoryInfo` | implemented | yes |
+| `AsyncRT_DeviceContext_hip_device` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_id` | implemented | yes |
+| `AsyncRT_DeviceContext_isCompatible` | implemented | yes |
+| `AsyncRT_DeviceContext_loadFunction` | implemented | yes |
+| `AsyncRT_DeviceContext_maxSingleAllocationSize` | implemented | yes |
+| `AsyncRT_DeviceContext_metal_device` | implemented | yes |
+| `AsyncRT_DeviceContext_numStreams` | implemented | yes |
+| `AsyncRT_DeviceContext_numberOfDevices` | implemented | yes |
+| `AsyncRT_DeviceContext_release` | implemented | yes |
+| `AsyncRT_DeviceContext_retain` | implemented | yes |
+| `AsyncRT_DeviceContext_runHealthcheck` | implemented | yes |
+| `AsyncRT_DeviceContext_selectStream` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_setAsCurrent` | implemented | yes |
+| `AsyncRT_DeviceContext_setMemory_async` | implemented | yes |
+| `AsyncRT_DeviceContext_setMetalPrintEnabled` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_startMetalTraceCapture` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_startTimer` | implemented | yes |
+| `AsyncRT_DeviceContext_stopMetalTraceCapture` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceContext_stopTimer` | implemented | yes |
+| `AsyncRT_DeviceContext_stream` | implemented | yes |
+| `AsyncRT_DeviceContext_streamPriorityRange` | implemented | yes |
+| `AsyncRT_DeviceContext_strfree` | implemented | yes |
+| `AsyncRT_DeviceContext_supportsMulticast` | implemented | yes |
+| `AsyncRT_DeviceContext_synchronize` | implemented | yes |
+| `AsyncRT_DeviceEvent_release` | implemented | yes |
+| `AsyncRT_DeviceEvent_retain` | implemented | yes |
+| `AsyncRT_DeviceEvent_synchronize` | implemented | yes |
+| `AsyncRT_DeviceFunction_copyToConstantMemory` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceFunction_cuda_module` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceFunction_getAttribute` | implemented | yes |
+| `AsyncRT_DeviceFunction_hip_module` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceFunction_release` | implemented | yes |
+| `AsyncRT_DeviceFunction_retain` | implemented | yes |
+| `AsyncRT_DeviceGraphBuilder_addCopyDeviceToDevice` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_addCopyDeviceToHost` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_addCopyHostToDevice` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_addEmpty` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_addFunction` | stub — returns “not implemented” | no |
+| `AsyncRT_DeviceGraphBuilder_addFunctionDirect` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_addInPlaceInput` | stub — no-op | yes |
+| `AsyncRT_DeviceGraphBuilder_addInput` | stub — no-op | yes |
+| `AsyncRT_DeviceGraphBuilder_addOutput` | stub — no-op | yes |
+| `AsyncRT_DeviceGraphBuilder_addSetMemory` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_instantiate` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_lastNodeIdOrNone` | stub — returns 0 | yes |
+| `AsyncRT_DeviceGraphBuilder_numInputs` | stub — returns 0 | yes |
+| `AsyncRT_DeviceGraphBuilder_numOutputs` | stub — returns 0 | yes |
+| `AsyncRT_DeviceGraphBuilder_recordingContext` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraphBuilder_release` | stub — no-op | yes |
+| `AsyncRT_DeviceGraphMemoryPool_release` | stub — no-op | yes |
+| `AsyncRT_DeviceGraphMemoryPool_retain` | stub — no-op | yes |
+| `AsyncRT_DeviceGraph_createBuffer` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraph_release` | stub — no-op | yes |
+| `AsyncRT_DeviceGraph_replay` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceGraph_retain` | stub — no-op | yes |
+| `AsyncRT_DeviceMulticastBuffer_allocate` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceMulticastBuffer_multicastBufferFor` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceMulticastBuffer_release` | stub — no-op | no |
+| `AsyncRT_DeviceMulticastBuffer_retain` | stub — no-op | no |
+| `AsyncRT_DeviceMulticastBuffer_unicastBufferFor` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceStream_cuda_stream` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceStream_enqueueFunctionDirect` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceStream_enqueueHostFunc` | implemented | yes |
+| `AsyncRT_DeviceStream_enqueueWaitOnHostValue` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceStream_eventRecord` | implemented | yes |
+| `AsyncRT_DeviceStream_hip_stream` | stub — returns “not implemented” | yes |
+| `AsyncRT_DeviceStream_release` | implemented | yes |
+| `AsyncRT_DeviceStream_retain` | implemented | yes |
+| `AsyncRT_DeviceStream_synchronize` | implemented | yes |
+| `AsyncRT_DeviceStream_waitForEvent` | implemented | yes |
+| `AsyncRT_DeviceTimer_release` | implemented | yes |
+| `AsyncRT_cuda_tensorMapEncodeIm2col` | stub — returns “not implemented” | yes |
+| `AsyncRT_cuda_tensorMapEncodeTiled` | stub — returns “not implemented” | yes |
+| `AsyncRT_occupancyMaxActiveBlocksPerMultiprocessor` | stub — returns “not implemented” | yes |
+
+69 implemented, 56 stubbed or missing, of 125 symbols across both directions.
