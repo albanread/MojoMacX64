@@ -229,8 +229,81 @@ void downgradePoison(llvm::Module &module) {
           }
 }
 
+// Expand llvm.vector.interleave2 / deinterleave2 to shufflevector.
+//
+// These come from our own stdlib (SIMD.interleave / .deinterleave), not from
+// the optimiser. Our LLVM spells them `llvm.vector.interleave2`; the
+// LLVM-17-era reader Apple ships knows the construct only as
+// `llvm.experimental.vector.interleave2`, so what arrives is an unresolved
+// external -- which survives metallib and only fails at pipeline creation
+// ("SC compilation failure: There is a call to an undefined label", measured
+// on the Vega II; on Apple silicon the same thing kills the compiler service
+// with no diagnostic at all).
+//
+// The expansion is exact:
+//   interleave2(a, b)  -> shuffle, mask[2i] = i, mask[2i+1] = N + i
+//   deinterleave2(v)   -> even[i] = v[2i], odd[i] = v[2i+1], packed as {even, odd}
+void expandVectorInterleave(llvm::Module &module) {
+  llvm::SmallVector<llvm::CallInst *, 8> calls;
+  for (llvm::Function &fn : module)
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb)
+        if (auto *call = llvm::dyn_cast<llvm::CallInst>(&inst))
+          if (llvm::Function *callee = call->getCalledFunction()) {
+            llvm::StringRef n = callee->getName();
+            if (n.starts_with("llvm.vector.interleave2") ||
+                n.starts_with("llvm.experimental.vector.interleave2") ||
+                n.starts_with("llvm.vector.deinterleave2") ||
+                n.starts_with("llvm.experimental.vector.deinterleave2"))
+              calls.push_back(call);
+          }
+
+  for (llvm::CallInst *call : calls) {
+    llvm::IRBuilder<> b(call);
+    bool isInterleave =
+        call->getCalledFunction()->getName().contains("vector.interleave2");
+    if (isInterleave) {
+      llvm::Value *lhs = call->getArgOperand(0);
+      llvm::Value *rhs = call->getArgOperand(1);
+      auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(lhs->getType());
+      if (!vt)
+        continue; // scalable vectors: leave alone rather than mis-expand
+      unsigned n = vt->getNumElements();
+      llvm::SmallVector<int, 32> mask;
+      for (unsigned i = 0; i < n; ++i) {
+        mask.push_back(static_cast<int>(i));
+        mask.push_back(static_cast<int>(n + i));
+      }
+      llvm::Value *woven = b.CreateShuffleVector(lhs, rhs, mask);
+      call->replaceAllUsesWith(woven);
+      call->eraseFromParent();
+      continue;
+    }
+
+    llvm::Value *src = call->getArgOperand(0);
+    auto *vt = llvm::dyn_cast<llvm::FixedVectorType>(src->getType());
+    if (!vt)
+      continue;
+    unsigned half = vt->getNumElements() / 2;
+    llvm::SmallVector<int, 16> evenMask, oddMask;
+    for (unsigned i = 0; i < half; ++i) {
+      evenMask.push_back(static_cast<int>(2 * i));
+      oddMask.push_back(static_cast<int>(2 * i + 1));
+    }
+    llvm::Value *poison = llvm::PoisonValue::get(src->getType());
+    llvm::Value *even = b.CreateShuffleVector(src, poison, evenMask);
+    llvm::Value *odd = b.CreateShuffleVector(src, poison, oddMask);
+    llvm::Value *packed = llvm::UndefValue::get(call->getType());
+    packed = b.CreateInsertValue(packed, even, {0});
+    packed = b.CreateInsertValue(packed, odd, {1});
+    call->replaceAllUsesWith(packed);
+    call->eraseFromParent();
+  }
+}
+
 void downgradeModernConstructs(llvm::Module &module) {
   downgradePoison(module);
+  expandVectorInterleave(module);
   for (llvm::Function &fn : module) {
     for (llvm::BasicBlock &bb : fn) {
       for (llvm::Instruction &inst : llvm::make_early_inc_range(bb)) {
