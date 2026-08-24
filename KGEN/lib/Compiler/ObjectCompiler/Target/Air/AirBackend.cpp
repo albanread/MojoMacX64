@@ -730,6 +730,148 @@ void dropNoOpAddrSpaceCasts(llvm::Module &m) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// AIR legality: valid LLVM is not the same as legal AIR
+//===----------------------------------------------------------------------===//
+//
+// The LLVM verifier is target-agnostic by construction and sees none of this.
+// The rule below is ported from the sibling Apple Silicon port, where it was
+// validated against a known-good corpus; the false-positive fixes it carries
+// (stack-spill recognition, and never abandoning the worklist) were paid for
+// there and are kept verbatim.
+
+/// The alloca a pointer expression is rooted at, or null.
+const llvm::AllocaInst *allocaBaseOf(const llvm::Value *p) {
+  for (unsigned i = 0; i < 8; ++i) {
+    p = p->stripPointerCasts();
+    if (const auto *a = llvm::dyn_cast<llvm::AllocaInst>(p))
+      return a;
+    if (const auto *g = llvm::dyn_cast<llvm::GetElementPtrInst>(p)) {
+      p = g->getPointerOperand();
+      continue;
+    }
+    return nullptr;
+  }
+  return nullptr;
+}
+
+/// Does this pointer trace back to an alloca? Private/stack memory is
+/// legitimately addrspace(0); treating it as a defect rejects working kernels.
+bool isAllocaDerived(const llvm::Value *v, unsigned depth = 0) {
+  if (depth > 8)
+    return false; // bounded: give up rather than chase a cycle
+  llvm::SmallPtrSet<const llvm::Value *, 8> seen;
+  llvm::SmallVector<const llvm::Value *, 8> work{v};
+  while (!work.empty()) {
+    const llvm::Value *cur = work.pop_back_val()->stripPointerCasts();
+    if (!seen.insert(cur).second)
+      continue;
+    if (llvm::isa<llvm::AllocaInst>(cur))
+      return true;
+    if (auto *gep = llvm::dyn_cast<llvm::GetElementPtrInst>(cur)) {
+      work.push_back(gep->getPointerOperand());
+      continue;
+    }
+    if (auto *phi = llvm::dyn_cast<llvm::PHINode>(cur)) {
+      for (const llvm::Value *in : phi->incoming_values())
+        work.push_back(in);
+      continue;
+    }
+    if (auto *sel = llvm::dyn_cast<llvm::SelectInst>(cur)) {
+      work.push_back(sel->getTrueValue());
+      work.push_back(sel->getFalseValue());
+      continue;
+    }
+    // A pointer LOADED OUT of stack memory. `alloca [2 x ptr]` holding
+    // pointers to other allocas is ordinary private indirection; treating the
+    // reload as a device access produced 77 false positives over there. But a
+    // device pointer SPILLED to the stack and reloaded is exactly what this
+    // rule exists to catch, so "came off the stack" is not enough on its own:
+    // follow it back to what was STORED into that slot, and accept only if
+    // every store put something itself alloca-derived there.
+    //
+    // This case may only ESTABLISH privacy or decline to. It must not return
+    // false, which would abandon the other work items and report a pointer
+    // another path proves private (that mistake took their findings 77 -> 443).
+    if (auto *ld = llvm::dyn_cast<llvm::LoadInst>(cur)) {
+      if (const llvm::AllocaInst *base = allocaBaseOf(ld->getPointerOperand())) {
+        bool sawStore = false, allPrivate = true;
+        llvm::SmallPtrSet<const llvm::User *, 16> visited;
+        llvm::SmallVector<const llvm::User *, 16> users(base->users());
+        while (!users.empty() && allPrivate) {
+          const llvm::User *u = users.pop_back_val();
+          if (!visited.insert(u).second)
+            continue;
+          if (const auto *st = llvm::dyn_cast<llvm::StoreInst>(u)) {
+            if (st->getValueOperand() != u->getOperand(1)) {
+              sawStore = true;
+              allPrivate = isAllocaDerived(st->getValueOperand(), depth + 1);
+            }
+            continue;
+          }
+          if (llvm::isa<llvm::BitCastInst>(u) ||
+              llvm::isa<llvm::GetElementPtrInst>(u) ||
+              llvm::isa<llvm::AddrSpaceCastInst>(u))
+            users.append(u->user_begin(), u->user_end());
+        }
+        if (sawStore && allPrivate)
+          return true;
+      }
+      continue;
+    }
+  }
+  return false;
+}
+
+/// Loads/stores through a generic (addrspace(0)) pointer that is not
+/// alloca-derived.
+///
+/// AIR has no generic address space. On this hardware such an access has no
+/// buffer resource descriptor behind it, so the driver's compiler service
+/// segfaults in getPtrRsrcId at PIPELINE CREATION -- reported to us only as
+/// "XPC_ERROR_CONNECTION_INTERRUPTED" after ~200s of retries, with no file and
+/// no line. (On a unified-memory GPU the identical IR instead reads zero,
+/// silently.) Naming the instruction here turns the worst diagnostic in this
+/// stack into an ordinary compile error.
+std::string checkGenericDeref(llvm::Module &m) {
+  std::string findings;
+  unsigned count = 0;
+  for (llvm::Function &fn : m) {
+    if (fn.isDeclaration())
+      continue;
+    for (llvm::BasicBlock &bb : fn)
+      for (llvm::Instruction &inst : bb) {
+        const llvm::Value *ptr = nullptr;
+        if (auto *ld = llvm::dyn_cast<llvm::LoadInst>(&inst))
+          ptr = ld->getPointerOperand();
+        else if (auto *st = llvm::dyn_cast<llvm::StoreInst>(&inst))
+          ptr = st->getPointerOperand();
+        if (!ptr || ptr->getType()->getPointerAddressSpace() != 0)
+          continue;
+        if (isAllocaDerived(ptr))
+          continue;
+        if (++count <= 8) {
+          std::string one;
+          llvm::raw_string_ostream os(one);
+          inst.print(os);
+          findings += "    in '" + fn.getName().str() + "':" + one + "\n";
+        }
+      }
+  }
+  if (count == 0)
+    return {};
+  if (count > 8)
+    findings += "    ... and " + std::to_string(count - 8) + " more\n";
+  return "AIR module dereferences " + std::to_string(count) +
+         " generic (addrspace(0)) pointer(s) that are not alloca-derived. "
+         "AIR has no generic address space: on this GPU each of these has no "
+         "buffer resource descriptor behind it, and the driver's compiler "
+         "service will segfault in getPtrRsrcId at pipeline creation, "
+         "reported only as XPC_ERROR_CONNECTION_INTERRUPTED. Set "
+         "VEGA_AIR_ALLOW_GENERIC=1 to emit anyway.\n" +
+         findings;
+}
+
 // Fail early, in-process, with the verifier's own words.
 //
 // Invalid IR is not reported usefully downstream: the AIR reader says only
@@ -740,8 +882,16 @@ std::optional<std::string> verifyBeforeEmit(llvm::Module &m,
                                             llvm::StringRef stage) {
   std::string msg;
   llvm::raw_string_ostream os(msg);
-  if (!llvm::verifyModule(m, &os))
+  if (!llvm::verifyModule(m, &os)) {
+    // Valid IR is not the same as legal AIR: the verifier is target-agnostic
+    // and cannot see any of the following.
+    if (!::getenv("VEGA_AIR_ALLOW_GENERIC")) {
+      std::string illegal = checkGenericDeref(m);
+      if (!illegal.empty())
+        return illegal;
+    }
     return std::nullopt;
+  }
   return ("AIR module fails LLVM verification after " + stage +
           ". This is invalid IR, not an AIR restriction -- the AIR reader "
           "would report it only as \"Invalid record\", or the driver's "
