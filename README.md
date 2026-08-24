@@ -142,6 +142,28 @@ type-mangled runtime symbols, the LLVM-vintage constructs that break the
 bitcode writer, bugs in the vendored downgrade writer itself, and which
 tools lie to you. Written to be useful even if you never touch Mojo.
 
+### The understanding turned out to be portable
+
+That knowledge was built to make Mojo emit AIR. It transferred, unchanged, to a codebase with
+nothing to do with Mojo: llama.cpp's Metal backend, which compiles and runs on these cards
+without a single error message and produces semantically garbage tokens.
+
+The same faults were already in the field guide before that work started — 64-lane wavefronts
+against kernels written for 32, absent `simdgroup_matrix`, and Apple's Metal compiler for AMD
+miscompiling `uint64 x short` so the short lands in the high word. A 32-lane intrinsic applied
+to a 64-lane wavefront had been found and fixed in this compiler backend first; the same
+disease in another codebase was recognised rather than discovered.
+
+The result is [IntelMacLlamaCpp](https://github.com/albanread/IntelMacLlamaCpp): a Mac Pro
+(2019) running Qwen3-30B-A3B at 179 t/s prefill and 52 t/s generation, and Gemma-4-26B at
+241 / 49, verified correct against the CPU backend rather than merely eyeballed. Upstream
+produces garbage on the same hardware.
+
+It is recorded here because it is the strongest available evidence that this port is real
+work rather than a claim. Understanding a GPU at instruction-selection level is unfalsifiable
+on its own; carrying that understanding into an unrelated codebase and making a 30B model run
+correctly on hardware everyone says to replace is a demonstration of it.
+
 ## Python interop needs a Python newer than macOS ships
 
 `std.python` calls `Py_NewRef`, which arrived in **CPython 3.10**. macOS ships
