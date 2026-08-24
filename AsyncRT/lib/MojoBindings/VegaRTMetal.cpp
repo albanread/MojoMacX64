@@ -141,6 +141,10 @@ struct VRMetalFunc {
   int32_t maxDynamicSharedBytes = -1;
   std::vector<HoistedCapture> hoists;
   std::vector<VRMetalArgSlot> argSlots;
+  // True when the module came from an MTLB container (our own compiled AIR).
+  // The reflection discriminator below only has its intended meaning there --
+  // see the note in loadFunction.
+  bool fromMTLB = false;
 };
 
 namespace {
@@ -564,7 +568,8 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
                                      int32_t maxDynamicSharedBytes) {
   id library = nullptr;
   id nserr = nullptr;
-  if (dataLen >= 4 && memcmp(data, "MTLB", 4) == 0) {
+  bool fromMTLB = dataLen >= 4 && memcmp(data, "MTLB", 4) == 0;
+  if (fromMTLB) {
     dispatch_data_t dd = dispatch_data_create(data, dataLen, nullptr,
                                               DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     library = msg<id>(ctx->device, "newLibraryWithData:error:", dd, &nserr);
@@ -633,6 +638,15 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
       // data type to is a device POINTER, whereas typed bytes report their
       // actual type. That is a fact about the kernel, unlike the value-based
       // guess it replaces.
+      //
+      // But it only means that for OUR OWN compiled AIR, which declares
+      // device parameters with an opaque pointee. An MSL kernel declares
+      // `device float *`, so Metal reports Float/4 for a parameter that is
+      // very much a buffer -- same API, opposite meaning, and nothing in the
+      // reflection distinguishes them. Hence the provenance check: without it
+      // this test silently classifies every MSL buffer as constant bytes.
+      if (!fromMTLB)
+        continue;
       unsigned long dataType = msg<unsigned long>(b, "bufferDataType");
       unsigned long dataSize = msg<unsigned long>(b, "bufferDataSize");
       if (argSlots.size() <= idx)
@@ -656,6 +670,7 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   fn->maxDynamicSharedBytes = maxDynamicSharedBytes;
   fn->hoists = std::move(hoists);
   fn->argSlots = std::move(argSlots);
+  fn->fromMTLB = fromMTLB;
   *out = fn;
   return nullptr;
 }
