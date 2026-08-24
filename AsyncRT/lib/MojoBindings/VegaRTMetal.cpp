@@ -125,6 +125,14 @@ struct HoistedCapture {
   uint64_t byteOffset;
 };
 
+// One kernel buffer slot, as the KERNEL declares it -- read from pipeline
+// reflection rather than guessed from the value the host happens to pass.
+struct VRMetalArgSlot {
+  bool known = false;        // reflection told us about this index
+  bool deviceBuffer = false; // a device pointer, not typed bytes
+  unsigned long declaredSize = 0;
+};
+
 struct VRMetalFunc {
   id library = nullptr;
   id function = nullptr;
@@ -132,6 +140,7 @@ struct VRMetalFunc {
   std::string name;
   int32_t maxDynamicSharedBytes = -1;
   std::vector<HoistedCapture> hoists;
+  std::vector<VRMetalArgSlot> argSlots;
 };
 
 namespace {
@@ -591,13 +600,15 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   }
 
   nserr = nullptr;
-  // MTLPipelineOptionArgumentInfo (1 << 0) so reflection carries parameter
-  // names — that is how hoisted captures are recovered.
+  // MTLPipelineOptionBindingInfo(1) | MTLPipelineOptionBufferTypeInfo(2).
+  // BindingInfo carries the parameter NAMES (how hoisted captures are
+  // recovered); BufferTypeInfo carries each slot's declared TYPE, which is
+  // the kernel's own argument contract -- see the launch path.
   id reflection = nullptr;
   id pipeline = msg<id>(
       ctx->device,
       "newComputePipelineStateWithFunction:options:reflection:error:", function,
-      (unsigned long)1, &reflection, &nserr);
+      (unsigned long)3, &reflection, &nserr);
   if (!pipeline) {
     objcRelease(function);
     objcRelease(library);
@@ -605,18 +616,35 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   }
 
   std::vector<HoistedCapture> hoists;
+  std::vector<VRMetalArgSlot> argSlots;
   if (reflection) {
     id bindings = msg<id>(reflection, "bindings");
     unsigned long n = bindings ? msg<unsigned long>(bindings, "count") : 0;
     for (unsigned long i = 0; i < n; i++) {
       id b = msg<id>(bindings, "objectAtIndex:", i);
+      // MTLBindingTypeBuffer == 0. Threadgroup memory and textures are bound
+      // by other paths and carry no argument contract here.
+      if (msg<long>(b, "type") != 0)
+        continue;
+      unsigned long idx = msg<unsigned long>(b, "index");
+
+      // The kernel's own contract for this slot. The discriminator is
+      // `bufferDataType == MTLDataTypeNone(0)`: a slot Metal cannot give a
+      // data type to is a device POINTER, whereas typed bytes report their
+      // actual type. That is a fact about the kernel, unlike the value-based
+      // guess it replaces.
+      unsigned long dataType = msg<unsigned long>(b, "bufferDataType");
+      unsigned long dataSize = msg<unsigned long>(b, "bufferDataSize");
+      if (argSlots.size() <= idx)
+        argSlots.resize(idx + 1);
+      argSlots[idx] = {true, dataType == 0, dataSize};
+
       std::string bname = nsstringToStd(msg<id>(b, "name"));
       unsigned srcArg = 0;
       unsigned long long off = 0;
-      if (sscanf(bname.c_str(), "__vega_cap_%u_%llu", &srcArg, &off) == 2) {
-        hoists.push_back({static_cast<unsigned>(msg<unsigned long>(b, "index")),
-                          srcArg, static_cast<uint64_t>(off)});
-      }
+      if (sscanf(bname.c_str(), "__vega_cap_%u_%llu", &srcArg, &off) == 2)
+        hoists.push_back({static_cast<unsigned>(idx), srcArg,
+                          static_cast<uint64_t>(off)});
     }
   }
 
@@ -627,6 +655,7 @@ const char *VegaRTMetal_loadFunction(VRMetalFunc **out, VRMetalCtx *ctx,
   fn->name = functionName;
   fn->maxDynamicSharedBytes = maxDynamicSharedBytes;
   fn->hoists = std::move(hoists);
+  fn->argSlots = std::move(argSlots);
   *out = fn;
   return nullptr;
 }
@@ -674,21 +703,33 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
   msg<void>(enc, "setComputePipelineState:", fn->pipeline);
 
   for (uint32_t i = 0; i < argc; i++) {
-    // Plain path (no per-arg flags): classify 8-byte args by whether their
-    // value resolves in the allocation registry — a resolving address is a
-    // device pointer and binds with setBuffer (external-function launches
-    // pass DeviceBuffer device addresses this way).
+    // Prefer the KERNEL'S OWN CONTRACT, read from pipeline reflection at load
+    // time, over any guess about the value being passed.
+    //
+    // The old rule was: any >=8-byte argument whose leading word resolves in
+    // the allocation registry is a device pointer. That is a guess about a
+    // value, and it is wrong in one direction or the other -- a scalar that
+    // happens to hold a live GPU address binds as a buffer and the kernel
+    // reads the wrong memory, silently. The contract cannot be fooled that
+    // way: the kernel either declares the slot as a pointer or it does not.
+    //
+    // Explicit caller flags still win (the caller knows what it packed), and
+    // the value heuristic remains only for the case where reflection was
+    // unavailable, so a missing contract degrades rather than refuses.
     bool isDev = argIsDevicePtr ? argIsDevicePtr[i] : false;
-    if (!argIsDevicePtr && argSizes && argSizes[i] >= 8) {
-      // DeviceBuffer host structs are {device_ptr, handle} — the address is
-      // the first word. Any >=8-byte arg whose leading word resolves in the
-      // allocation registry is treated as a device pointer. (TODO: replace
-      // the heuristic with pipeline-reflection argument classification.)
-      uint64_t maybe = 0;
-      memcpy(&maybe, argAddrs[i], sizeof(maybe));
-      size_t off = 0;
-      if (resolveAddress(maybe, &off))
-        isDev = true;
+    const VRMetalArgSlot *slot =
+        i < fn->argSlots.size() && fn->argSlots[i].known ? &fn->argSlots[i]
+                                                         : nullptr;
+    if (!argIsDevicePtr) {
+      if (slot) {
+        isDev = slot->deviceBuffer;
+      } else if (argSizes && argSizes[i] >= 8) {
+        uint64_t maybe = 0;
+        memcpy(&maybe, argAddrs[i], sizeof(maybe));
+        size_t off = 0;
+        if (resolveAddress(maybe, &off))
+          isDev = true;
+      }
     }
     if (isDev) {
       uint64_t addr = 0;
