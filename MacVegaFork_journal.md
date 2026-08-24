@@ -2385,3 +2385,68 @@ Three things that only showed up by building it:
 The pattern from the last entry held for all of it: **reproduce here first.**
 Two of the four findings this round changed shape on contact with our hardware
 — one was not our bug at all, one was worse than advertised.
+
+## 2026-08-24 (later) — the benchmark contest, and four corrections
+
+The sibling ports now share an `oracles` repository, and today it grew a `bench`
+directory with a cross-port scoreboard. Most of what this port contributed was
+measurements; most of what it *learned* was that its own early readings were
+too flattering, four times over.
+
+**The 1.46× lead over the M4 Max was the kernel, not the machine.** On the naive
+tiled matmul the Vega II led 1728.6 to 1187.0 GFLOP/s. That kernel reads two
+threadgroup values per FMA — 0.25 flops per byte, against 8 per byte at the
+global level — so it is a threadgroup-bandwidth test, and it ranks memory
+subsystems. On the register-blocked kernel, same source and no change to
+lowering anywhere, the gap fell to **1.10×**. Two parts with identical ALU
+counts (4096 each: 32 Apple cores × 128, 64 CUs × 64) landing ten percent apart.
+The honest word is parity.
+
+**Register blocking confirmed the diagnosis by intervention.** Giving each thread
+a 4×4 block quadruples arithmetic intensity and nearly doubled throughput —
+1.95× at 2048³. It is also a *regression* at 512³ (0.97×), because a 64×64 tile
+launches four times fewer threadgroups and on 64 CUs that is exactly one each,
+with no occupancy left to hide latency. The gain tracks threadgroups-per-CU
+across all three sizes and nothing else needs invoking.
+
+**`comptime for` is a tuning knob, not a fix.** The NVPTX port used it to stop
+its accumulator being legalised into DRAM — worth **35,000%** there. Here it is
++19% at 2048³ and −13% at 1024³; on the M4 Max it is −5%. Our `alloca` count is
+zero rolled *and* unrolled, so there was never a spill to fix; what it trades is
+loop overhead for register pressure, which loses wherever occupancy is already
+the constraint. Three architectures, three signs, visible only because all three
+ran identical source.
+
+**Two ceilings measured, and they moved our numbers in opposite directions.**
+
+| | datasheet | measured | effect on us |
+|---|---:|---:|---|
+| DRAM | ~1024 GB/s | **428.9** | 21% → **50%** loaded — worse |
+| FMA | 14.1 TFLOP/s | **≥11633** | 23.9% → **28.9%** of peak — better |
+
+The bandwidth one is the more important correction because I had published the
+wrong conclusion from it: dividing by *pin* made DRAM look idle at 21% when it
+has been at half of deliverable all along. Against measured ceilings the
+machine's real constraint is DRAM at 58.6%, with the ALUs it feeds at 34.6% —
+so the next move is reuse, not more parallelism.
+
+That the two corrections went opposite ways is the useful part. A method that
+only ever flattered us would be worth distrusting.
+
+### What the contest is for
+
+The rule that emerged, in the user's words: **we do not share slowness, we share
+speed.** A technique found once should be paid for once, so a port that finds
+something publishes the kernel and the others take it where it wins. Hence two
+divisions — *stock*, byte-identical, where the NVPTX spill was findable precisely
+because both sides ran the same source; and *open*, bring-your-own-kernel, which
+is the actual crown. Our best number, 4023.4, is not yet a legal open entry: an
+entry is one kernel across all five shapes, and `comptime for` loses at two.
+
+### Loose end closed
+
+The tracked `libVegaRT.dylib` still exported the truncated
+`AsyncRT_cuda_tensorMapEncodeIm`. The source fix landed hours earlier; the
+binary the wrapper actually loads predated it. Committed but not shipped — and
+the parity checker cannot see binaries. Rebuilt, 125 symbols matching exactly,
+verified against the full suite before committing.
