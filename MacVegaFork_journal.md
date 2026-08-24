@@ -2044,3 +2044,89 @@ while. And a round of kernel measurements was silently corrupted by a colleague 
 same GPU: the untouched q4_K control appeared to lose 64% of its bandwidth. Without a
 control in the same run it would have read as a catastrophic regression in code I had not
 touched. Every performance table since carries one.
+
+## 2026-08-24 — Cross-pollination: the sibling port found bugs in our AIR layer
+
+[MojoCocoa](https://github.com/albanread/MojoCocoa) took this fork's AIR backend
+to Apple Silicon. Different hardware, **same intermediate representation** — so
+the encoding and legalisation findings transfer wholesale even though the
+hardware-specific work correctly diverges. Ported here, each re-verified on the
+Vega II.
+
+**Symbol names we had wrong**, read off Apple's own compiler rather than
+guessed:
+
+- **`air.simd_prefix_sum` does not exist.** AIR spells them
+  `air.simd_prefix_exclusive_sum` / `..._inclusive_sum`. Wrong in *both* our
+  stem lists.
+- **There are no 64-bit simd-group ops at all** — MSL rejects them, so `.u.i64`
+  named a symbol AIR does not define. Ballot is the exception and is
+  unaffected: the stdlib emits `air.simd_ballot.i64` fully suffixed, so it
+  never reaches the mangler, and its width correctly follows the SIMD width.
+- **Integer min/max cannot be mangled at all.** AIR carries separate `.s.` and
+  `.u.` symbols; an LLVM integer is signless. `.u.` is sound for
+  sum/product/shuffles (two's complement makes both compute identical bits) and
+  wrong for min/max — `min(-1, 5)` is `-1` signed, `5` unsigned. Now a
+  diagnostic rather than a silent wrong reduction.
+
+The reason those are so expensive: **a symbol AIR does not define is diagnosed
+nowhere.** It survives `metal -x ir -c` *and* `metallib`, then kills the
+driver's compiler service at pipeline creation with
+`XPC_ERROR_CONNECTION_INTERRUPTED` — the same symptom as a dozen unrelated
+defects, and one we burned hours on. A stem that needs a suffix and cannot get
+one is now a compile error.
+
+**Invalid IR the AIR reader was tolerating:**
+
+- `dso_local` was cleared on *every* function, but LLVM requires local linkage
+  to imply it. Every internal helper carried invalid IR.
+- Overloaded memory intrinsics encode address spaces **in the name**
+  (`llvm.memcpy.p0.p0.i64`); retyping an argument to `addrspace(1)` left the
+  call disagreeing with its own callee. Now re-resolved after retyping.
+- Same-address-space `addrspacecast` is invalid outright and metallib rejects
+  the *whole module* for one — exactly the bug that cost us a round during
+  capture hoisting. Now dropped as a safety net.
+
+**An ordering mistake that had caused three separate defects over there:**
+inlining ran *after* legalisation, so every legalisation pass reasoned about a
+module that was about to change shape — deviceization never saw the callee
+bodies the inliner brought in. AIR has no call stack and Metal kernels are
+fully inlined regardless, so inlining first costs nothing and the question
+stops arising. Moved to the top of `legalizeModule`.
+
+**And hoisting only ever caught the first pointer.** It matched an
+`extractvalue` whose aggregate was *directly* an `Argument`, but a descriptor
+blob holding several tensors is a struct of structs — the frontend pulls the
+per-tensor struct out first and the pointer out second. Whichever pointer
+happened to be unpacked in one step got hoisted; the rest stayed generic. The
+walk now follows the chain back to the root parameter.
+
+**A gate so the class cannot recur silently:** the LLVM verifier now runs
+before emission (`VEGA_AIR_NO_VERIFY=1` downgrades it). It passed everything
+first time, which is the good outcome — it says our IR was already valid, not
+that the gate is useless. Over there, adding the same gate immediately cost two
+passing tests and then named exactly what was wrong with them.
+
+### Where the two ports genuinely diverge
+
+Worth stating, because it is the interesting part of "same IR, different
+silicon":
+
+| | Vega II (here) | Apple Silicon (there) |
+|---|---|---|
+| captured device pointers | **hoisted** to real buffer params — AMD needs a bound resource descriptor | hoisting **removed**; it burned one of 31 buffer slots per pointer |
+| reaching a raw address | `addrspacecast`, to keep the provenance `getPtrRsrcId` needs | `inttoptr` — AIR has no generic space and Apple's own compiler uses it; our cast "silently wrote zeroes" there |
+| SIMD width | 64 | 32 |
+| memory | discrete, staging blits | unified, plain `memcpy` |
+| generic pointer | crashes the compiler service — loud | reads zero — silent |
+
+That last row is the one to remember. The same defect is a hard crash on AMD
+and an invisible wrong answer on Apple silicon, which is why their tree needed
+a legality firewall to find what ours finds by falling over.
+
+Still on the table from their tree: the data-driven legality firewall
+(`AirLegality.cpp`, rules tiered by evidence — measured / air-poc / unproven,
+with per-rule permit/log/fail), routing int↔float casts through `air.convert`,
+and binding from the kernel's argument contract via pipeline reflection rather
+than classifying argument values — which is the durable fix for the heuristic
+already flagged as a wart in `VegaRTMetal`.
