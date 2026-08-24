@@ -271,14 +271,40 @@ llvm::Function *legalizeKernel(llvm::Function &fn,
         auto *ev = llvm::dyn_cast<llvm::ExtractValueInst>(&inst);
         if (!ev || !ev->getType()->isPointerTy())
           continue;
-        auto *arg = llvm::dyn_cast<llvm::Argument>(ev->getAggregateOperand());
+
+        // Walk back to the root parameter through CHAINED extractvalue. A
+        // descriptor blob holding several tensors is a struct of structs, and
+        // the frontend pulls the per-tensor struct out first and its pointer
+        // out second -- so the aggregate is usually another extractvalue, not
+        // the Argument. Matching only the direct-Argument case hoisted
+        // whichever pointer happened to be unpacked in one step and left the
+        // rest generic, which on this hardware is a null resource descriptor
+        // and a dead compiler service.
+        llvm::SmallVector<unsigned, 8> path;
+        llvm::Value *node = ev;
+        llvm::Argument *arg = nullptr;
+        for (unsigned depth = 0; depth < 16; ++depth) {
+          auto *step = llvm::dyn_cast<llvm::ExtractValueInst>(node);
+          if (!step)
+            break;
+          // Prepend: we are walking outwards, the path reads inwards.
+          path.insert(path.begin(), step->getIndices().begin(),
+                      step->getIndices().end());
+          llvm::Value *aggregate = step->getAggregateOperand();
+          if (auto *a = llvm::dyn_cast<llvm::Argument>(aggregate)) {
+            arg = a;
+            break;
+          }
+          node = aggregate;
+        }
         if (!arg || arg->getParent() != &fn)
           continue;
+
         // Walk the aggregate manually: getIndexedOffsetInType wants Values,
         // while extractvalue carries constant unsigned indices.
         uint64_t off = 0;
         llvm::Type *cur = arg->getType();
-        for (unsigned idx : ev->getIndices()) {
+        for (unsigned idx : path) {
           if (auto *st = llvm::dyn_cast<llvm::StructType>(cur)) {
             off += dl.getStructLayout(st)->getElementOffset(idx);
             cur = st->getElementType(idx);
