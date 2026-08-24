@@ -173,6 +173,57 @@ Two provenance notes that cost us time:
   type is recomputed from its aggregate, and the mismatch tends to reappear
   downstream as exactly that `ptrtoint`/`inttoptr` round trip.
 
+### Catch a generic dereference at compile time — it is worth building
+
+> **`MEASURED`** — this rule alone would have saved more debugging time than
+> everything else in this document.
+
+The generic-pointer defect above is the most expensive thing in this stack to
+diagnose, because the only symptom is an XPC transport error ~200 s later with
+no file and no line. It is also **statically detectable**: a load or store
+through `addrspace(0)` whose pointer is not alloca-derived (private stack
+memory is legitimately generic) has no resource descriptor behind it and will
+kill the compiler service.
+
+Walk the pointer back through GEPs, phis, selects and casts looking for an
+`alloca`. Two subtleties, both of which produce false positives if missed:
+
+- **A pointer loaded out of stack memory is usually fine.** `alloca [2 x ptr]`
+  holding pointers to other allocas is ordinary private indirection. But a
+  device pointer *spilled* to the stack and reloaded is exactly what you are
+  hunting, so "came off the stack" is not enough on its own — follow the load
+  back to what was **stored** into that slot and accept only if every store put
+  something itself alloca-derived there.
+- **That case may only establish privacy or decline.** If it returns "not
+  private" it abandons the rest of the worklist and reports pointers another
+  path proves private.
+
+Validate in both directions or the checker means nothing: run it over a corpus
+of kernels known to work (expect zero findings), and over one with the fix
+deliberately disabled (expect it to name the exact instructions).
+
+### Apple silicon and AMD disagree about AIR, and it matters
+
+> **`MEASURED`** — from porting this backend to both.
+
+Two GPUs behind the same IR do not accept the same IR. Findings that transfer
+are about the *encoding*; findings that do not are about the *hardware*:
+
+| | AMD (this document) | Apple Silicon |
+|---|---|---|
+| generic pointer | **crashes** the compiler service | **reads zero**, silently |
+| captured device pointer | must be **hoisted** to a real buffer parameter — AMD needs a bound resource | hoisting is harmful; it burns one of 31 buffer slots each |
+| reaching a raw address | `addrspacecast`, preserving the provenance `getPtrRsrcId` needs | `inttoptr` — AIR has no generic space and Apple's own compiler uses it |
+| `sitofp`/`uitofp`/`fptoui` | **accepted** — verified correct output | rejected; must be `air.convert.*` |
+| vector `llvm.fma` | **accepted** | kills pipeline creation; must be `air.fma` |
+| SIMD width | 64 | 32 |
+| memory | discrete; staging blits | unified; plain `memcpy` |
+
+The first row is the one to internalise: **the same defect is loud on AMD and
+invisible on Apple silicon.** If you are targeting both, build the static
+checker — on Apple it is the only thing that will tell you, and on AMD it turns
+your worst diagnostic into an ordinary compile error.
+
 ### Apple's front-end compiler crashes on Radeon, and that is normal
 
 The public record has three independent reports of Metal shader-compiler
