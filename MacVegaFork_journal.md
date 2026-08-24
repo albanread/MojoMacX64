@@ -2247,3 +2247,64 @@ defect class we found by hand in q5_K and q6_K. Our "delete the arithmetic and s
 gets faster" trick was a clever substitute for not having this; with ISA dumps we would have
 *seen* the `uint64 x short` miscompile as instructions rather than inferring it from wrong
 output. Techniques are facts, not expression. That one is worth building ourselves.
+
+## 2026-08-24 — Second pull from the sibling: two silent wrong-answer bugs
+
+Twelve new commits over there; four mattered here. The two headline ones were
+**silent wrong answers**, not crashes — the class this fork is worst at finding,
+because nothing falls over.
+
+**Barriers were being CLONED.** Our `air.wg.barrier` declaration carried no
+attributes; Apple's carries `convergent mustprogress nounwind willreturn`.
+Without `convergent` the optimiser believes the call has no cross-thread
+meaning and may sink, hoist or duplicate it across divergent control flow.
+Loop unswitching specialises a loop body per predicate, and a tiled kernel's
+guards (`row < M`, `col < N`) are per-lane — so on a **ragged tile edge** each
+specialised copy got its own barrier, lanes taking different branches reached
+*different barrier instances*, and the threadgroup never synchronised.
+
+Reproduced here before fixing, on a 100×100×64 tiled matmul:
+
+| | barrier calls | `.us` unswitch blocks | wrong values |
+|---|---:|---:|---:|
+| before | 9 | 5 | 24 |
+| after | 2 | 0 | 0 |
+
+The attribute must be set **where the declaration is created**, in
+`AirLowering` — not in the object backend, where we set nothing at all. It only
+does anything if it is present when the optimiser runs; afterwards you get an
+emitted module that looks correct and is useless.
+
+Our own exact-dimension matmul was correct *by luck*: 1024 divides by 16, so
+there is no ragged edge, no divergent predicate, and nothing for the unswitcher
+to specialise. It would have broken the first time anyone used a ragged size.
+`spikes/matmul/ragged_matmul.mojo` is now the regression test.
+
+**`llvm.vector.interleave2` is an unresolved external.** It comes from our own
+stdlib (`SIMD.interleave`), but the LLVM-17-era AIR reader knows the construct
+only as `llvm.experimental.vector.interleave2`. Measured here: *"SC compilation
+failure: There is a call to an undefined label"* at pipeline creation. Expanded
+to `shufflevector` in the downgrade pass, alongside freeze/fneg/GEP-flags —
+same family, a construct newer than the reader.
+
+**A caveat on my own previous commit.** The reflection discriminator I ported
+(`bufferDataType == MTLDataTypeNone` ⇒ device pointer) only means that for *our*
+compiled AIR, which declares device parameters with an opaque pointee. An **MSL**
+kernel declares `device float *`, so Metal reports `Float/4` for a parameter
+that is very much a buffer — same API, opposite meaning. Our `loadFunction`
+accepts MSL source, so the contract is now recorded only for MTLB containers.
+Their tree hit this as a broken saxpy smoke test; we caught it by reading their
+follow-up rather than by breaking.
+
+Not applicable to us, checked rather than assumed: their `$<hash>` signature-tag
+bug (we mangle by type suffix, and our modules carry no `$` at all), and the
+Apple capability/core-count work.
+
+### The pattern worth naming
+
+Every fix this round followed the same shape, and it is the one to keep using:
+**reproduce on our own hardware first, then fix, then show the before/after
+numbers.** The barrier bug was a paragraph in someone else's commit message
+until it was 24 wrong values in our own matmul; after that it was obvious. A
+port that trusts the other tree's diagnosis skips exactly the step that tells
+you whether the bug is yours.
