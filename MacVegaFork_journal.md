@@ -2308,3 +2308,38 @@ numbers.** The barrier bug was a paragraph in someone else's commit message
 until it was 24 wrong values in our own matmul; after that it was obvious. A
 port that trusts the other tree's diagnosis skips exactly the step that tells
 you whether the bug is yours.
+
+### Postscript, same day: the head-to-head
+
+Downloaded his release (checksummed against his published SHA-256; note that `curl` sets no
+quarantine flag where a browser would, so nothing needed bypassing) and found he ships
+`llama-bench`, `llama-perplexity` and `test-backend-ops` inside the app bundle. So a clean
+comparison was possible: same model file, same flags, same idle card.
+
+| Qwen3-30B-A3B Q4_K_M | prefill | generation |
+|---|---:|---:|
+| ours | 176.8 ± 3.9 | 50.9 ± 0.04 |
+| ToshLLM v0.85.7 | **615.5 ± 12.6** | 53.3 ± 0.7 |
+
+**His prefill is 3.5x ours.** In FLOP terms his GEMM reaches ~29% of the card's fp32 peak on
+this model against our ~8.5%. Generation is level within 5%, which says the mat-vec work —
+rows-per-simdgroup, the 16-bit loads — landed properly, and that the whole remaining gap is
+in `mul_mm`. Earlier I wrote in the field guide that "~19% of peak is reachable from an
+ordinary tiled kernel with no vendor intrinsics"; that stands as a floor, but 29% is now the
+demonstrated number to chase, and our MoE path is well below even our own dense figure.
+
+Two smaller things from his binary, both facts rather than code. His build defaults to
+device 0 — the 580X — exactly the trap we hit, and needs `GGML_METAL_DEVICE_LIST=all` before
+the Vega II appears at all. And his startup prints `wave64 mode: GPU prefill matmul, CPU
+decode/reductions for correct output`, with a per-type allowlist for what may run mat-vec on
+the GPU. That is a more conservative posture than ours: where he allowlists what is proven
+and falls back to the CPU otherwise, we repaired the kernels so every K-quant runs on the
+card. Different risk appetite, and his is arguably the wiser one for shipping software.
+
+Alban's call on what to do about it was to be generous: point users at ToshLLM for the
+better and more complete application, link him prominently, and state our independence
+plainly rather than defensively. That is now the top section of the README. It is the right
+thing on the merits — his is better, and saying so costs nothing true — and it is also the
+strongest possible answer to anyone who later notices how similar the two patch sets are.
+The dates are public and checkable; being the ones who raised it is worth more than any
+argument made afterwards.
