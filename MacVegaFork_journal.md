@@ -2182,3 +2182,68 @@ measured on the older binary, and its perplexity used 80 chunks against Q6_K's 2
 two absolute figures were never comparable. Re-ran Q4 on the current build at 24 chunks
 before believing anything. The README's perplexity column now carries an explicit **n**,
 because it had been quietly mixing both.
+
+## 2026-08-24 — A retraction, and finding out we were not alone
+
+Two things today, one of which is me taking something back.
+
+**Q6_K is genuinely the better model, and now it is measured.** Alban's instinct that the
+higher quant might be a quality improvement was right, and my first attempt to check it was
+too weak to say so: a single 24-chunk run gave a 4.3% perplexity gain against a ±0.34 error
+bar, which is nearly the size of the difference. But that bar is the *unpaired* one, and
+both models scored identical text. Differentiating the cumulative series back into per-chunk
+NLL and running a paired test over 80 chunks:
+
+```
+Q4_K_M 9.6627   Q6_K 9.1957   (-4.83%)
+mean paired diff +0.0495 +/- 0.0050 nats/chunk
+paired t = +9.84 on 79 df,  Q6_K ahead on 68/80 chunks
+```
+
+About ten standard errors. Worth remembering how much power was hiding in the pairing —
+the unpaired bar said "maybe", the paired test says "certainly". Same data.
+
+**The retraction.** I explained the Gemma 4 mystery with a mechanism I did not verify: that
+an MoE router is a small tensor making a discrete choice, so quantisation error there flips
+which experts fire. It reads well, it connects to the earlier expert-flip analysis, and it
+is wrong for these files. Reading the tensor tables out of the GGUFs directly:
+
+- the router (`ffn_gate_inp`) is **F32 in every build we have** — these quantisers never
+  touch it;
+- the Gemma 4 build that scores **21x worse** carries **higher** precision nearly everywhere
+  (`Q8_0` attention/output/embeddings against the good build's `Q4_0`).
+
+Precision is not the variable. I had a plausible story and reached for it instead of opening
+the files, which took about ninety seconds once I finally did. The empirical advice — prefer
+QAT, measure perplexity before trusting a build — was arrived at by measurement and stands;
+the explanation is withdrawn from the README, the journal and the memory. Also worth saying
+plainly: 777 is itself a terrible score next to Gemma-3-12B's 8.94, so *both* Gemma 4 builds
+are anomalous and the real question may be about Gemma 4 support upstream, on every backend.
+
+**And we were not alone.** Alban asked me to look up "tosh", who turns out to be Engelbert
+Delgado and whose ToshLLM has been doing this same port for months — a native Intel-Mac AMD
+app over a patched llama.cpp, 143 stars, actively developed. His patch series independently
+contains: wave64 reductions and mat-vec, a register-tiled GEMM without `simdgroup_matrix`,
+the MoE `_id` variant of it, q6_K word loads, rows-per-thread tuning for wave64 including
+the `_id` case, device identity selection, and a buffer allocation guard. That is our commit
+log with different filenames. Two people, no contact, same hardware, same defects, in nearly
+the same order — which is the strongest confirmation yet that these are properties of the
+platform and not quirks of this machine.
+
+He is ahead on four things worth naming: flash attention on AMD (we pinned FA to 32 lanes
+and moved on), multi-GPU dispatch (which for a Vega II *Duo* means 64 GB and rewrites the
+"largest model" answer entirely), a quantised KV cache, and proper mmap residency where we
+merely worked around it with `-lm none`.
+
+His licence is **GPL-3.0**, ours is MIT. So we cannot take his code — but equally, nobody
+else can: not a commercial product, and not upstream llama.cpp, which is MIT and cannot
+accept GPL-3.0 patches. Ours is the only one of the two that can ever go upstream. That is a
+real difference in what the two projects can become, not a consolation.
+
+The thing I most want from him is not code but an **instrument**. He extracts GCN ISA from
+the compiled metallib and tabulates per kernel `instr narrow loads ds mac vgpr th_max smem`
+— one of those columns is literally `narrow`. He built a measuring device for exactly the
+defect class we found by hand in q5_K and q6_K. Our "delete the arithmetic and see if it
+gets faster" trick was a clever substitute for not having this; with ISA dumps we would have
+*seen* the `uint64 x short` miscompile as instructions rather than inferring it from wrong
+output. Techniques are facts, not expression. That one is worth building ourselves.
