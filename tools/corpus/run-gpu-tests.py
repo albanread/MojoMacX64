@@ -84,15 +84,31 @@ def discover(limit=None, subdir=None):
         base = base / subdir
     files = sorted(p for p in base.rglob("*.mojo") if p.is_file())
     files = [f for f in files if not OUT_OF_SCOPE.search(str(f))]
+    # A .mojo file with no main is a helper module, not a test.
+    files = [f for f in files
+             if re.search(r"^(def|fn) main", f.read_text(errors="ignore"), re.M)]
     return files[:limit] if limit else files
 
 
+AIR_VERIFY = re.compile(r"fails LLVM verification")
+NO_SOURCE = re.compile(r"unable to locate module '(\w+)'")
+INSTANTIATION = re.compile(r"function instantiation failed")
 GENERIC_DEREF = re.compile(r"generic \(addrspace\(0\)\) pointer")
 UNSUPPORTED_TGT = re.compile(r"target '[^']+' is not supported by this build")
 METALLIB_FAIL = re.compile(r"xcrun metallib failed")
 
 
-def build_failure_kind(err):
+def build_failure_kind(err, src):
+    # No "error:" line at all means the compiler died rather than diagnosed.
+    # Verified by reproduction: those builds print a full mojo stack trace.
+    if "error:" not in err:
+        return "compiler_crash"
+    if AIR_VERIFY.search(err):
+        return "air_verify"
+    if NO_SOURCE.search(err):
+        return "no_source"      # module absent from this tree: out of scope
+    if INSTANTIATION.search(err):
+        return "instantiation_fail"
     if GENERIC_DEREF.search(err):
         return "generic_deref"
     if UNSUPPORTED_TGT.search(err):
@@ -172,7 +188,7 @@ def main():
     for i, (src, binary, err) in enumerate(built, 1):
         rel = str(src.relative_to(ROOT))
         if binary is None:
-            outcome, detail = build_failure_kind(err), err
+            outcome, detail = build_failure_kind(err, src), err
         else:
             outcome, detail = classify(src, binary, args.timeout)
         results.append({"test": rel, "outcome": outcome, "detail": detail})
@@ -183,8 +199,9 @@ def main():
         counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
     print("\n== census ==")
     for k in ("pass", "unverified", "partial", "vacuous", "fail", "pso",
-              "crash", "timeout", "generic_deref", "metallib_fail",
-              "unsupported_tgt", "build_fail"):
+              "crash", "timeout", "air_verify", "generic_deref",
+              "metallib_fail", "compiler_crash", "instantiation_fail",
+              "unsupported_tgt", "no_source", "build_fail"):
         if counts.get(k):
             print(f"  {k:<11} {counts[k]:>4}")
     print(f"  {'TOTAL':<11} {len(results):>4}")
