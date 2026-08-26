@@ -2450,3 +2450,60 @@ The tracked `libVegaRT.dylib` still exported the truncated
 binary the wrapper actually loads predated it. Committed but not shipped — and
 the parity checker cannot see binaries. Rebuilt, 125 symbols matching exactly,
 verified against the full suite before committing.
+
+## 2026-08-25 — Triaging a handover written for this port
+
+The M4 Max port wrote a handover addressed to us — measurement method, tooling,
+and four findings flagged by likely relevance. Triaged against our hardware.
+
+**One live bug, fixed.** `llvm.vector.reduce.*` is the third member of the
+family that includes `interleave2`: reachable straight from our stdlib
+(`SIMD.reduce_max` and friends, simd.mojo:3075+), no lowering anywhere in our
+AIR path, and a kernel calling it fails exactly as interleave2 did — *"SC
+compilation failure: There is a call to an undefined label."* Ported their
+expansion. The semantics detail is the part to keep: `fadd`/`fmul` are
+**ordered** — the intrinsic takes a start value and folds left — so the
+expansion is sequential rather than a tree, which would be a different answer
+in floating point; `fmax`/`fmin` become an ordered select chain, which drops
+NaN and so matches the `maxnum`/`minnum` semantics the intrinsic actually
+specifies.
+
+Worth noting how it was *not* found. Their pure-FMA benchmark failed at 4 and 8
+accumulator chains while 1, 2, 16 and 32 passed, because the optimiser only
+forms the reduction at some widths. Our run of that same benchmark passed at
+every width. It took a direct `reduce_max` kernel to surface it here — a
+reminder that a benchmark passing is not coverage.
+
+**Both "likely shared" findings are present in our code.**
+
+The rowwise `rms_norm` path is wrong on Apple at every width and all-zeros above
+32, and our own BUILD file has carried the matching note all along —
+`test_rms_norm_rope.mojo`, *"KERN-3390 — Row rms_norm_rope writes all zeros on
+Metal, at every tier."* Their diagnosis is what we gain: it is **not** the AIR
+backend. Upstream's shipping release runs correctly on the same machine, and the
+AIR dumps show the two toolchains instantiate different kernels — ours the
+`rowwise` dual-target surface, upstream purpose-written per-shape ones. So the
+rowwise implementation is broken, and chasing it in `AirBackend` — where we
+would naturally have looked — would have been wasted weeks.
+
+The capture-pack address-space bug is in our tree verbatim, at
+`AirBackend.cpp:342`: *any* pointer parameter still in generic AS0 is promoted
+to `addrspace(1)` unconditionally. A capture pack passed **by value** becomes a
+constant buffer and is fine; passed **by pointer** it is typed device and is
+not, and which one you get depends on closure nesting depth. Their runtime-side
+fix made things worse — it launched and returned zeros — because the kernel body
+genuinely dereferences the parameter as `addrspace(1)`. It is a backend typing
+error, and it is ours too.
+
+**And a gap the handover exposes by accident.** Their census replaced a
+"79 pass / 623 skip" figure with 96 of 119 in-scope targets passing, measured.
+We have no such number at all: our GPU test targets are gated behind bazel's
+`has_gpu` constraint, which our platform does not satisfy, so `bazelw test` on a
+kernel test refuses to build rather than running. We have been reporting 12
+hand-picked basics tests all session and calling it a regression suite. Their
+corpus tooling is committed alongside the handover and is explicitly not
+Apple-specific.
+
+One thing in the handover we cannot take: upstream's shipping release as a
+correctness oracle. It works on their machine and would be genuinely useful —
+but using the released SDK binary is exactly what this fork does not do.
