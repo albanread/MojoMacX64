@@ -2507,3 +2507,79 @@ Apple-specific.
 One thing in the handover we cannot take: upstream's shipping release as a
 correctness oracle. It works on their machine and would be genuinely useful —
 but using the released SDK binary is exactly what this fork does not do.
+
+## NEXT STEPS — picking up from 2026-08-26
+
+State at the pause: tree clean, everything pushed, census committed at
+`57251b42`. The census is the thing that changed: we now have a measured
+number instead of "12 basics tests pass".
+
+**85 of 479 in-scope GPU tests pass — 18%.** Of the rest, **179 are backend
+defects with a located cause**, and that is the backlog.
+
+Ordered by expected return, not by size:
+
+**1. `instantiation_fail` — 153, the largest bucket, undiagnosed.**
+Sample twenty of them before anything else. This is the one number that could
+move a lot at once: if it is one missing feature repeated 153 times, that is a
+single fix worth a third of the corpus; if it is 153 distinct things it is not
+worth touching yet. It is a Mojo-level failure, not obviously a backend one, so
+it may not even be ours. **Cheap to find out, and it changes what everything
+else is worth.** Do this first.
+
+**2. Defer the launch wait — worth ~3× at small shapes.**
+`VegaRTMetal_launch` (VegaRTMetal.cpp:807) ends every dispatch with
+`commit` + `waitUntilCompleted`. Measured cost: **0.235 ms per dispatch**, which
+is 66% of the 512³ matmul number and 26% of 1024³. The 2048³ figures are barely
+touched (2–5%), so the headline benchmarks stand.
+
+The hazard the M4 Max port hit — every path that observes device memory must
+drain first, or you get a race presenting as flaky numerics rather than a
+failure — is **structurally narrower here**, and the reason is worth keeping:
+discrete card, so `copyDtoH` goes through a blit encoder rather than a bare
+`memcpy` on unified memory, and every command buffer goes to a single
+`newCommandQueue` created once per context (VegaRTMetal.cpp:293), so Metal's
+per-queue ordering puts a blit committed after a launch *after* it. That is a
+reason the audit is smaller, not a reason to skip it. `runBlitOp` at :228 and
+`VegaRTMetal_synchronize` at :325 are the other two wait sites; check every path
+that reads device memory before removing any of them.
+
+Re-run the benchmarks afterwards and correct `bench/RESULTS-vega2*.md` upstream.
+The correction table published in `RESULTS-vega2-launch.md` is an *estimate*
+with one round trip subtracted — it should be replaced with real measurements,
+not left standing.
+
+**3. `metallib_fail` (63) and `air_verify` (51).**
+Both are AIR backend bugs with a precise stage attached — one rejected at
+packing, one by the verifier after legalisation. 114 tests between them, and
+unlike the buckets above they are unambiguously ours. Bisect a few of each;
+expect small numbers of root causes.
+
+**4. `compiler_crash` — 18.**
+Most severe class in the census: the mojo compiler itself dies with a stack
+trace. All the samples looked like kv_cache tests. Lower priority than it
+sounds only because the count is small, but a compiler that segfaults on valid
+input is worth a look sooner rather than later.
+
+**5. `generic_deref` — 35, the capture-pack family.**
+Confirmed shared with the M4 Max port and located at `AirBackend.cpp:342`: any
+pointer parameter still in generic AS0 is promoted to `addrspace(1)`
+unconditionally, so a capture pack passed *by pointer* is typed device and bound
+wrong. Their runtime-side fix made things worse — it launched and returned
+zeros — because the kernel body genuinely dereferences it as device. It is a
+backend typing error. Hard, but 35 tests and a known cause.
+
+**Not ours to fix:** rowwise `rms_norm` (their §7.1) is a broken kernel surface,
+not our lowering — proven by upstream's purpose-written kernels being correct on
+the same machine. Ten source files sit on it. Do not go looking in `AirBackend`.
+
+**Also open, lower priority:**
+- Match scope definitions with the M4 Max port before comparing 18% to their
+  81%. 479 targets against 119 is not a like-for-like.
+- The open-division benchmark problem: beat 4023.4 at 2048³ *without* giving
+  back 13% at 1024³. Our best number is not a legal entry until then.
+- The 42% STREAM bandwidth efficiency — worst of the three machines on the
+  board. Could be the card, our launch config (256 threads, one element each,
+  no vectorised access), or the driver. A fix lifts every kernel at once.
+- `compute_capability()` returns a hardcoded 0 (VegaRT.cpp:255). Harmless until
+  something branches on it; check the kernel library for `!= 5` guards.
