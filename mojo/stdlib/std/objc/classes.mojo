@@ -14,23 +14,51 @@ from std.ffi import external_call
 from std.memory import OpaquePointer, MutPointer, unsafe_destroy_n
 from std.collections.string.string_span import _get_kgen_string
 from std.sys._cocoakb import cocoakb_selector_encoding
-from .runtime import (
-    ObjCClass,
-    ObjCObject,
-    msg_send,
-    sel,
-    load_framework_dynamic,
-)
+from .runtime import ObjCClass, ObjCObject, msg_send, sel, load_framework_dynamic
 
 
 comptime P = OpaquePointer[MutUntrackedOrigin]
 
 # The IMP shapes a Cocoa callback takes: (self, _cmd) then the message args.
-comptime IMP0 = def(P, P, /) thin abi("C") -> None
-comptime IMP1 = def(P, P, P, /) thin abi("C") -> None
-comptime IMP0Bool = def(P, P, /) thin abi("C") -> Bool
-comptime IMP1Bool = def(P, P, P, /) thin abi("C") -> Bool
-comptime IMP2 = def(P, P, P, P, /) thin abi("C") -> None
+# The revived `fn` in type position: sugar for `def(...) thin abi("C")`, i.e.
+# exactly what an IMP is. (self, _cmd) precede the message arguments.
+comptime IMP0 = fn(P, P, /) -> None
+comptime IMP1 = fn(P, P, P, /) -> None
+comptime IMP0Bool = fn(P, P, /) -> Bool
+comptime IMP1Bool = fn(P, P, P, /) -> Bool
+comptime IMP2 = fn(P, P, P, P, /) -> None
+
+# Methods that answer with an object. Every shape above returns void or BOOL,
+# which covers actions and lifecycle callbacks but not the delegate protocols
+# that are asked *for* something -- a toolbar delegate returns an NSArray of
+# identifiers and then an NSToolbarItem, an outline view's data source returns
+# each child.
+#
+# These return `Int`, not a pointer, and the reason is a real disagreement
+# between the two type systems rather than a shortcut. Objective-C delegates
+# must be able to answer nil -- "I have no item for that identifier" is a
+# normal answer, not an error -- and Mojo's Pointer is non-nullable by
+# construction: `Pointer(unsafe_from_address=0)` is rejected at comptime with
+# "use Optional[Pointer] to model nullability". Optional is the right answer
+# inside Mojo and the wrong one at an ABI boundary, where the C signature is a
+# single pointer-sized register.
+#
+# So the return is an `id` as an address: `obj.addr()` for an object, plain `0`
+# for nil. Identical ABI, and the nullability stays where Objective-C put it.
+comptime IMP1Obj = fn(P, P, P, /) -> Int
+comptime IMP2Obj = fn(P, P, P, P, /) -> Int
+comptime IMP3Obj = fn(P, P, P, P, P, /) -> Int
+
+# The counting half of a data source -- numberOfChildrenOfItem: and relatives
+# -- has the same shape, since an NSInteger and an id-as-address are the same
+# register. Aliases rather than distinct types, so the name at a call site can
+# say which one is meant without adding an ambiguous overload.
+comptime IMP1Int = IMP1Obj
+comptime IMP2Int = IMP2Obj
+
+# One mixed shape the toolbar needs by name: the trailing BOOL of
+# toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:.
+comptime IMP2ObjBool = fn(P, P, P, P, Bool, /) -> Int
 
 
 def _strip_offsets(enc: StaticString) -> String:
@@ -114,6 +142,64 @@ struct ObjCClassBuilder[superclass: StaticString = "NSObject"]:
     ](mut self, imp: IMP2):
         self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
 
+    def add_method[
+        selector: StaticString, encoding: StaticString = ""
+    ](mut self, imp: IMP1Obj):
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_method[
+        selector: StaticString, encoding: StaticString = ""
+    ](mut self, imp: IMP2Obj):
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_method[
+        selector: StaticString, encoding: StaticString = ""
+    ](mut self, imp: IMP3Obj):
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_method[
+        selector: StaticString, encoding: StaticString = ""
+    ](mut self, imp: IMP2ObjBool):
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_method_unchecked[
+        selector: StaticString, encoding: StaticString = "", F: AnyType = NoneType
+    ](mut self, imp: F):
+        """Add a method of any signature, with no shape checking.
+
+        The typed overloads above cover what Cocoa mostly asks for. They cannot
+        cover everything: NSTextInputClient's `selectedRange` returns an NSRange
+        by value, `insertText:replacementRange:` takes one, and
+        `firstRectForCharacterRange:actualRange:` returns an NSRect. Struct
+        arguments and returns are ordinary arm64 register passing, but each is a
+        distinct function type and enumerating them in the stdlib would be a
+        list with no end.
+
+        So this takes the function as-is. The encoding is what tells the runtime
+        the real signature, and getting it wrong is a mis-marshalled call rather
+        than a compile error -- which is why this is named for what it does not
+        do. Prefer a typed overload where one fits.
+        """
+        self._add(selector, _encoding_for[selector, encoding](), _imp_ptr(imp))
+
+    def add_protocol[name: StaticString](mut self) -> Bool:
+        """Declare that this class conforms to a protocol.
+
+        Implementing a protocol's methods is not the same as conforming to it.
+        AppKit asks `conformsToProtocol:` in places -- NSTextInputClient among
+        them -- and a class that only responds to the selectors is refused.
+        Returns False if the protocol is not registered in this process, which
+        usually means the framework defining it has not been loaded.
+        """
+        var proto = external_call["objc_getProtocol", P](
+            _leak_cstr(String(name))
+        )
+        if Int(proto) == 0:
+            return False
+        return external_call["class_addProtocol", Bool](
+            P(unsafe_from_address=self._cls), proto
+        )
+
     def register(deinit self) -> ObjCClass:
         """Finish the class; it can be instantiated after this."""
         external_call["objc_registerClassPair", NoneType](
@@ -139,120 +225,6 @@ def _imp_ptr[F: AnyType](imp: F) -> P:
     in reverse)."""
     return Pointer(to=imp).unsafe_bitcast[P]()[]
 
-
-@fieldwise_init
-struct _ObjCSuper(TrivialRegisterPassable):
-    """The two words `objc_msgSendSuper` reads to start its search one class up.
-
-    `struct objc_super { id receiver; Class super_class; }` -- and note what
-    the second field means: not the class to send to, but the class to start
-    LOOKING ABOVE. Passing the object's own class here would find the same
-    method again and recurse until the stack is gone, which is the classic way
-    to write an infinite loop in Objective-C.
-    """
-
-    var receiver: Int
-    var super_class: Int
-
-
-def objc_super_send_void(id: Int, selector: P):
-    """`[super <selector>]`, for a selector returning nothing.
-
-    Needed by any override that has to let its superclass do the real work --
-    `dealloc` is the one the compiler generates, but `drawRect:`, `mouseDown:`
-    and most of AppKit's other overridables want it too. Ordinary dispatch
-    cannot express this: `objc_msgSend` on `self` finds the override again.
-
-    The lookup starts above the class that DEFINES the method, which for a
-    Mojo `class` is the class itself, so `object_getClass` is the right
-    starting point here.
-    """
-    if id == 0:
-        return
-    var cls = external_call["object_getClass", P](P(unsafe_from_address=id))
-    var sup = external_call["class_getSuperclass", P](cls)
-    var frame = _ObjCSuper(id, Int(sup))
-    external_call["objc_msgSendSuper", NoneType](
-        MutPointer(to=frame), selector
-    )
-
-
-def _box_dealloc_imp[T: Deinitable](self_: P, _cmd: P) abi("C"):
-    """The IMP registered for `dealloc` on any class that has a box.
-
-    Two things, in this order, and the order is the whole point:
-
-    1. Run T's destructor over the box, so a field owning heap memory gives
-       it back. Mojo's ownership machinery already destroys a field when it
-       is REASSIGNED through the box -- that has always worked -- but nothing
-       ran when the object itself died, which is the gap this closes.
-    2. `[super dealloc]`, which is what actually frees the instance. Skipping
-       it leaks every object; doing it first would run the destructor over
-       freed memory.
-
-    Declared `abi("C")` because an IMP is called by the runtime, not by Mojo.
-    The sibling spells this `fn`, their revived foreign-callable function;
-    `fn` is not revived in this fork yet, and `def ... abi("C")` is the same
-    contract by the spelling our other IMPs already use.
-    """
-    var cls = external_call["object_getClass", P](self_)
-    var off = box_offset(ObjCClass(Int(cls)))
-    if off != 0:
-        unsafe_destroy_n(
-            MutPointer[T, MutUntrackedOrigin](
-                unsafe_from_address=Int(self_) + off
-            ),
-            1,
-        )
-    objc_super_send_void(Int(self_), sel_dynamic("dealloc"))
-
-
-comptime BOX_IVAR = "__mojo_box"
-
-
-def box_offset(cls: ObjCClass) -> Int:
-    """Where the box pointer sits inside an instance, in bytes.
-
-    Read once per class after registration and cached by the caller: the
-    runtime settles it when the class is registered, and it does not move.
-    Returns 0 if the class has no box, which no caller should be asking about.
-    """
-    var ivar = external_call["class_getInstanceVariable", P](
-        P(unsafe_from_address=cls.as_object().addr()),
-        _leak_cstr(String(BOX_IVAR)),
-    )
-    if Int(ivar) == 0:
-        return 0
-    return external_call["ivar_getOffset", Int](ivar)
-
-
-def sel_dynamic(name: StaticString) -> P:
-    """Register a selector by name at runtime (custom selectors included)."""
-    return external_call["sel_registerName", P](name.unsafe_ptr())
-
-
-def new_instance(cls: ObjCClass) -> ObjCObject:
-    """`+[cls new]` -- an owned (+1) instance of a runtime-defined class."""
-    return msg_send[ObjCObject, "NSObject", "new", is_class=True](
-        cls.as_object()
-    )
-
-
-def named_global[name: StaticString, T: AnyType]() -> Pointer[
-    T, MutUntrackedOrigin
-]:
-    """A zero-initialised process global of type T, shared by name across every
-    call site -- app state that Cocoa callbacks (which get no closure) can
-    reach. One storage location per name (KGEN dedups the global)."""
-    comptime slot = StaticString(_get_kgen_string["vega.objc.global/", name]())
-    return Pointer[T, MutUntrackedOrigin](
-        _mlir_value=__mlir_op.`pop.global_alloc`[
-            name=_get_kgen_string[slot](),
-            count=Int(1).__mlir_index__(),
-            _type=Pointer[T, MutUntrackedOrigin]._mlir_type,
-            alignment=Int(8).__mlir_index__(),
-        ]()
-    )
 
 struct ObjCClassRegistrar:
     """Builds an Objective-C class from values known only at run time.
@@ -369,7 +341,8 @@ struct ObjCClassRegistrar:
         One ivar, a pointer to a Mojo struct -- not one ivar per field. The
         box is ordinary Mojo memory, so a field can be any Mojo type rather
         than only what Objective-C ivar layout can describe, and construction
-        and destruction happen where Mojo expects them.
+        and destruction happen where Mojo expects them. See
+        COCOA_CLASS_DESIGN.md.
 
         Must be called before `register`: the runtime refuses to add an ivar
         to a registered class, and says so by returning false.
@@ -396,7 +369,8 @@ struct ObjCClassRegistrar:
         `witness` is never read. It is there because the box's type is what
         this needs and the compiler has no way to spell an explicit type
         parameter in a synthesized call -- but it does have `self`, and a
-        borrow of it carries the type.
+        borrow of it carries the type. Every other parameter on this struct
+        arrived the same way `add_method`'s did: inferred from an argument.
 
         Must come before `register`, like everything else here.
         """
@@ -414,6 +388,7 @@ struct ObjCClassRegistrar:
                 P(unsafe_from_address=self._cls)
             )
         return ObjCClass(self._cls)
+
 
     def box_offset_of(mut self) -> Int:
         """Where this class's box sits inside an instance.
@@ -438,4 +413,123 @@ struct ObjCClassRegistrar:
         var cls = self.register()
         if cls.as_object().addr() == 0:
             return 0
+        # The box needs no seeding here: the runtime zero-fills ivars at
+        # alloc -- every field in its named_global-like ground state -- and
+        # the id is written into the box's own id field by each trampoline on
+        # the way in, which is position-independent where a write at "offset
+        # zero" turned out not to be (the id field is not first; the parser
+        # places author fields before synthesized ones).
         return new_instance(cls).addr()
+
+
+@fieldwise_init
+struct _ObjCSuper(TrivialRegisterPassable):
+    """The two words `objc_msgSendSuper` reads to start its search one class up.
+
+    `struct objc_super { id receiver; Class super_class; }` -- and note what
+    the second field means: not the class to send to, but the class to start
+    LOOKING ABOVE. Passing the object's own class here would find the same
+    method again and recurse until the stack is gone, which is the classic way
+    to write an infinite loop in Objective-C.
+    """
+
+    var receiver: Int
+    var super_class: Int
+
+
+def objc_super_send_void(id: Int, selector: P):
+    """`[super <selector>]`, for a selector returning nothing.
+
+    Needed by any override that has to let its superclass do the real work --
+    `dealloc` is the one the compiler generates, but `drawRect:`, `mouseDown:`
+    and most of AppKit's other overridables want it too. Ordinary dispatch
+    cannot express this: `objc_msgSend` on `self` finds the override again.
+
+    The lookup starts above the class that DEFINES the method, which for a
+    Mojo `class` is the class itself, so `object_getClass` is the right
+    starting point here.
+    """
+    if id == 0:
+        return
+    var cls = external_call["object_getClass", P](P(unsafe_from_address=id))
+    var sup = external_call["class_getSuperclass", P](cls)
+    var frame = _ObjCSuper(id, Int(sup))
+    external_call["objc_msgSendSuper", NoneType](
+        MutPointer(to=frame), selector
+    )
+
+
+fn _box_dealloc_imp[T: Deinitable](self_: P, _cmd: P):
+    """The IMP registered for `dealloc` on any class that has a box.
+
+    Two things, in this order, and the order is the whole point:
+
+    1. Run T's destructor over the box, so a field owning heap memory gives
+       it back. Mojo's ownership machinery already destroys a field when it
+       is REASSIGNED through the box -- that has always worked -- but nothing
+       ran when the object itself died, which is the gap this closes.
+    2. `[super dealloc]`, which is what actually frees the instance. Skipping
+       it leaks every object; doing it first would run the destructor over
+       freed memory.
+
+    `fn`, not `def`: an IMP is C-ABI and may not raise. The runtime calls this
+    with (self, _cmd) and ignores the result.
+    """
+    var cls = external_call["object_getClass", P](self_)
+    var off = box_offset(ObjCClass(Int(cls)))
+    if off != 0:
+        unsafe_destroy_n(
+            MutPointer[T, MutUntrackedOrigin](
+                unsafe_from_address=Int(self_) + off
+            ),
+            1,
+        )
+    objc_super_send_void(Int(self_), sel_dynamic("dealloc"))
+
+
+comptime BOX_IVAR = "__mojo_box"
+
+
+def box_offset(cls: ObjCClass) -> Int:
+    """Where the box pointer sits inside an instance, in bytes.
+
+    Read once per class after registration and cached by the caller: the
+    runtime settles it when the class is registered, and it does not move.
+    Returns 0 if the class has no box, which no caller should be asking about.
+    """
+    var ivar = external_call["class_getInstanceVariable", P](
+        P(unsafe_from_address=cls.as_object().addr()),
+        _leak_cstr(String(BOX_IVAR)),
+    )
+    if Int(ivar) == 0:
+        return 0
+    return external_call["ivar_getOffset", Int](ivar)
+
+
+def sel_dynamic(name: StaticString) -> P:
+    """Register a selector by name at runtime (custom selectors included)."""
+    return external_call["sel_registerName", P](name.unsafe_ptr())
+
+
+def new_instance(cls: ObjCClass) -> ObjCObject:
+    """`+[cls new]` -- an owned (+1) instance of a runtime-defined class."""
+    return msg_send[ObjCObject, "NSObject", "new", is_class=True](
+        cls.as_object()
+    )
+
+
+def named_global[name: StaticString, T: AnyType]() -> Pointer[
+    T, MutUntrackedOrigin
+]:
+    """A zero-initialised process global of type T, shared by name across every
+    call site -- app state that Cocoa callbacks (which get no closure) can
+    reach. One storage location per name (KGEN dedups the global)."""
+    comptime slot = StaticString(_get_kgen_string["vega.objc.global/", name]())
+    return Pointer[T, MutUntrackedOrigin](
+        _mlir_value=__mlir_op.`pop.global_alloc`[
+            name=_get_kgen_string[slot](),
+            count=Int(1).__mlir_index__(),
+            _type=Pointer[T, MutUntrackedOrigin]._mlir_type,
+            alignment=Int(8).__mlir_index__(),
+        ]()
+    )

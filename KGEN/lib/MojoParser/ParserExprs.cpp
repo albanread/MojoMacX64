@@ -1363,11 +1363,11 @@ ParseResult ExprParser::parseFunctionType(ExprNode *&result) {
 
   // Parse the function effects from the leading keyword.
   fnSignature.effects.setAsync(consumeIf(Token::kw_async));
-  // TODO(26.5): Remove support for 'fn' entirely.
-  if (getToken().is(Token::kw_fn)) {
-    emitError(getToken().getLoc(), "'fn' has been removed; use 'def' instead")
-        << FixIt::replaceToken(getToken().getLoc(), "def");
-  }
+  // cocoa-mojo: `fn(...) -> R` in type position is the foreign-callable
+  // function type -- sugar for `def(...) thin abi("C") -> R`, so the IMP
+  // typedef soup (`classes.mojo`) reads as what it is. Same revival as the
+  // declaration form; see COCOA_LET_DESIGN.md.
+  bool isFnKeyword = getToken().is(Token::kw_fn);
   consumeToken();
 
   // Parameter signature, argument list and the function effects next.
@@ -1376,6 +1376,11 @@ ParseResult ExprParser::parseFunctionType(ExprNode *&result) {
       fnSignature.parseArgumentListAndEffects(*this,
                                               ArgListKind::kFnTypeArgList))
     return failure();
+
+  if (isFnKeyword) {
+    fnSignature.effects.setCABI(true);
+    fnSignature.isThin = true;
+  }
 
   // Parse the capture origin set if present.
   ExprNode *originExpr = nullptr;

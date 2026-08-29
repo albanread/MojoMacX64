@@ -33,7 +33,7 @@ measurement on the Vega II). Today the list is:
 |---|---|---|---|
 | CocoaKB queries | `method_abi_x64`, `posix_function_abi_x64` | `method_abi`, `posix_function_abi` | the tables disagree by design; NSRect return is registers there, sret here |
 | `encodeObjCType` | Bool → `c` | Bool → `B` | `@encode(BOOL)` is `c` on x86-64; 393-vs-4 in the SDK |
-| IMP spelling | `def ... abi("C")` | `fn` | temporary — retired the moment `fn` is revived (step 1 below) |
+| ~~IMP spelling~~ | ~~`def ... abi("C")`~~ | ~~`fn`~~ | **RETIRED at step 1** — `fn` is revived and `std/objc/classes.mojo` now matches their tree byte for byte |
 
 Anything else that differs is a bug in the port. The parity checker (step 3)
 turns this table into an enforced allowlist.
@@ -43,7 +43,7 @@ turns this table into an enforced allowlist.
 Do these in sequence. Each step ends with: regression suite green, files
 diffed against their tree at that commit, one commit pushed.
 
-1. **Revive `fn`** — their `a694adc9`. The foreign-callable function: thin,
+1. ~~**Revive `fn`**~~ — their `a694adc9`. **DONE.** The foreign-callable function: thin,
    non-raising, C ABI. Unblocks the `fern` acceptance example and retires the
    IMP-spelling divergence (adopt their IMP comptime aliases and the full
    overload set at the same time).
