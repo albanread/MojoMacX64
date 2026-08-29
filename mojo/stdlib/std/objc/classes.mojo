@@ -362,6 +362,35 @@ struct ObjCClassRegistrar:
             _leak_cstr(String(encoding)),
         )
 
+    def add_class_method[
+        F: AnyType
+    ](mut self, selector: StringSlice, encoding: StringSlice, imp: F) -> Bool:
+        """A `+` method, which lives on the METACLASS.
+
+        `objc_getClass("NSView")` answers the class object; the class object's
+        own class is the metaclass, and that is where a class method's IMP
+        belongs. Adding it to the class instead would make `[view foo]` work
+        and `[NSView foo]` fail, which is exactly backwards and exactly the
+        kind of thing that looks like it worked.
+
+        The receiver such a method is sent is the CLASS object, not an
+        instance, so there is no box to find and nothing to convert -- the
+        compiler's trampoline for one is the simplest in the file.
+        """
+        if not self._ok or self._existing:
+            return False
+        var meta = external_call["object_getClass", P](
+            P(unsafe_from_address=self._cls)
+        )
+        return external_call["class_addMethod", Bool](
+            meta,
+            external_call["sel_registerName", P](
+                _leak_cstr(String(selector))
+            ),
+            _imp_ptr(imp),
+            _leak_cstr(String(encoding)),
+        )
+
     def add_protocol(mut self, name: StringSlice) -> Bool:
         """Conformance is not the same as implementing the methods: AppKit
         asks `conformsToProtocol:` -- NSTextInputClient among them -- and

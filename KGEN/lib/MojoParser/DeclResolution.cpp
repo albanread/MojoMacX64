@@ -2127,21 +2127,22 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
 /// compiler has nothing to check a declaration against, and a method built on
 /// a guess would register cleanly and then receive a message it cannot read.
 static void checkObjCABISupport(SharedState &shared, StringRef superclass,
-                                StringRef selector, size_t argCount,
-                                SMLoc loc) {
+                                StringRef selector, size_t argCount, SMLoc loc,
+                                bool isClassMethod) {
   auto &database = CocoaKB::CocoaKBDatabase::get();
 
   // Same lookup order as the encoding: the superclass chain first, because an
   // override must match what the framework will actually send; then the
   // selector's majority reading, for one arriving from a protocol.
+  StringRef side = isClassMethod ? "1" : "0";
   auto retClass = superclass.empty()
                       ? std::nullopt
                       : database.lookup("method_ret_class",
-                                        {superclass, selector, "0"});
+                                        {superclass, selector, side});
   auto argClasses = superclass.empty()
                         ? std::nullopt
                         : database.lookup("method_arg_classes",
-                                          {superclass, selector, "0"});
+                                          {superclass, selector, side});
   if (!retClass)
     retClass = database.lookup("selector_ret_class", {selector});
   if (!argClasses)
@@ -2180,7 +2181,7 @@ static void checkObjCABISupport(SharedState &shared, StringRef superclass,
 static std::optional<std::string>
 objcMethodEncoding(SharedState &shared, StringRef superclass,
                    StringRef selector, ArrayRef<Type> argTypes,
-                   ASTType resultType, SMLoc loc) {
+                   ASTType resultType, SMLoc loc, bool isClassMethod) {
   auto &database = CocoaKB::CocoaKBDatabase::get();
   if (llvm::Error unavailable = database.availability()) {
     // The class declaration itself has already said so; adding one complaint
@@ -2189,16 +2190,21 @@ objcMethodEncoding(SharedState &shared, StringRef superclass,
     return std::nullopt;
   }
 
+  // The `is_class` column matters: `+alloc` and `-alloc` are different
+  // methods with different encodings, and a class asked about the wrong side
+  // answers about the wrong method.
+  StringRef side = isClassMethod ? "1" : "0";
   auto fromSDK = superclass.empty()
                      ? std::nullopt
                      : database.lookup("method_encoding",
-                                       {superclass, selector, "0"});
+                                       {superclass, selector, side});
   if (!fromSDK)
     fromSDK = database.lookup("selector_encoding", {selector});
   if (fromSDK) {
     checkAgainstSDKEncoding(shared, selector, *fromSDK, argTypes, resultType,
                             loc);
-    checkObjCABISupport(shared, superclass, selector, argTypes.size(), loc);
+    checkObjCABISupport(shared, superclass, selector, argTypes.size(), loc,
+                        isClassMethod);
     return fromSDK;
   }
 
@@ -2573,11 +2579,11 @@ LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
   // A method of an Objective-C class carries the selector the runtime will
   // dispatch to it by. Derived here, where the signature is finally known,
   // because the derivation is a claim about the argument count and this is the
-  // first point that can check it. Registration (sprint 2b) reads the
+  // first point that can check it. Registration (later in sprint 2) reads the
   // attribute rather than re-deriving it, so there is one rule in one place.
-  if (auto ownerClass = dyn_cast_or_null<StructDeclOp>(
+  if (auto structOp = dyn_cast_or_null<StructDeclOp>(
           parentDecl ? parentDecl->getIfOperation() : nullptr);
-      ownerClass && ownerClass.getObjcClass() && !funcOp.getSynthetic()) {
+      structOp && structOp.getObjcClass() && !funcOp.getSynthetic()) {
     size_t argsAfterSelf = 0;
     for (const ParsedArgument &arg : fnSignature.parsedArgs) {
       // The result slot is not an argument anybody wrote.
@@ -2617,12 +2623,22 @@ LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
       if (!declaredArgs.empty() && tcSignature.selfType)
         declaredArgs = declaredArgs.drop_front();
 
+      // The nearest REAL Objective-C ancestor, which for a class whose base
+      // is another Mojo class is not its base: the SDK has never heard of
+      // that one, so `method_encoding` against it finds nothing and an
+      // override of an inherited AppKit method would fall back to the
+      // selector's majority reading rather than to what its own superclass
+      // declares. `attributeObjCBases` walked the chain and left the answer.
       StringRef superclass;
-      if (auto bases = ownerClass.getObjcBasesAttr())
+      if (auto ancestor =
+              structOp->getAttrOfType<StringAttr>("objcSDKAncestor"))
+        superclass = ancestor.getValue();
+      else if (auto bases = structOp.getObjcBasesAttr())
         superclass = cast<StringAttr>(bases[0]).getValue();
-      if (auto encoding = objcMethodEncoding(
-              shared, superclass, *selector, declaredArgs,
-              ASTType(signature.getUserResultType()), decl.getLoc()))
+      if (auto encoding =
+              objcMethodEncoding(shared, superclass, *selector, declaredArgs,
+                                 tcSignature.resultType, decl.getLoc(),
+                                 funcOp.getIsStatic()))
         funcOp->setAttr("objcEncoding",
                         StringAttr::get(getContext(), *encoding));
     }
@@ -3630,6 +3646,17 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
   if (selfType.isNull() || cmdType.isNull() || cmdType.isTypeCheckErrorType())
     return {};
 
+  // A CLASS method (`@staticmethod`) has no `self` at all. That used to
+  // CRASH the compiler here rather than produce anything: everything below
+  // assumes the callee's argument 0 is the receiver, and a static method's
+  // argument 0 is its first real argument -- or, for a nullary one, does not
+  // exist. The C ABI still hands over two leading words, but the first is the
+  // CLASS object rather than an instance, and since there is no `self` there
+  // is no box to find: both are dropped and the rest forwarded straight
+  // through, which makes this the simplest trampoline in the file.
+  const bool isClassMethod = methodOp.getIsStatic();
+  const unsigned firstCalleeArg = isClassMethod ? 0 : 1;
+
   // A method taking another class as an argument would need the same
   // id-to-box conversion the receiver gets; nothing needs it yet, so it is
   // refused rather than wired half-way.
@@ -3639,9 +3666,10 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
   // it, and the framework's message finds nothing -- a window that does not
   // respond, with no diagnostic anywhere to say why. An unimplementable
   // method is a compile error, not a silent omission.
-  const bool selfHasBox = objcClassHasBox(structOp);
+  const bool selfHasBox = objcClassHasBox(structOp) && !isClassMethod;
   Block *calleeArgs = methodOp.getBody();
-  for (unsigned i = 1, e = calleeArgs->getNumArguments(); i != e; ++i) {
+  for (unsigned i = firstCalleeArg, e = calleeArgs->getNumArguments(); i != e;
+       ++i) {
     Type t = calleeArgs->getArgument(i).getType();
     if (isa<RefType>(t))
       t = ASTType(t).getReferenceElementType().mlirType;
@@ -3711,7 +3739,8 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
                                     PassingKind::PosOnly};
 
   Block *methodBody = methodOp.getBody();
-  for (unsigned i = 1, e = methodBody->getNumArguments(); i != e; ++i) {
+  for (unsigned i = firstCalleeArg, e = methodBody->getNumArguments(); i != e;
+       ++i) {
     Type argType = methodBody->getArgument(i).getType();
 
     // A memory-only argument -- CGRect in drawRect: is the canonical case --
@@ -3846,13 +3875,35 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
     // A mutable lvalue, not a borrow: `mut self` methods write through it,
     // and an MLValue decays to a borrow where the method is read-only.
     operands.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(boxRef)), &loc});
-  } else {
+  } else if (!isClassMethod) {
     operands.addSelf(forward(0, 0));
   }
+  // Trampoline argument 0 is the receiver (an instance, or the class object
+  // for a class method) and 1 is `_cmd`; both are dropped. What follows lines
+  // up with the callee's arguments from `firstCalleeArg` on -- which is 1 for
+  // an instance method, whose argument 0 was the `self` just handled, and 0
+  // for a class method, which has no `self` to have handled.
   for (unsigned i = 2, e = trampoline.getBody()->getNumArguments(); i != e; ++i)
-    operands.add(forward(i, i - 1));
-  CValue result = emitter.emitNamedMethodCall(
-      methodOp.getSourceNameAttr().getValue(), std::move(operands));
+    operands.add(forward(i, i - 2 + firstCalleeArg));
+  StringRef calleeName = methodOp.getSourceNameAttr().getValue();
+  CValue result;
+  if (isClassMethod) {
+    // No receiver to look the method up ON, so look it up on the TYPE.
+    // `emitNamedMethodCall` takes the type from its first operand, and there
+    // is no first operand here -- a class method has no `self`, which is the
+    // whole reason this branch exists.
+    PValue callee =
+        OverloadSet::lookupAndResolve(selfType, calleeName, operands, emitter);
+    if (!callee) {
+      shared.emitError(methodLoc)
+          << "internal: could not resolve the class method '" << calleeName
+          << "'";
+      return {};
+    }
+    result = emitter.emitIndirectCall(callee, std::move(operands));
+  } else {
+    result = emitter.emitNamedMethodCall(calleeName, std::move(operands));
+  }
 
   // A register result comes back as an SRValue and is returned directly; a
   // memory-only one has already been written to the result slot, so there is
@@ -4235,7 +4286,8 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     FnOp op;
     StringRef selector;
     StringRef encoding;
-    SMLoc loc; // the method's own line: a refusal must point at the method
+    SMLoc loc;      // the method's own line: a refusal must point at the method
+    bool isClass;   // a `+` method: registered on the metaclass, not the class
   };
   SmallVector<ObjCMethod> methods;
   for (std::pair<StringAttr, TinyPtrVector<ASTDecl *>> entry :
@@ -4252,7 +4304,7 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
         continue; // Private to Mojo, or its shape could not be established.
 
       methods.push_back({methodOp, selector.getValue(), encoding.getValue(),
-                         methodDecl->getLoc()});
+                         methodDecl->getLoc(), methodOp.getIsStatic()});
     }
   }
 
@@ -4278,7 +4330,9 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     operands.add(ASTExprAnd<AnyValue>{AnyValue(literal(method.selector)), &loc});
     operands.add(ASTExprAnd<AnyValue>{AnyValue(literal(method.encoding)), &loc});
     operands.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(imp)), &loc});
-    emitter.emitNamedMethodCall("add_method", std::move(operands));
+    emitter.emitNamedMethodCall(
+        method.isClass ? "add_class_method" : "add_method",
+        std::move(operands));
   }
 
   // Register, make an instance, and keep its `id`: the three things that
