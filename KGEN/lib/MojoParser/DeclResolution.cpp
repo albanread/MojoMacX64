@@ -1948,6 +1948,179 @@ AnyValue DeclResolver::resolveAnonymousClosure(const LambdaNode *node,
 
 /// funcdef   ::=  [decorators] "def" identifier [param_signature]
 ///                "(" [argument_list] ")" ["->" expression] ":" suite
+/// The Objective-C type-encoding character for a Mojo type, for the few types
+/// a novel selector is built from. Deliberately small -- see
+/// `objcMethodEncoding` for why almost nothing comes through here.
+static std::optional<StringRef> encodeObjCType(SharedState &shared,
+                                               ASTType type) {
+  if (type.isNull() || type.isTypeCheckErrorType())
+    return std::nullopt;
+  if (type.isNoneType())
+    return StringRef("v");
+
+  ASTDecl *typeDecl = type.getDecl(shared);
+  if (!typeDecl)
+    return std::nullopt;
+
+  // A reference to another Objective-C class is an `id`.
+  if (auto structOp =
+          dyn_cast_or_null<StructDeclOp>(typeDecl->getIfOperation()))
+    if (structOp.getObjcClass())
+      return StringRef("@");
+
+  std::optional<StringRef> name = typeDecl->getUserNameIfOperation();
+  if (!name)
+    return std::nullopt;
+  return llvm::StringSwitch<std::optional<StringRef>>(*name)
+      // ARCHITECTURE DIVERGENCE, and one the SDK cross-check caught rather
+      // than letting through: Objective-C `BOOL` is `signed char` on x86-64
+      // macOS and genuinely `bool` on arm64, so it encodes as 'c' here and
+      // 'B' there. The sibling port maps Mojo's Bool to 'B', which is correct
+      // on its machine and wrong on this one.
+      //
+      // Confirmed two ways before changing it. clang on this machine:
+      // @encode(BOOL) is "c", @encode(bool) is "B". And the SDK database: of
+      // the obvious BOOL-returning selectors, 393 encode as 'c' against 4 as
+      // 'B' -- those four being real C99 `bool` APIs.
+      //
+      // Same size and same ABI either way; only the character differs, and it
+      // is the character we hand to class_addMethod.
+      .Case("Bool", "c")
+      .Case("ObjCObject", "@")
+      .Case("ObjCClass", "#")
+      .Case("SEL", ":")
+      .Default(std::nullopt);
+}
+
+/// Split an `@encode` signature into its components, discarding the byte
+/// offsets the runtime interleaves: `v48@0:8{CGRect={CGPoint=dd}{CGSize=dd}}16`
+/// becomes `v`, `@`, `:`, `{CGRect={CGPoint=dd}{CGSize=dd}}`. The first is the
+/// result, then `@` for self and `:` for the selector, then the arguments.
+static SmallVector<StringRef> splitObjCEncoding(StringRef encoding) {
+  SmallVector<StringRef> parts;
+  size_t i = 0, n = encoding.size();
+  while (i < n) {
+    // Offsets and sizes, and the qualifiers that may precede a type.
+    if (llvm::isDigit(encoding[i]) ||
+        StringRef("rnNoORV").contains(encoding[i])) {
+      ++i;
+      continue;
+    }
+    size_t start = i;
+    while (i < n && encoding[i] == '^') // pointer to
+      ++i;
+    if (i >= n)
+      break;
+    char c = encoding[i];
+    if (c == '{' || c == '(' || c == '[') {
+      char close = c == '{' ? '}' : (c == '(' ? ')' : ']');
+      int depth = 0;
+      while (i < n) {
+        if (encoding[i] == c)
+          ++depth;
+        else if (encoding[i] == close && --depth == 0) {
+          ++i;
+          break;
+        }
+        ++i;
+      }
+    } else {
+      ++i;
+    }
+    parts.push_back(encoding.slice(start, i));
+  }
+  return parts;
+}
+
+/// Check a method's declared Mojo signature against the encoding the SDK says
+/// the selector has.
+///
+/// Partial on purpose, and honest about it: only types with an unambiguous
+/// encoding are compared, because Mojo's scalars are SIMD parameterisations
+/// with no encoding this layer can derive. What it does catch is the mistake
+/// that otherwise costs an afternoon -- a method that registers cleanly,
+/// receives a message built for a different shape, and reads its arguments out
+/// of the wrong registers.
+static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
+                                    StringRef encoding,
+                                    ArrayRef<Type> declaredArgs,
+                                    ASTType resultType, SMLoc loc) {
+  SmallVector<StringRef> parts = splitObjCEncoding(encoding);
+  if (parts.size() < 3)
+    return; // Not a shape this understands; say nothing rather than guess.
+
+  auto disagree = [&](StringRef what, StringRef sdk, StringRef declared) {
+    shared.emitError(loc)
+        << "the SDK declares '" << selector << "' with " << what << " '" << sdk
+        << "', but this method declares '" << declared
+        << "'; the runtime will send the SDK's shape";
+  };
+
+  if (auto declaredRet = encodeObjCType(shared, resultType))
+    if (*declaredRet != parts[0])
+      disagree("a result of", parts[0], *declaredRet);
+
+  ArrayRef<StringRef> sdkArgs = ArrayRef<StringRef>(parts).drop_front(3);
+  for (auto [index, argType] : llvm::enumerate(declaredArgs)) {
+    if (index >= sdkArgs.size())
+      break;
+    if (auto declaredArg = encodeObjCType(shared, ASTType(argType)))
+      if (*declaredArg != sdkArgs[index])
+        disagree(("argument " + Twine(index + 1) + " of").str(),
+                 sdkArgs[index], *declaredArg);
+  }
+}
+
+static std::optional<std::string>
+objcMethodEncoding(SharedState &shared, StringRef superclass,
+                   StringRef selector, ArrayRef<Type> argTypes,
+                   ASTType resultType, SMLoc loc) {
+  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+  if (llvm::Error unavailable = database.availability()) {
+    // The class declaration itself has already said so; adding one complaint
+    // per method would bury it.
+    llvm::consumeError(std::move(unavailable));
+    return std::nullopt;
+  }
+
+  auto fromSDK = superclass.empty()
+                     ? std::nullopt
+                     : database.lookup("method_encoding",
+                                       {superclass, selector, "0"});
+  if (!fromSDK)
+    fromSDK = database.lookup("selector_encoding", {selector});
+  if (fromSDK) {
+    checkAgainstSDKEncoding(shared, selector, *fromSDK, argTypes, resultType,
+                            loc);
+    return fromSDK;
+  }
+
+  // Ours, then. Derive it, or say plainly which part could not be.
+  auto ret = encodeObjCType(shared, resultType);
+  if (!ret) {
+    shared.emitError(loc)
+        << "'" << selector
+        << "' is not a selector the SDK declares, and its result type has no "
+           "Objective-C encoding this compiler can derive";
+    return std::nullopt;
+  }
+
+  std::string encoding = ret->str();
+  encoding += "@:"; // self, _cmd
+  for (Type argType : argTypes) {
+    auto arg = encodeObjCType(shared, ASTType(argType));
+    if (!arg) {
+      shared.emitError(loc)
+          << "'" << selector
+          << "' is not a selector the SDK declares, and one of its argument "
+             "types has no Objective-C encoding this compiler can derive";
+      return std::nullopt;
+    }
+    encoding += arg->str();
+  }
+  return encoding;
+}
+
 /// The Objective-C selector a class method answers to, or nothing if the
 /// method is private to Mojo and never reaches the runtime.
 ///
@@ -2284,9 +2457,25 @@ LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
       ++argsAfterSelf;
     }
     if (auto selector = deriveObjCSelector(shared, baseName.getValue(),
-                                           argsAfterSelf, decl.getLoc()))
+                                           argsAfterSelf, decl.getLoc())) {
       funcOp->setAttr("objcSelector",
                       StringAttr::get(getContext(), *selector));
+
+      // `argTypes` is what the author declared, so dropping `self` leaves
+      // exactly the arguments that follow `@:` in an encoding.
+      ArrayRef<Type> declaredArgs = tcSignature.argTypes;
+      if (!declaredArgs.empty() && tcSignature.selfType)
+        declaredArgs = declaredArgs.drop_front();
+
+      StringRef superclass;
+      if (auto bases = ownerClass.getObjcBasesAttr())
+        superclass = cast<StringAttr>(bases[0]).getValue();
+      if (auto encoding = objcMethodEncoding(
+              shared, superclass, *selector, declaredArgs,
+              ASTType(signature.getUserResultType()), decl.getLoc()))
+        funcOp->setAttr("objcEncoding",
+                        StringAttr::get(getContext(), *encoding));
+    }
   }
 
   // Check for API author error: stable function should return stable types.
@@ -3237,7 +3426,8 @@ static LogicalResult buildTraitConstraintsMap(
 /// solely it knows -- the name, the superclass, and the frameworks that must be
 /// loaded before the superclass can be resolved at all.
 static void synthesizeObjCRegistration(ASTDecl &structDecl,
-                                       StructDeclOp structOp) {
+                                       StructDeclOp structOp,
+                                       DeclResolver &resolver) {
   StructEmitter structEmitter(structDecl);
   SharedState &shared = structDecl.getShared();
   const bool trace = ::getenv("VEGA_TRACE_OBJC_REGISTER") != nullptr;
@@ -3332,6 +3522,66 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   ctorOperands.add(ASTExprAnd<CValue>{literal(superclass), &loc});
   ctorOperands.add(ASTExprAnd<CValue>{literal(frameworks), &loc});
   emitter.emitConstructorCall(registrarType, std::move(ctorOperands));
+
+  // A method call on the registrar, result discarded: these all report success
+  // through a Bool nobody here can act on -- the diagnostics that matter were
+  // issued at compile time, and a failure now means the machine is not the one
+  // the class was compiled against.
+  auto callOnRegistrar = [&](StringRef method, ArrayRef<StringRef> args) {
+    CallOperands operands(CallSyntax::kMethodCall, &loc,
+                          ExprDest(EC_TopLevelStmt));
+    operands.addSelf(
+        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    for (StringRef arg : args)
+      operands.add(ASTExprAnd<AnyValue>{AnyValue(literal(arg)), &loc});
+    emitter.emitNamedMethodCall(method, std::move(operands));
+  };
+
+  // Protocols, after the class exists and before it is registered. Adoption is
+  // not decoration: AppKit asks conformsToProtocol: in places --
+  // NSTextInputClient among them -- and refuses a class that merely answers
+  // the selectors.
+  if (auto bases = structOp.getObjcBasesAttr())
+    for (size_t i = 1, e = bases.size(); i != e; ++i) {
+      StringRef protocol = cast<StringAttr>(bases[i]).getValue();
+      callOnRegistrar("add_protocol", {protocol});
+      if (trace)
+        llvm::errs() << "objc-register: " << structOp.getSymName()
+                     << ":   add_protocol(\"" << protocol << "\")\n";
+    }
+
+  // Every method that answers a selector. Their signatures have to be resolved
+  // first: the body path deliberately does not resolve functions, but the
+  // selector and the SDK encoding are recorded during signature resolution, so
+  // without this there is nothing yet to read.
+  for (std::pair<StringAttr, TinyPtrVector<ASTDecl *>> entry :
+       structDecl.getDeclsInScope()) {
+    for (ASTDecl *methodDecl : entry.second) {
+      auto methodOp = dyn_cast_or_null<FnOp>(methodDecl->getIfOperation());
+      if (!methodOp || methodOp.getSynthetic())
+        continue;
+      if (failed(resolver.resolveSignature(*methodDecl, methodDecl->getLoc())))
+        continue;
+      auto selector = methodOp->getAttrOfType<StringAttr>("objcSelector");
+      auto encoding = methodOp->getAttrOfType<StringAttr>("objcEncoding");
+      if (!selector || !encoding)
+        continue; // Private to Mojo, or its shape could not be established.
+
+      // Everything add_method needs except the IMP, which is the piece still
+      // missing: it is a C-ABI trampoline around this method, and a method is
+      // registered only once there is a real function pointer to register.
+      // Adding it with a null IMP would produce a class that answers the
+      // selector by CRASHING, which is worse than one that does not answer.
+      if (trace)
+        llvm::errs() << "objc-register: " << structOp.getSymName()
+                     << ":   method \"" << selector.getValue()
+                     << "\" encoding \"" << encoding.getValue()
+                     << "\" (IMP pending)\n";
+    }
+  }
+
+  callOnRegistrar("register", {});
+
   if (trace)
     llvm::errs() << "objc-register: " << structOp.getSymName()
                  << ": registrar(name=\"" << structOp.getSymName()
@@ -4628,7 +4878,7 @@ ParseResult DeclResolver::resolveBody(StructDeclOp structOp, Lexer &lexer,
   // call objc_allocateClassPair, add every method, adopt every protocol and
   // register the pair. That is this function, synthesized per class.
   if (structOp.getObjcClass())
-    synthesizeObjCRegistration(structDecl, structOp);
+    synthesizeObjCRegistration(structDecl, structOp, *this);
 
   return success();
 }
