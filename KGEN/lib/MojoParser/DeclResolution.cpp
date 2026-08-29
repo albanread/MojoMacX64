@@ -2074,12 +2074,14 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
 /// Refuse a method whose Objective-C ABI the compiler cannot know.
 ///
 /// Narrow on purpose, and narrower than it first looked. The instinct was to
-/// gate every aggregate -- to refuse a struct larger than 16 bytes, and a large
-/// struct return. Both turn out to be handled already: the trampoline is a
-/// C-ABI function and the C ABI pass does the real classification for it, which
-/// on this machine means System V -- large arguments on the stack, large
-/// returns through the sret pointer. spikes/abi-oracle proves it against clang,
-/// the only authority that counts, since clang is what compiled AppKit.
+/// gate every aggregate -- to refuse a struct larger than 16 bytes, which
+/// AAPCS64 passes as a caller-owned copy behind a pointer rather than in
+/// registers, and a large struct return, which comes back through the hidden
+/// x8 pointer. Both turn out to be handled already: the trampoline is a C-ABI
+/// function, and `CABIAAPCS.cpp` does the real AAPCS64 classification for it
+/// -- indirect arguments, sret returns, HFA in v0-v3, small structs coerced
+/// to one or two GPRs. `abi_oracle_test.mojo` proves it against clang, which
+/// is the only authority that counts, since clang is what compiled AppKit.
 ///
 /// So what is left is the case where the SDK's own shape is UNKNOWN: the ABI
 /// pass could not model the signature, usually a C++ type in it. There the
@@ -2088,7 +2090,7 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
 static void checkObjCABISupport(SharedState &shared, StringRef superclass,
                                 StringRef selector, size_t argCount,
                                 SMLoc loc) {
-  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+  auto &database = CocoaKB::CocoaKBDatabase::get();
 
   // Same lookup order as the encoding: the superclass chain first, because an
   // override must match what the framework will actually send; then the
@@ -2109,7 +2111,7 @@ static void checkObjCABISupport(SharedState &shared, StringRef superclass,
   auto unmodelable = [&](StringRef what) {
     shared.emitError(loc)
         << "the ABI pass could not model the " << what << " of '" << selector
-        << "' -- usually a C++ type in the signature; this compiler will not "
+        << "' -- usually a C++ type in the signature; cocoa-mojo will not "
            "guess at a shape the runtime will send";
   };
 
@@ -2140,7 +2142,7 @@ static std::optional<std::string>
 objcMethodEncoding(SharedState &shared, StringRef superclass,
                    StringRef selector, ArrayRef<Type> argTypes,
                    ASTType resultType, SMLoc loc) {
-  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+  auto &database = CocoaKB::CocoaKBDatabase::get();
   if (llvm::Error unavailable = database.availability()) {
     // The class declaration itself has already said so; adding one complaint
     // per method would bury it.
@@ -3530,6 +3532,22 @@ static bool objcClassHasBox(StructDeclOp structOp) {
   return false;
 }
 
+/// A reference moved along by a byte offset:
+/// ref -> pointer -> i8* -> +n -> back -> ref.
+static Value objcRefAtByteOffset(ImplicitLocOpBuilder &builder, Value ref,
+                                 Value byteOffset) {
+  Value ptr = RefToPointerOp::create(builder, ref);
+  auto i8 = IntegerType::get(builder.getContext(), 8);
+  Value bytes = M::KGEN::POP::PointerBitcastOp::create(
+      builder, PointerType::get(i8), ptr);
+  Value moved = M::KGEN::POP::OffsetOp::create(builder, bytes, byteOffset);
+  Value back =
+      M::KGEN::POP::PointerBitcastOp::create(builder, ptr.getType(), moved);
+  auto immortal = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
+  return RefFromPointerOp::create(builder, back, immortal,
+                                  /*startUninit=*/false, /*endUninit=*/false);
+}
+
 /// Synthesize the C-ABI function the Objective-C runtime will actually call
 /// for one method, and return it.
 ///
@@ -3588,10 +3606,11 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
 
   // A memory-only RESULT is refused, and the reason is ABI, not laziness.
   // The C ABI lowering underneath does classify a returned struct correctly
-  // -- in registers, or through the hidden sret pointer -- but it only ever
-  // sees a VALUE. A Mojo memory-only result never becomes one: it turns into
-  // a by-ref slot in the signature before the C ABI is consulted, which is
-  // neither. Declaring the type register-passable is the whole fix.
+  // -- x0/x1, v0-v3, or the hidden x8 pointer, per AAPCS64 -- but it only
+  // ever sees a VALUE. A Mojo memory-only result never becomes one: it turns
+  // into a by-ref slot in the signature before the C ABI is consulted, which
+  // is none of the three. Declaring the type register-passable is the whole
+  // fix, and it is what `std/objc/geometry.mojo` does for CGRect and NSRange.
   //
   // Said out loud, for the same reason as above: silence here produces a
   // method that exists in Mojo and not in the runtime.
@@ -3604,7 +3623,7 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
         << "' returns a type Mojo passes in memory, so it reaches the C ABI "
            "as a by-ref slot rather than a value, and Objective-C would read "
            "the result from a register that was never written; give the type "
-           "'@register_passable(\"trivial\")'";
+           "'@register_passable(\"trivial\")' -- see std/objc/geometry.mojo";
     return {};
   }
 
@@ -4128,26 +4147,31 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
 
 }
 
-/// Check a class's bases against the Objective-C runtime, and record which
-/// frameworks declare them.
+/// Attribute a class's bases to the frameworks that declare them, and check
+/// that the runtime has heard of the superclass at all.
 ///
-/// Both halves exist because the failures they prevent are silent. A mistyped
-/// superclass -- `class Typo(NSVeiw)` -- does not fail at runtime: it produces
-/// a ROOT class, and a window that never appears with nothing anywhere saying
-/// why. And a framework that was never loaded makes objc_getClass return nil,
-/// which produces exactly the same root class from correct source.
-static void validateObjCBases(SharedState &shared, StructDeclOp structOp,
-                              ASTDecl &decl) {
+/// This is not bookkeeping. Registration resolves a superclass with
+/// `objc_getClass("NSView")`, which returns nil until AppKit is in the
+/// process, and `objc_allocateClassPair` against a nil superclass cheerfully
+/// builds a *root* class that then silently does nothing --
+/// `load_framework`'s own docstring in `std/objc/runtime.mojo` records what
+/// that cost. So the framework has to be known before the class can be built,
+/// and only BridgeSupport knows it: the runtime dump cannot say where a class
+/// came from, and cannot see a framework that was not loaded when it ran. See
+/// "Two oracles" in COCOA_CLASS_DESIGN.md.
+static void attributeObjCBases(SharedState &shared, StructDeclOp structOp,
+                               ASTDecl &decl) {
   auto bases = structOp.getObjcBasesAttr();
   if (!bases || bases.empty())
-    return; // no bases means NSObject, which always exists
+    return; // No bases means NSObject, which every process already has.
 
-  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+  auto &database = CocoaKB::CocoaKBDatabase::get();
 
-  // Tell "the SDK has no such class" from "there is no SDK metadata here".
-  // They are the same empty answer and completely different problems, and
-  // reporting the second as the first blames correct code for a configuration
-  // mistake -- every class in the file reporting an undefined superclass.
+  // Without the database there is nothing to check against, and every base
+  // would come back unknown -- reporting a correct `NSView` as a class the
+  // runtime has never heard of. Say what is actually wrong instead. The same
+  // lesson as the language server's "unable to locate module 'std'": a
+  // configuration error must not be dressed as a source error.
   if (llvm::Error unavailable = database.availability()) {
     shared.emitError(decl.getLoc())
         << "declaring an Objective-C class needs the Cocoa metadata database: "
@@ -4155,17 +4179,15 @@ static void validateObjCBases(SharedState &shared, StructDeclOp structOp,
     return;
   }
 
-  // `foundation.NSView` names the same class as `NSView`; the qualifier says
-  // where the author found it, not what the runtime calls it.
-  auto runtimeName = [](StringRef base) {
-    auto split = base.rsplit('.');
-    return split.second.empty() ? base : split.second;
-  };
-
   SmallVector<Attribute> frameworks;
   SmallPtrSet<Attribute, 4> seen;
+
   for (auto baseAttr : bases) {
-    StringRef base = runtimeName(cast<StringAttr>(baseAttr).getValue());
+    StringRef base = cast<StringAttr>(baseAttr).getValue();
+    // `foundation.NSView` names the same class as `NSView`; the qualifier says
+    // where the author found it, not what the runtime calls it.
+    base = base.rsplit('.').second.empty() ? base : base.rsplit('.').second;
+
     auto framework = database.lookup("class_framework", {base});
     if (!framework)
       continue;
@@ -4174,10 +4196,10 @@ static void validateObjCBases(SharedState &shared, StructDeclOp structOp,
       frameworks.push_back(attr);
   }
 
-  // The superclass specifically has to exist. A protocol the SDK does not know
-  // is not checked here: protocols are adopted, not inherited, and an unknown
-  // one costs a missing conformance rather than a wrong root class.
-  StringRef super = runtimeName(cast<StringAttr>(bases[0]).getValue());
+  // The superclass specifically has to exist, because a typo here does not
+  // fail -- it produces a root class and a window that never appears.
+  StringRef super = cast<StringAttr>(bases[0]).getValue();
+  super = super.rsplit('.').second.empty() ? super : super.rsplit('.').second;
   if (!database.lookup("superclass", {super}) &&
       !database.lookup("class_framework", {super})) {
     shared.emitError(decl.getLoc())
@@ -4781,7 +4803,7 @@ LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
   decl.setTypeDeclSelf(ASTDecl::computeSelfTypeForStruct(structOp));
 
   if (isClass)
-    validateObjCBases(shared, structOp, decl);
+    attributeObjCBases(shared, structOp, decl);
 
   // Structs are memory-only unless they opt-in to being passed in registers.
   // (3) A class is memory-only, exactly like the struct it is. It carries real

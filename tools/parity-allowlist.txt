@@ -1,0 +1,15 @@
+# Divergences from the MojoCocoa tree that are ALLOWED, with their reason.
+#
+# One line per entry: <path>|<symbol-or-WHOLEFILE>|<sha256-16 of OUR version>|<reason>
+#
+# The hash makes the allowlist a TWO-SIDED contract: the symbol may differ from
+# upstream, and it may not change here without someone deliberately updating
+# this file. Without it an allowlisted symbol is an unguarded hole -- which is
+# exactly where our most ABI-critical code lives.
+#
+# Nothing lands here without evidence -- clang's own output, the cocoa.sqlite
+# tables, or a measurement on this hardware. An entry is a promise that the
+# difference is required by x86-64, not that it was convenient. See
+# PARITY_SPRINT.md.
+mojo/stdlib/std/objc/runtime.mojo|_nth_class_kind|330876b62450c803|System V classifies each eightbyte (all-'f' is SSE); AAPCS64 has Homogeneous Floating-point Aggregates in v0-v3 and there is no such concept here
+KGEN/lib/CocoaKB/CocoaKBDatabase.cpp|WHOLEFILE|-|every ABI query reads the _x64 tables; theirs reads the arm64 ones. Enforced by property instead of by diff: see check-parity.sh

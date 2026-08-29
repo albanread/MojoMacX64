@@ -137,7 +137,7 @@ struct ObjCObject(TrivialRegisterPassable):
 @always_inline
 def _count_arg_classes(classes: StaticString) -> Int:
     """Count the message arguments a selector takes, from its comma-separated
-    SysV class string ("" = none, "g" = one, "g,g" = two). At comptime."""
+    AAPCS64 class string ("" = none, "g" = one, "g,g" = two). At comptime."""
     var bytes = classes.as_bytes()
     if len(bytes) == 0:
         return 0

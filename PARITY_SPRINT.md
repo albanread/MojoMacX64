@@ -29,6 +29,9 @@ Nothing diverges without landing on this list, and nothing lands on this list
 without evidence (clang's own output, the cocoa.sqlite tables, or a
 measurement on the Vega II). Today the list is:
 
+Enforced by `tools/check-parity.sh`, which is now the authority — this table is
+the human-readable copy of `tools/parity-allowlist.txt`.
+
 | where | ours | theirs | evidence |
 |---|---|---|---|
 | CocoaKB queries | `method_abi_x64`, `posix_function_abi_x64` | `method_abi`, `posix_function_abi` | the tables disagree by design; NSRect return is registers there, sret here |
@@ -56,7 +59,7 @@ diffed against their tree at that commit, one commit pushed.
    `std/objc/geometry.mojo`; port `struct_arg_test.mojo` and
    `struct_ret_test.mojo` and run them (delete our local NSRange stand-in in
    class_field_test in favour of the real geometry module).
-4. **Build `tools/check-parity.sh`** — diffs the shared surface (std/objc,
+4. ~~**Build `tools/check-parity.sh`**~~ **DONE.** — diffs the shared surface (std/objc,
    the objc regions of MojoParser, CocoaKB) against `mojococoa/main`, fails on
    any divergence not in `tools/parity-allowlist.txt`. From here it runs as
    part of every step's exit criteria.
