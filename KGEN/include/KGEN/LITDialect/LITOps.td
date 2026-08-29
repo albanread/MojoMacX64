@@ -478,7 +478,18 @@ def LIT_StructDeclOp : LITOp<"struct.decl", [
     // Present when the struct has a conditional RegisterPassable conformance.
     // Stores the ConstraintAttr whose proposition governs whether the struct
     // is register-passable for a given instantiation.
-    OptionalAttr<KGEN_ConstraintAttr>:$registerPassableConstraint
+    OptionalAttr<KGEN_ConstraintAttr>:$registerPassableConstraint,
+    // Present if this decl came from `class`, which in this fork declares an
+    // Objective-C class rather than a value type (COCOA_CLASS_DESIGN.md).
+    // Classes ride StructDeclOp because a separate op would need teaching to
+    // the type system, code completion, signature printing and LLDB before it
+    // could do anything at all; the differences live behind this flag.
+    UnitAttr:$objcClass,
+    // The names in `class Name(Superclass, Protocol, ...)`, in source order:
+    // the first is the superclass and the rest are protocols. Names only --
+    // they are resolved against the Objective-C runtime, not against Mojo's
+    // trait system, so nothing here is a TraitSymbolAttr.
+    OptionalAttr<StrArrayAttr>:$objcBases
   );
   let regions = (region SizedRegion<1>:$fields);
   let assemblyFormat = [{

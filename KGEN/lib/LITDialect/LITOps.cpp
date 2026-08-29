@@ -1433,7 +1433,8 @@ void StructDeclOp::build(OpBuilder &builder, OperationState &result,
         /*docString=*/{}, /*deprecationInfo=*/{}, /*unavailableInfo=*/{},
         /*hasStableDecorator=*/{}, /*stableSinceVersion=*/{}, /*sourceName=*/{},
         /*minAlignment=*/{}, /*convention=*/{}, /*definesClosure=*/{},
-        /*registerPassableConstraint=*/{});
+        /*registerPassableConstraint=*/{}, /*objcClass=*/{},
+        /*objcBases=*/{});
   result.regions[0]->push_back(new Block());
 }
 

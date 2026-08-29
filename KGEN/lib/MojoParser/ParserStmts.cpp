@@ -4064,14 +4064,116 @@ ParseResult StmtParser::parseExtensionStmt(LexerCursor startCursor,
   return success();
 }
 
+/// `class` declares an Objective-C class -- see COCOA_CLASS_DESIGN.md. The
+/// header is parsed here rather than lazily like a struct's, because it is
+/// small and fixed: a name, an optional list of base names, and a colon. What
+/// is deferred is everything that needs the runtime, which is all of it, and
+/// which sprint 2 implements.
 ParseResult StmtParser::parseClassStmt(LexerCursor startCursor,
                                        size_t curIndent) {
-  emitTokenError("classes are not supported yet");
-  consumeToken(Token::kw_class).getLoc();
+  // Top level only, for the same reasons a struct is.
+  bool nestFailure = false;
+  if (isa_and_nonnull<StructDeclOp>(getParentDecl().getIfOperation())) {
+    emitTokenError("nested class not supported here");
+    nestFailure = true;
+  } else if (isa_and_nonnull<TraitDeclOp>(getParentDecl().getIfOperation())) {
+    emitTokenError("nested class in a trait not supported here");
+    nestFailure = true;
+  } else if (isa_and_nonnull<FnOp>(getParentDecl().getIfOperation())) {
+    emitTokenError("class inside a function not supported here");
+    nestFailure = true;
+  }
+  consumeToken(Token::kw_class);
 
-  // Skip the body of this definition: go to a token the starts a line at the
+  SMLoc smLoc;
+  StringAttr nameAttr;
+
+  // A malformed header recovers by skipping the body and carrying on with the
+  // file, rather than abandoning the rest of the module. The header is a small
+  // fixed grammar -- there is no ambiguity about where it ends -- so one bad
+  // class need not hide every diagnostic after it.
+  auto recover = [&]() -> ParseResult {
+    // skipUntilIndentation stops on the *current* token when it already sits
+    // at this indentation, so make progress first or the statement loop spins.
+    if (getToken().isNot(Token::eof))
+      if (auto indent = getToken().getIndentation())
+        if (*indent <= curIndent)
+          consumeToken();
+    skipUntilIndentation(curIndent);
+    if (nameAttr)
+      getDeclResolver().addErroneousDecl(nameAttr.getValue(), smLoc,
+                                         curDeclScope);
+    return success();
+  };
+
+  if (parseIdentifier(nameAttr, "expected class name", &smLoc,
+                      /*forbidStartOfLine=*/true))
+    return recover();
+
+  // An Objective-C class is one runtime entity with one name; there is nothing
+  // for a compile-time parameter to specialise. Diagnosed here rather than
+  // left to the struct grammar, which would accept it and mean something else.
+  if (getToken().is(Token::l_square)) {
+    emitTokenError("classes do not take parameters");
+    return recover();
+  }
+
+  // `class Name(Superclass, Protocol, ...)`. First base is the superclass, the
+  // rest are protocols; omitted means NSObject. These are names resolved
+  // against the Objective-C runtime, not Mojo traits, so they are collected as
+  // strings and go no further today.
+  SmallVector<Attribute> bases;
+  if (getToken().is(Token::l_paren)) {
+    // Same rule as a struct's parameter list: it must begin on the name's own
+    // line, or the decl-extent scan below truncates at the start-of-line
+    // bracket and the failure surfaces much later as an internal error.
+    if (rejectTokenAtStartOfLine("base class list"))
+      return recover();
+    consumeToken(Token::l_paren);
+    while (!getToken().is(Token::r_paren)) {
+      StringAttr part;
+      if (parseIdentifier(part, "expected base class or protocol name"))
+        return recover();
+      SmallString<32> dotted(part.getValue());
+      // A qualified name -- `foundation.NSView` -- is kept whole.
+      while (consumeIf(Token::dot)) {
+        if (parseIdentifier(part, "expected name after '.'"))
+          return recover();
+        dotted += '.';
+        dotted += part.getValue();
+      }
+      bases.push_back(StringAttr::get(getContext(), dotted));
+      // A trailing comma is allowed, which is what a protocol list long enough
+      // to wrap actually gets written with.
+      if (!consumeIf(Token::comma))
+        break;
+    }
+    if (parseToken(Token::r_paren, "expected ')' in class base list"))
+      return recover();
+  }
+
+  if (parseToken(Token::colon, "expected ':' in class definition"))
+    return recover();
+
+  auto loc = translateLocation(smLoc);
+  auto newClass = StructDeclOp::create(builder, loc, nameAttr);
+  newClass.setObjcClass(true);
+  if (!bases.empty())
+    newClass.setObjcBasesAttr(ArrayAttr::get(getContext(), bases));
+
+  // Skip the body of this definition: go to a token that starts a line at the
   // same indent level (or less) as the current definition.
   skipUntilIndentation(curIndent);
+
+  if (nestFailure) {
+    getDeclResolver().addErroneousDecl(nameAttr.getValue(), smLoc,
+                                       curDeclScope);
+  } else {
+    // Remember that we parsed this declaration so we can finish it when it
+    // gets referenced -- which today means refusing, in DeclResolver.
+    getDeclResolver().addDecl(newClass, smLoc, nameAttr, curDeclScope,
+                              startCursor, getLexer().getCursor(), curIndent);
+  }
   return success();
 }
 

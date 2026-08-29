@@ -3584,6 +3584,39 @@ static LogicalResult parseExplicitDestroyMessage(SharedState &shared,
 ///
 LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
                                              Lexer &lexer, ASTDecl &decl) {
+  // A class parses (COCOA_CLASS_DESIGN.md sprint 1) but does not yet lower.
+  // Refusing here, before anything below runs, is deliberate: the rest of this
+  // function is the value-type pipeline -- comptime parameters, a conformance
+  // list read as Mojo traits, and the unconditional injection of AnyType,
+  // Deinitable and Movable -- and none of it describes a reference type whose
+  // layout belongs to the Objective-C runtime. Sprint 2 gives classes their
+  // own path rather than teaching this one to be two things.
+  if (structOp.getObjcClass()) {
+    auto diag = emitError(decl.getLoc());
+    diag << "class lowering is not implemented yet: '" << structOp.getSymName()
+         << "' parses, but declaring an Objective-C class from Mojo is "
+            "COCOA_CLASS_DESIGN.md sprint 2";
+    // Say what the header was understood to mean. It tells the reader the
+    // parse was not the problem, it makes a mistyped base list visible now
+    // rather than in sprint 2, and it is the only window onto the parsed shape
+    // while there is no IR to print.
+    if (auto bases = structOp.getObjcBasesAttr()) {
+      std::string shape;
+      llvm::raw_string_ostream os(shape);
+      os << "superclass '" << cast<StringAttr>(bases[0]).getValue() << "'";
+      if (bases.size() > 1) {
+        os << ", protocols ";
+        for (size_t i = 1, e = bases.size(); i != e; ++i) {
+          if (i > 1)
+            os << ", ";
+          os << "'" << cast<StringAttr>(bases[i]).getValue() << "'";
+        }
+      }
+      diag.attachNote(decl.getLoc()) << shape;
+    }
+    return failure();
+  }
+
   ParserBase p(shared, lexer);
   auto decoratorExprs = p.parseDecorators(decl);
 
