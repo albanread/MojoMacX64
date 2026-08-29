@@ -2712,3 +2712,87 @@ The census backlog (instantiation_fail 153, metallib 63, air_verify 51) does
 not vanish under this plan — it interleaves. But their `class` conversion of
 the examples means phase 1 also *changes* what some tests exercise; the fair
 sequencing is census triage after phase 1's dogfood, not before.
+
+## 2026-08-30 — Progress review: the class arc, audited, and a corrected method
+
+Goal restated, because it decides everything below: **a safe, stable compiler
+that behaves the same as the Apple Silicon fork — the same user code must run
+on both.** Parity is the product; the port is only the method.
+
+### Where we are
+
+Ported and green (16/16 regression, all class spikes passing):
+
+  sprint 1    parse the class keyword
+  sprint 2    classes resolve to types; selectors derived
+  sprint 4    CocoaKB out of the elaborator; encodings looked up; typo catcher
+  sprint 2b   registrar, protocols, method walk, trampolines, instantiation
+  sprint 3    the box: fields live behind the pointer, per-instance state
+  + refusals speak; the box is emptied on death (dealloc, [super] sends)
+
+`class Probe(NSObject)` with fields, methods, protocols, argument forwarding,
+struct returns and a leak-free lifecycle works end to end, messaged by the
+runtime rather than by Mojo. Three justified divergences from their tree, each
+with evidence attached: the `_x64` ABI tables, BOOL encoding as 'c', and
+`def ... abi("C")` standing in for their revived `fn`.
+
+### What the audit found, and the root cause of both gaps
+
+The two defects found during sprint 3 — the borrow-convention revert and the
+MemoryOnly convention revert — were not independent discoveries. **Both live in
+commits I skipped**: `693f426c` ("Registers at the boundary, memory inside",
+which edits Signatures.cpp) and its neighbour `e289fa28` ("Struct returns",
+which adds std/objc/geometry.mojo — the NSRange I had to stand in for). I
+ported by *sprint label*; their history is *chronological*, with mid-arc
+reverts landing in commits whose titles name none of the sprints. Replaying a
+curriculum out of order silently misses the corrections.
+
+A second, quieter cause: **the two forks' std.objc were never the same file.**
+Ours was written here first; theirs began as a port of ours and then evolved
+(more IMP overloads, geometry, error, typed). Applying their hunks onto our
+drifted base can succeed textually and still leave the files different — the
+diff against their tree at our claimed level shows ~94 lines of theirs we
+simply do not have.
+
+### The corrected method
+
+1. **Chronological, not sprint-labelled.** The remaining arc is ported in
+   their commit order. Next up is what their history put FIRST and I deferred:
+   revive `fn` (a694adc9) and `let` (b9ca66e1). Everything downstream is
+   written in that dialect, the fern acceptance example is blocked on `fn`,
+   and reviving it retires the one spelling divergence (`def abi("C")`).
+
+2. **Converge on end-state files, not hunks, for the stdlib.** Once `fn`/`let`
+   land, `std/objc/*` is adopted from their tree WHOLE — classes.mojo,
+   runtime.mojo, geometry.mojo, error.mojo, and later typed.mojo — then
+   diffed, with any surviving difference either justified in writing or
+   eliminated. Early evidence says the stdlib can be nearly identical across
+   forks: their runtime.mojo still carries the msgsend-variant machinery,
+   because the architecture knowledge lives in cocoa.sqlite and the CocoaKB
+   library, not in Mojo source. That is exactly where we want the divergence
+   concentrated: compiler + database, with the stdlib and all USER CODE
+   byte-portable.
+
+3. **Mechanized parity, not remembered parity.** A `tools/check-parity.sh`
+   that diffs the shared surface (std/objc, the objc regions of MojoParser,
+   CocoaKB) against `mojococoa/main` and FAILS on any divergence not listed in
+   a committed allowlist. The allowlist doubles as the documentation of why
+   each divergence exists. Run with every arc commit, like the ABI checker.
+   Drift becomes a reviewed artifact instead of an accident.
+
+4. **One-command test suite.** Port their `spikes/run-cocoa-checks.sh` shape:
+   every cocoa spike, the parser tests, the ABI oracle and the parity check
+   behind a single script, so "stable" means the same suite runs the same way
+   every time, not a hand-typed list per session.
+
+5. **Acceptance stays behavioral.** The definition of done for the arc is the
+   six `_class-pending` examples building and running here UNMODIFIED. Not
+   "the commits are ported" — the same user code, running on both machines.
+
+### Remaining arc, in their order
+
+  fn, let revival → 693f426c/e289fa28 residue check (geometry, struct-arg and
+  struct-ret spikes) → @objc (8723fbd9) → fields constructed into the box
+  (fd49242c) → field initializers (2db74630) → class B(A) (ac1b2de2) →
+  @staticmethod (cb5c155d) → box_ref pair → returned-class trio → std.objc.typed
+  → then the acceptance six.
