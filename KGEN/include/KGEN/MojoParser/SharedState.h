@@ -789,6 +789,22 @@ private:
   ASTDecl *getCachedBuiltinTypeDecl(const ImportPath &path, StringRef name,
                                     llvm::SMLoc loc);
 
+public:
+  /// A type from a named stdlib module, imported on demand.
+  ///
+  /// The same machinery as the private overloads above, exposed because
+  /// synthesized code sometimes needs a type from a module the user never
+  /// imported: an Objective-C `class` is registered through std.objc whether
+  /// or not the file declaring it thought to mention it. Not for user-facing
+  /// name resolution -- that has its own paths -- but for the compiler
+  /// reaching a type it knows the name of.
+  ASTType lookupStdlibType(const ImportPath &path, StringRef name,
+                           llvm::SMLoc loc) {
+    return getCachedBuiltinType(path, name, loc);
+  }
+
+private:
+
   /// Import the specified module or package, returning the module state.
   /// Always returns a valid module state, even if the module could not be
   /// found. `isImplicit` marks a package pulled in by the compiler rather than

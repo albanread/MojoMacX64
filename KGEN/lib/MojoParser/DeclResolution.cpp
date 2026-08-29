@@ -3225,6 +3225,122 @@ static LogicalResult buildTraitConstraintsMap(
 /// these are Objective-C names for the runtime to resolve, and reading them as
 /// Mojo traits would report `NSView` as an undefined trait -- a confusing lie
 /// about a line that is perfectly correct.
+/// Synthesize the function that builds this class in the Objective-C runtime.
+///
+/// An Objective-C class is built at run time, not linked: something has to call
+/// objc_allocateClassPair, add every method, adopt every protocol and register
+/// the pair. This is that function, one per class.
+///
+/// It emits a CALL to std.objc's ObjCClassRegistrar rather than teaching the
+/// compiler the Objective-C runtime. std.objc already knows how to build a
+/// class and is already tested on its own; the compiler supplies only what
+/// solely it knows -- the name, the superclass, and the frameworks that must be
+/// loaded before the superclass can be resolved at all.
+static void synthesizeObjCRegistration(ASTDecl &structDecl,
+                                       StructDeclOp structOp) {
+  StructEmitter structEmitter(structDecl);
+  SharedState &shared = structDecl.getShared();
+  const bool trace = ::getenv("VEGA_TRACE_OBJC_REGISTER") != nullptr;
+  auto [funcOp, funcDecl] = structEmitter.synthesizeMethodInStruct(
+      "__objc_register__",
+      /*argTypes=*/{},
+      /*argConvs=*/{},
+      /*argListAttrs=*/PogListAttr::get(shared.getContext(), /*numPogs=*/0),
+      shared.getNoneType());
+  if (!funcOp) {
+    if (trace)
+      llvm::errs() << "objc-register: " << structOp.getSymName()
+                   << ": synthesizeMethodInStruct failed\n";
+    return;
+  }
+  funcOp.setInlineLevel(InlineLevel::AlwaysNoDebug);
+
+  ImplicitLocOpBuilder builder =
+      ImplicitLocOpBuilder::atBlockEnd(funcOp.getLoc(), funcOp.getBody());
+  builder.setInsertionPointToStart(funcOp.getBody());
+  builder.setLoc(funcOp->getLoc());
+  ASTDecl *resolved = shared.declResolver->getDeclForFuncSymbol(
+      getFullyResolvedSymbolRef(funcOp));
+  if (!resolved)
+    return;
+  IREmitter emitter(*resolved, builder);
+
+  DebugInfo::DIBuilder::ScopeGuard diScopeGuard;
+  if (shared.diBuilder)
+    diScopeGuard = shared.diBuilder->pushScopeGuard(funcOp.getLocScope());
+
+  SyntheticNode loc(structDecl.getLoc());
+
+  // A string constant, as `StringLiteral[value]` constructed -- the same route
+  // ClosureEmitter takes for a synthesized name.
+  ASTType strLitType =
+      shared.lookupBuiltinType("StringLiteral", structDecl, structDecl.getLoc());
+  auto *strLitTypeDecl = strLitType.getDecl(shared);
+  if (!strLitTypeDecl)
+    return;
+  auto strLitDecl = cast<StructDeclOp>(strLitTypeDecl->getIfOperation());
+  auto literal = [&](StringRef text) -> CValue {
+    Type bound = strLitDecl.bindReference(
+        {cast<TypedAttr>(StringAttr::get(
+            text, StringType::get(shared.getContext())))});
+    return emitter.emitConstructorCall(
+        ASTType(bound),
+        CallOperands(CallSyntax::kTypeCall, &loc, EC_CallArgValue));
+  };
+
+  // The registrar is std.objc's, imported on demand: a class needs the
+  // Objective-C runtime whether or not the file that declares it thought to
+  // say so.
+  ASTType registrarType = shared.lookupStdlibType(
+      {"std", "objc"}, "ObjCClassRegistrar", structDecl.getLoc());
+  if (registrarType.isNull() || registrarType.isTypeCheckErrorType()) {
+    if (trace)
+      llvm::errs() << "objc-register: " << structOp.getSymName()
+                   << ": std.objc.ObjCClassRegistrar not found\n";
+    return;
+  }
+
+  // Frameworks are handed over as one comma-separated argument and loaded by
+  // the registrar before it resolves the superclass. The ordering is the whole
+  // reason the attribute exists: objc_getClass returns nil for a class whose
+  // framework is not in the process, and a pair allocated against nil is a
+  // root class that answers nothing.
+  std::string frameworks;
+  if (auto attr = structOp.getObjcFrameworksAttr())
+    for (auto fw : attr) {
+      if (!frameworks.empty())
+        frameworks += ',';
+      frameworks += cast<StringAttr>(fw).getValue();
+    }
+
+  StringRef superclass = "NSObject";
+  if (auto bases = structOp.getObjcBasesAttr())
+    superclass = cast<StringAttr>(bases[0]).getValue();
+
+  VarDeclOp registrarVar = emitter.emitVarDecl(
+      "registrar", registrarType.mlirType, funcOp.getLoc(), VarDeclKind::Var);
+  if (!registrarVar) {
+    if (trace)
+      llvm::errs() << "objc-register: " << structOp.getSymName()
+                   << ": could not declare the registrar var\n";
+    return;
+  }
+
+  CallOperands ctorOperands(CallSyntax::kTypeCall, &loc,
+                            ExprDest(MLValue(registrarVar), EC_CallArgValue));
+  ctorOperands.add(ASTExprAnd<CValue>{literal(structOp.getSymName()), &loc});
+  ctorOperands.add(ASTExprAnd<CValue>{literal(superclass), &loc});
+  ctorOperands.add(ASTExprAnd<CValue>{literal(frameworks), &loc});
+  emitter.emitConstructorCall(registrarType, std::move(ctorOperands));
+  if (trace)
+    llvm::errs() << "objc-register: " << structOp.getSymName()
+                 << ": registrar(name=\"" << structOp.getSymName()
+                 << "\", superclass=\"" << superclass << "\", frameworks=\""
+                 << frameworks << "\")\n";
+
+  IREmitter::emitNormalReturn(builder, Value(), /*emitEndFunc=*/true);
+}
+
 /// Check a class's bases against the Objective-C runtime, and record which
 /// frameworks declare them.
 ///
@@ -4507,6 +4623,13 @@ ParseResult DeclResolver::resolveBody(StructDeclOp structOp, Lexer &lexer,
       }
     }
   }
+
+  // An Objective-C class is built at run time, not linked: something has to
+  // call objc_allocateClassPair, add every method, adopt every protocol and
+  // register the pair. That is this function, synthesized per class.
+  if (structOp.getObjcClass())
+    synthesizeObjCRegistration(structDecl, structOp);
+
   return success();
 }
 
