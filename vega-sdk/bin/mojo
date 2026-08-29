@@ -19,7 +19,7 @@ if [ "${1:-}" = "build" ]; then
   shift
   exec "$ROOT/bin/mojo-driver" build \
     -Xlinker "-L$ROOT/lib" -Xlinker -lVegaRT -Xlinker "-rpath" -Xlinker "$ROOT/lib" \
-    -Xlinker -lobjc -Xlinker -framework -Xlinker Foundation \
+    -Xlinker -lobjc -Xlinker -lz -Xlinker -framework -Xlinker Foundation \
     -Xlinker -framework -Xlinker AppKit -Xlinker -framework -Xlinker QuartzCore \
     -Xlinker -framework -Xlinker Metal \
     "$@"
