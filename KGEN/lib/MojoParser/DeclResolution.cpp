@@ -638,6 +638,7 @@ struct FnSigDecorators : public SharedStateUser {
 
 private:
   void applyImplicitDecorator(SMLoc decoratorLoc, const CallNode *callNode);
+  void applyObjCSelector(SMLoc decoratorLoc, const CallNode *callNode);
   void applyCopyOrMoveCapture(SMLoc decoratorLoc, const CallNode *callNode,
                               bool isMove, StringRef decorator);
   void applyExtern(SMLoc decoratorLoc, const CallNode *node);
@@ -788,11 +789,49 @@ LogicalResult FnSigDecorators::applyOne(ExprNode *decorator) {
     applyLLVMMetadata(decorator->getLoc(), callNode);
   } else if (spelling == "__llvm_arg_metadata") {
     applyLLVMArgMetadata(decorator->getLoc(), callNode);
+  } else if (spelling == "objc") {
+    applyObjCSelector(decorator->getLoc(), callNode);
   } else {
     return failure();
   }
 
   return success();
+}
+
+/// `@objc("real:selector:")` -- the escape hatch from underscore mapping.
+///
+/// Needed because the mapping is total but not surjective. A selector with a
+/// capital after a colon (`setValue:forKey:` is fine, `URL:` is not the
+/// problem -- `initWithFrame:pixelFormat:` is) survives it, but three real
+/// shapes do not: a selector containing an underscore of its own (AppKit has
+/// several beginning `_`), one whose Mojo spelling would collide with another
+/// method's, and a name that is simply nicer to read differently on the Mojo
+/// side. Recorded here and consumed where the selector is derived, so the
+/// override goes through exactly the same colon-count check as a derived one.
+void FnSigDecorators::applyObjCSelector(SMLoc decoratorLoc,
+                                        const CallNode *callNode) {
+  ArrayRef<Operand> operands;
+  if (callNode)
+    operands = callNode->operands;
+  if (operands.size() != 1 || !operands[0].isPositional()) {
+    emitError(decoratorLoc,
+              "@objc takes exactly one argument: the selector, as a string");
+    return;
+  }
+  auto *strNode = dyn_cast<StringLiteralNode>(operands[0].expr);
+  if (!strNode) {
+    emitError(operands[0].getLoc(),
+              "@objc requires a string literal: the selector the runtime will "
+              "dispatch by");
+    return;
+  }
+  std::string selector = strNode->getValue();
+  if (selector.empty()) {
+    emitError(operands[0].getLoc(), "@objc requires a non-empty selector");
+    return;
+  }
+  funcOp->setAttr("objcSelectorOverride",
+                  StringAttr::get(decl.getContext(), selector));
 }
 
 void FnSigDecorators::applyImplicitDecorator(SMLoc decoratorLoc,
@@ -2548,8 +2587,27 @@ LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
         continue;
       ++argsAfterSelf;
     }
-    if (auto selector = deriveObjCSelector(shared, baseName.getValue(),
-                                           argsAfterSelf, decl.getLoc())) {
+    // `@objc("...")` wins over the derived spelling, but is checked the same
+    // way: a selector whose colon count disagrees with the arguments is a
+    // method the runtime will never reach, whoever wrote the name.
+    std::optional<std::string> selector;
+    if (auto override = funcOp->getAttrOfType<StringAttr>(
+            "objcSelectorOverride")) {
+      StringRef spelled = override.getValue();
+      size_t colons = spelled.count(':');
+      if (colons != argsAfterSelf)
+        shared.emitError(decl.getLoc())
+            << "@objc selector '" << spelled << "' takes " << colons
+            << " argument" << (colons == 1 ? "" : "s")
+            << ", but the method declares " << argsAfterSelf
+            << " after 'self'";
+      else
+        selector = spelled.str();
+    } else {
+      selector = deriveObjCSelector(shared, baseName.getValue(), argsAfterSelf,
+                                    decl.getLoc());
+    }
+    if (selector) {
       funcOp->setAttr("objcSelector",
                       StringAttr::get(getContext(), *selector));
 
@@ -4543,6 +4601,43 @@ static LogicalResult processStructSignatureDecorator(ExprNode *decorator,
             return success();
           }
         }
+      }
+
+      // @objc("RuntimeName") -- the collision escape hatch.
+      //
+      // A `class` registers under its Mojo name, and the runtime has ONE
+      // namespace for every class in the process: two frameworks, a plugin,
+      // and a Mojo class all compete in it. `objc_allocateClassPair` returns
+      // nil on a name that already exists, which is a failure the registrar
+      // reports and nobody can act on at that point. This is how a program
+      // gets out of the way of a name it does not own -- and how a class can
+      // deliberately take a name the Mojo side would spell differently.
+      if (declRef->spelling == "objc") {
+        if (!structOp.getObjcClass()) {
+          shared.emitError(decorator->getLoc(),
+                           "@objc names an Objective-C class, so it applies "
+                           "to 'class', not to 'struct'");
+          return success();
+        }
+        if (callNode->operands.size() != 1 ||
+            !callNode->operands[0].isPositional()) {
+          shared.emitError(decorator->getLoc(),
+                           "@objc takes exactly one argument: the runtime "
+                           "class name, as a string");
+          return success();
+        }
+        auto *strNode =
+            dyn_cast<StringLiteralNode>(callNode->operands[0].expr);
+        if (!strNode || strNode->getValue().empty()) {
+          shared.emitError(callNode->operands[0].getLoc(),
+                           "@objc requires a non-empty string literal: the "
+                           "name the runtime will register");
+          return success();
+        }
+        structOp->setAttr("objcRuntimeName",
+                          StringAttr::get(shared.getContext(),
+                                          strNode->getValue()));
+        return success();
       }
 
       // @align(N) - specify minimum alignment for the struct

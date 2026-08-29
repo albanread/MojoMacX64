@@ -89,7 +89,8 @@ targets = {
    "static void attributeObjCBases(", "static std::optional<StringRef> encodeObjCType(",
    "static SmallVector<StringRef> splitObjCEncoding(",
    "static void checkAgainstSDKEncoding(", "static void checkObjCABISupport(",
-   "objcMethodEncoding(SharedState", "deriveObjCSelector(SharedState"],
+   "objcMethodEncoding(SharedState", "deriveObjCSelector(SharedState",
+   "void FnSigDecorators::applyObjCSelector("],
  "mojo/stdlib/std/objc/runtime.mojo": ["def _nth_class_kind("],
 }
 allow = [l.strip().split("|") for l in open("tools/parity-allowlist.txt")

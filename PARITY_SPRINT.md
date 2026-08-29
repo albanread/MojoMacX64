@@ -66,7 +66,9 @@ diffed against their tree at that commit, one commit pushed.
 5. ~~**Port `spikes/run-cocoa-checks.sh`**~~ **DONE.** — the whole cocoa suite (spikes,
    parser tests, ABI oracle, parity check) behind one command. No more
    hand-typed test lists.
-6. **`@objc`** — their `8723fbd9`.
+6. ~~**`@objc`**~~ — their `8723fbd9`. **DONE** (a back-fill: it sits before
+   the dealloc commit already ported, so it was a skipped predecessor rather
+   than forward progress).
 7. **Fields constructed into the box** — their `fd49242c`.
 8. **Field initializers** — their `2db74630`.
 9. **`class B(A)` inheritance** — their `ac1b2de2`.
