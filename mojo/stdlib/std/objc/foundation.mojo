@@ -101,3 +101,19 @@ def extern_object[name: StaticString]() -> ObjCObject:
         ]()
     )
     return ObjCObject(slot[])
+
+
+def ns_to_string(s: ObjCObject) -> String:
+    """The missing direction: NSString -> Mojo String (by copy, UTF-8).
+
+    nil and a nil UTF8String both come back as "": Cocoa APIs return nil
+    strings freely, and every caller was going to write the guard anyway.
+    The bytes are copied before return, so the result does not care what the
+    autorelease pool does to the NSString afterwards.
+    """
+    if s.is_nil():
+        return String("")
+    var p = msg_send[OpaquePointer[MutUntrackedOrigin], "NSString", "UTF8String"](s)
+    if Int(p) == 0:
+        return String("")
+    return String(unsafe_from_utf8_ptr=p.unsafe_bitcast[c_char]())

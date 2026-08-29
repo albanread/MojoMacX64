@@ -155,6 +155,7 @@ TOK_KEYWORD(__generator_type) // Mojo extension: generator type literal.
 TOK_KEYWORD(True)
 TOK_KEYWORD(try)
 TOK_KEYWORD(var) // Mojo extension.
+TOK_KEYWORD(let) // Mojo extension: cocoa-mojo revival, immutable binding.
 TOK_KEYWORD(while)
 TOK_KEYWORD(with)
 TOK_KEYWORD(yield)

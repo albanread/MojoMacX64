@@ -108,17 +108,16 @@ struct ObjCObject(TrivialRegisterPassable):
 # ===----------------------------------------------------------------------=== #
 # The message send.
 #
-# The variant is chosen at COMPILE time from the database. On x86-64:
-#   objc_msgSend        -- integer/pointer/small returns
-#   objc_msgSend_fpret  -- long double returns (x87)
-#   objc_msgSend_stret  -- MEMORY returns (aggregates > 16 bytes): a hidden
-#                          buffer pointer is passed in rdi, shifting self->rsi.
-# All three paths work. The stub is cast to the exact function-pointer type of
-# the call site, so the C ABI inserts the hidden sret pointer from the RETURN
-# TYPE the caller declares -- there is no separate slot to wire, which an
-# earlier version of this comment claimed there was. Verified against clang as
-# the oracle: spikes/abi-oracle returns a 32-byte NSRect through _stret and
-# gets the exact value back.
+# The variant is still chosen at COMPILE time from the database, and on arm64
+# the database's answer is always `objc_msgSend`: AAPCS64 has no _stret and no
+# _fpret (both are absent from this machine's libobjc). A small aggregate comes
+# back in x0-x1, a homogeneous float aggregate in v0-v3, and a large one
+# through the x8 indirect-result register -- all via the ordinary send.
+#
+# So the stub choice is a constant here, but the QUERY is kept: an @encode the
+# ABI pass could not model still answers "?" and is still a compile error,
+# never a silent miscompile. That is the property worth keeping, not the
+# branch it used to drive.
 # ===----------------------------------------------------------------------=== #
 
 
@@ -130,15 +129,15 @@ struct ObjCObject(TrivialRegisterPassable):
 # callable does. No two call sites share a declared signature, so nothing
 # collides.
 #
-# The variant (plain / fpret / stret) is still chosen at COMPILE time from the
-# database; a struct-return or unmodelable send is a compile error, never a
+# The variant is still chosen at COMPILE time from the database (constant
+# `objc_msgSend` on arm64); an unmodelable send is a compile error, never a
 # silent miscompile.
 
 
 @always_inline
 def _count_arg_classes(classes: StaticString) -> Int:
     """Count the message arguments a selector takes, from its comma-separated
-    SysV class string ("" = none, "g" = one, "g,g" = two). Runs at comptime."""
+    SysV class string ("" = none, "g" = one, "g,g" = two). At comptime."""
     var bytes = classes.as_bytes()
     if len(bytes) == 0:
         return 0
@@ -150,8 +149,15 @@ def _count_arg_classes(classes: StaticString) -> Int:
 
 
 # Classify the n-th comma-separated ABI field of `classes` without building a
-# substring (awkward at comptime): 0 = absent, 1 = purely SSE (every eightbyte
-# 'f', a float register), 2 = anything else (integer/pointer/struct/memory).
+# substring (awkward at comptime): 0 = absent, 1 = the FLOAT register file
+# (v0-v7), 2 = anything else (integer/pointer/struct/memory).
+#
+# The AAPCS64 token vocabulary (derive_method_abi.py) is not SysV's: a value
+# goes in a v-register when it is a scalar float ("f") or a homogeneous float
+# aggregate ("h2".."h4", k consecutive v-regs -- CGPoint is h2, CGRect h4).
+# Everything else ("g" GPR, "i1"/"i2" small int struct, "b" by-value pointer)
+# is the integer file. Testing "every byte is 'f'" would be the SysV eightbyte
+# reading and would put an HFA in the wrong file.
 @always_inline
 def _nth_class_kind(classes: StaticString, n: Int) -> Int:
     var bytes = classes.as_bytes()
@@ -214,10 +220,10 @@ def _stub_ptr[cls: StaticString, selector: StaticString, is_class: Bool]() -> (
         + " std.objc cannot pick a dispatch stub for it. Call it by hand with"
         + " a checked external_call if you know the layout."
     )
-    # objc_msgSend / _fpret / _stret are all reached through the same
-    # per-signature function-pointer cast at the call site; the C ABI does the
-    # register allocation, x87 return, or hidden sret pointer according to the
-    # RETURN TYPE the caller declares. The database only picks WHICH symbol.
+    # The send is reached through a per-signature function-pointer cast at the
+    # call site; the C ABI does the register allocation and the x8 indirect
+    # return according to the RETURN TYPE the caller declares. The database
+    # only picks WHICH symbol -- on arm64, always objc_msgSend.
     return _RawPtr(
         _mlir_value=__mlir_op.`pop.extern_ptr_symbol`[
             name=_get_kgen_string[variant](),
@@ -260,7 +266,7 @@ def msg_send[
         + " were passed."
     )
     # Per-argument register-file check: a float passed where the ABI wants an
-    # integer register (or the reverse) is a silent xmm-vs-rdi corruption. We
+    # integer register (or the reverse) is a silent v-vs-x corruption. We
     # only flag the cases we are certain of -- a scalar float vs a purely-SSE
     # class -- and skip structs/unknowns, so there are no false positives.
     comptime arg_classes = cocoakb_method_arg_classes[cls, selector, is_class]()
@@ -405,14 +411,11 @@ def load_framework[name: StaticString]() -> Bool:
     """Force a system framework into the process (dlopen, RTLD_NOW).
 
     Foundation arrives free -- something in every process drags it in -- but
-    AppKit does NOT unless the binary was linked against it. Our AOT wrapper
-    passes `-framework AppKit`, so a built binary is fine; a JIT-run program
-    (`mojo run`) links nothing, so `objc_getClass("NSApplication")` returns nil
-    and every message sent to nil silently no-ops. The app "runs" and exits
-    with no window and no diagnostic anywhere.
-
-    Call this first in anything windowed, and check the result -- failing
-    loudly is the entire point, because the failure it prevents is silent.
+    AppKit does NOT unless the binary was linked against it. In a JIT-run
+    program (`mojo run`) nothing was, so `objc_getClass("NSApplication")`
+    returns nil and every message to it silently no-ops: the app "runs" and
+    exits without a window, with no diagnostic anywhere. That failure shape
+    cost real time; call this first in anything windowed.
 
     Idempotent (dlopen refcounts), cheap after the first call.
     """
@@ -431,11 +434,14 @@ def load_framework_dynamic(name: StringSlice) -> Bool:
     The compiler emits calls to this when registering a `class`: the framework
     comes from the SDK database at compile time, but it reaches the runtime as
     an ordinary string argument, because a synthesized call with a plain
-    argument is a great deal simpler to emit than a parametric one.
+    argument is a great deal simpler to emit than a parametric one. See
+    COCOA_CLASS_DESIGN.md.
     """
     var path = String("/System/Library/Frameworks/")
     path += name
     path += ".framework/"
     path += name
-    var h = external_call["dlopen", _RawPtr](path.as_c_string_slice(), Int(2))
+    var h = external_call["dlopen", _RawPtr](
+        path.as_c_string_slice(), Int(2)
+    )
     return Int(h) != 0

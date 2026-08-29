@@ -3779,7 +3779,7 @@ AnyValue BinOpNode::emitAssign(ExprDest &dest, IREmitter &emitter) const {
   // Figure out if the LHS is syntactically a var pattern.
   auto isVarPat = [&](ExprNode *expr) -> bool {
     while (1) {
-      if (expr->kind == kVarPat)
+      if (expr->kind == kVarPat || expr->kind == kLetPat)
         return true;
       if (auto paren = dyn_cast<ParenNode>(expr)) {
         expr = paren->subExpr;
@@ -4236,7 +4236,7 @@ UnaryOpNode::emitLValueIfImplicitlyTyped(IREmitter &emitter,
                                          bool hasInferrableRHS) const {
   // Most unary operators are never LValues, so don't speculatively resolve
   // them.
-  if (kind != kVarPat && kind != kRefPat)
+  if (kind != kVarPat && kind != kRefPat && kind != kLetPat)
     return this;
 
   // Warn if this is a recursively nested specifier like "var ref x".
@@ -4250,8 +4250,9 @@ UnaryOpNode::emitLValueIfImplicitlyTyped(IREmitter &emitter,
   // only influence the type of implicitly declared variables which cannot be
   // speculatively resolved.  If we did speculatively resolve it, then this is
   // an unneeded marker, e.g. "(var _) = x"
-  auto patKind =
-      kind == kVarPat ? PatternDeclKind::kVar : PatternDeclKind::kRef;
+  auto patKind = kind == kVarPat   ? PatternDeclKind::kVar
+                 : kind == kLetPat ? PatternDeclKind::kBind
+                                   : PatternDeclKind::kRef;
   auto result =
       subExpr->emitLValueIfImplicitlyTyped(emitter, patKind, hasInferrableRHS);
   if (result.isFailure())
@@ -4260,7 +4261,9 @@ UnaryOpNode::emitLValueIfImplicitlyTyped(IREmitter &emitter,
   // If we did resolve it, then we need to emit a warning.
   if (result.getIfValue()) {
     emitter.emitWarning(getLoc())
-        << (kind == kVarPat ? "'var'" : "'ref'")
+        << (kind == kVarPat   ? "'var'"
+            : kind == kLetPat ? "'let'"
+                              : "'ref'")
         << " pattern didn't declare a new variable, it can be removed";
     return result;
   }
@@ -4289,7 +4292,7 @@ AnyValue UnaryOpNode::emitComptime(ExprDest &dest, IREmitter &emitter) const {
 AnyValue UnaryOpNode::emitIR(ExprDest &dest, IREmitter &emitter) const {
   // var/ref patterns are special unary operators that affect their enclosing
   // lvalue.  They are not valid on the right side of an assignment.
-  if (kind == kVarPat || kind == kRefPat) {
+  if (kind == kVarPat || kind == kRefPat || kind == kLetPat) {
     if (dest.getPatternDeclKind() != PatternDeclKind::kNone &&
         dest.getPatternDeclKind() != PatternDeclKind::kBind) {
       emitter.emitWarning(getLoc()) << "nested 'var' or 'ref' patterns are "
@@ -4297,13 +4300,16 @@ AnyValue UnaryOpNode::emitIR(ExprDest &dest, IREmitter &emitter) const {
       return {};
     }
 
-    dest.setPatternDeclKind(kind == kVarPat ? PatternDeclKind::kVar
-                                            : PatternDeclKind::kRef);
+    dest.setPatternDeclKind(kind == kVarPat   ? PatternDeclKind::kVar
+                            : kind == kLetPat ? PatternDeclKind::kBind
+                                              : PatternDeclKind::kRef);
     auto result = emitter.emitExpr(subExpr, dest);
 
     if (result && !result.getIfLValue()) {
       emitter.emitError(getLoc())
-          << (kind == kVarPat ? "'var'" : "'ref'")
+          << (kind == kVarPat   ? "'var'"
+              : kind == kLetPat ? "'let'"
+                                : "'ref'")
           << " patterns are only valid on the left side of an assignment";
       return {};
     }
@@ -5702,7 +5708,8 @@ auto TupleNode::emitLCVIR(ExprDest &dest, IREmitter &emitter,
   // A binder anywhere in the target rules out an outer 'var' for every fresh
   // name in it, at any nesting depth.
   bool anyEltPatternDecl = llvm::any_of(exprs, [](const ExprNode *elt) {
-    return elt->kind == kVarPat || elt->kind == kRefPat;
+    return elt->kind == kVarPat || elt->kind == kRefPat ||
+           elt->kind == kLetPat;
   });
 
   bool allEltsLValue = true;

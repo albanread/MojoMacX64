@@ -92,3 +92,63 @@ struct ObjCRef(Movable):
         Objective-C method returning an autoreleased object would.
         """
         return ObjCObject(Int(_objc_autorelease(self._obj.ptr())))
+
+
+struct ObjCWeakRef(Movable):
+    """A zeroing weak reference: sees the object while it lives, nil after.
+
+    Cocoa's delegate convention is WEAK -- a window does not own its delegate,
+    an observer does not own its target -- and holding an `ObjCRef` where Cocoa
+    expects weakness is a retain cycle that leaks both sides. This is the other
+    half of the ownership story.
+
+    The runtime tracks weak references BY THE ADDRESS of the slot holding
+    them (`objc_initWeak(id *slot, obj)`), and Mojo values move. Registering a
+    struct field would leave the runtime pointing into a dead stack frame after
+    any move, a corruption with no diagnostic. So the slot lives on the HEAP:
+    one pointer-sized malloc whose address is stable for the life of this
+    value, moves of the struct move only the slot's address, and the runtime
+    is none the wiser. One allocation per weak reference; delegates are few.
+
+    Copying is explicit (`.copy()`, `objc_copyWeak`), matching `ObjCRef`:
+    duplicating a registration should be visible in the code.
+    """
+
+    var _slot: Int
+
+    def __init__(out self, target: ObjCObject):
+        """Register a weak reference to `target` (nil target is allowed and
+        simply loads as nil)."""
+        var slot = external_call["malloc", _RawPtr](Int(8))
+        _ = external_call["objc_initWeak", _RawPtr](slot, target.ptr())
+        self._slot = Int(slot)
+
+    def copy(self) -> Self:
+        """A second, independent registration for the same object.
+
+        Load-then-register rather than `objc_copyWeak`: the loaded +1 keeps
+        the object alive across the new registration (so this cannot race a
+        concurrent deallocation), and it needs no way to construct a `Self`
+        around an uninitialised slot. If the object is already gone the copy
+        is a nil weak, exactly as `objc_copyWeak` would have produced.
+        """
+        var strong = self.load()
+        return Self(target=strong.object())
+
+    def __deinit__(deinit self):
+        var slot = _RawPtr(unsafe_from_address=self._slot)
+        external_call["objc_destroyWeak", NoneType](slot)
+        external_call["free", NoneType](slot)
+
+    def load(self) -> ObjCRef:
+        """The object at +1 if it is still alive, or a nil `ObjCRef`.
+
+        `objc_loadWeakRetained` returns an owned +1 (or nil), so the result is
+        adopted: the object cannot be deallocated out from under the caller
+        between the check and the use, which is the entire point of loading a
+        weak reference rather than peeking at it.
+        """
+        var p = external_call["objc_loadWeakRetained", _RawPtr](
+            _RawPtr(unsafe_from_address=self._slot)
+        )
+        return ObjCRef(adopt=ObjCObject(Int(p)))

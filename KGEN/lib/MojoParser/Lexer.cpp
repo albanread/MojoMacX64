@@ -103,6 +103,7 @@ bool Token::isDeclKeyword() const {
   case kw_struct:
   case kw_trait:
   case kw_var:
+  case kw_let:
     return true;
   }
 }

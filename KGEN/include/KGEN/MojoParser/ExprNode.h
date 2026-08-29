@@ -103,6 +103,7 @@ public:
     kTransfer, // x^
     kVarPat,   // var x
     kRefPat,   // ref x
+    kLetPat,   // let x (cocoa-mojo: immutable binding)
     kComptime, // comptime (x)
     kFirstUnaryOp = kNeg,
     kLastUnaryOp = kComptime,

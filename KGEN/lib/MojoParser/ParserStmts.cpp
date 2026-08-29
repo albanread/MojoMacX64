@@ -117,6 +117,7 @@ static bool isStatementThatMightHaveDecorators(Token::Kind tokenKind) {
   case Token::kw_import:
   case Token::kw_pass:
   case Token::kw_var:
+  case Token::kw_let:
   case Token::kw_alias:
   case Token::kw_comptime:
   case Token::kw___mlir_region:
@@ -805,6 +806,14 @@ ParseResult StmtParser::parseStmt(bool onlySimpleStmt, bool &parsedCompound,
     if (isa_and_nonnull<FnOp>(getParentDecl().getIfOperation()))
       break;
     return parseVarStmt(startCursor, stmtIndent);
+  case Token::kw_let:
+    // cocoa-mojo: `let` is a function-body BINDING (immutable, scope-bound);
+    // it deliberately has no field or file-scope form. See COCOA_LET_DESIGN.md.
+    if (isa_and_nonnull<FnOp>(getParentDecl().getIfOperation()))
+      break;
+    return emitError(getToken().getLoc(),
+                     "'let' declares an immutable binding inside a function "
+                     "body; use 'var' for a field or module value");
   case Token::kw_alias: {
     // Decorators on aliases are not allowed inside function bodies.
     if (isa_and_nonnull<FnOp>(getParentDecl().getIfOperation()))
@@ -852,7 +861,7 @@ ParseResult StmtParser::parseStmt(bool onlySimpleStmt, bool &parsedCompound,
   // Parse a single expression, an assignment stmt, or augmented assignment
   // statement.
   ExprNode *expr = nullptr;
-  bool isVarStatement = getToken().is(Token::kw_var);
+  bool isVarStatement = getToken().isAny(Token::kw_var, Token::kw_let);
   rejectDecorator(/*inFunctionBody=*/isVarStatement,
                   /*printToken=*/isVarStatement);
   if (parseSimpleStmtExprs(expr, stmtIndent))
