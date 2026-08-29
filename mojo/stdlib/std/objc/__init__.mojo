@@ -28,6 +28,7 @@ from .classes import (
     ObjCClassBuilder,
     ObjCClassRegistrar,
     box_offset,
+    objc_super_send_void,
     IMP0,
     IMP1,
     IMP0Bool,

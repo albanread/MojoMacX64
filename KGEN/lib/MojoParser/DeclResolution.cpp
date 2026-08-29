@@ -3877,6 +3877,35 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   if (auto bases = structOp.getObjcBasesAttr())
     superclass = cast<StringAttr>(bases[0]).getValue();
 
+  StructFieldOp idField;
+  for (StructFieldOp field : structOp.getFieldDecls())
+    if (field.getName() == "__objc_id")
+      idField = field;
+  if (!idField)
+    return;
+
+  Value selfValue = funcOp.getBody()->getArgument(
+      funcOp.getBody()->getNumArguments() - 1);
+
+  // Every field default-constructed, id included, and FIRST -- before the
+  // registrar exists at all. Definite initialization rightly refuses an
+  // __init__ that returns half a value, and `add_dealloc` below borrows
+  // `self` to carry the box's type into a parametric call the compiler has
+  // no way to spell explicitly; a borrow of a half-built value is not one
+  // Mojo will hand out. The zeroes match the box's own ground state -- the
+  // runtime zero-fills ivars at alloc -- and the id is overwritten with the
+  // real pointer once registration has produced one. A field whose type has
+  // no default init is an error naming the field, not a mystery.
+  for (StructFieldOp field : structOp.getFieldDecls()) {
+    ASTType fieldType = field.getReboundType(
+        sugarCast<LIT::StructType>(selfType.mlirType),
+        &shared.getEvaluationContext());
+    Value ref = RefStructGEROp::create(builder, selfValue, field);
+    CallOperands init(CallSyntax::kTypeCall, &loc,
+                      ExprDest(MLValue(ref), EC_ReturnValue));
+    emitter.emitConstructorCall(fieldType, std::move(init));
+  }
+
   VarDeclOp registrarVar =
       emitter.emitVarDecl("registrar", registrarType.mlirType,
                           funcOp.getLoc(), VarDeclKind::Var);
@@ -3885,7 +3914,11 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
 
   CallOperands ctorOperands(CallSyntax::kTypeCall, &loc,
                             ExprDest(MLValue(registrarVar), EC_CallArgValue));
-  ctorOperands.add(ASTExprAnd<CValue>{literal(structOp.getSymName()), &loc});
+  StringRef runtimeName = structOp.getSymName();
+  if (auto renamed =
+          structOp->getAttrOfType<StringAttr>("objcRuntimeName"))
+    runtimeName = renamed.getValue();
+  ctorOperands.add(ASTExprAnd<CValue>{literal(runtimeName), &loc});
   ctorOperands.add(ASTExprAnd<CValue>{literal(superclass), &loc});
   ctorOperands.add(ASTExprAnd<CValue>{literal(frameworks), &loc});
   emitter.emitConstructorCall(registrarType, std::move(ctorOperands));
@@ -3925,6 +3958,25 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     Value sizeVal = ParamConstantOp::create(builder, rawSize);
     boxOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(sizeVal)), &loc});
     emitter.emitNamedMethodCall("add_box", std::move(boxOps));
+
+    // And the dealloc that empties it again. Until this existed, a field
+    // owning heap memory was destroyed when it was REASSIGNED -- Mojo's
+    // ownership machinery has always handled that through the box ref -- but
+    // nothing ran when the object itself died, so the last value in every
+    // field leaked. That is fine for an app-lifetime object and wrong for a
+    // transient one, which is most of them.
+    //
+    // `self` is passed as the witness for one reason: `_box_dealloc_imp` is
+    // parametric on the box's type, and a synthesized call cannot spell an
+    // explicit type parameter -- CallOperands carries arguments, not
+    // parameters. A borrow does carry the type, and std.objc never reads it.
+    // This is why the fields above are constructed before the registrar runs.
+    CallOperands deallocOps(CallSyntax::kMethodCall, &loc,
+                            ExprDest(EC_TopLevelStmt));
+    deallocOps.addSelf(
+        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    deallocOps.add(ASTExprAnd<AnyValue>{AnyValue(MLValue(selfValue)), &loc});
+    emitter.emitNamedMethodCall("add_dealloc", std::move(deallocOps));
   }
 
   // Protocols, after the class exists and before it is registered: AppKit
@@ -3963,8 +4015,8 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
       if (!selector || !encoding)
         continue; // Private to Mojo, or its shape could not be established.
 
-      methods.push_back({methodOp, selector.getValue(),
-                         encoding.getValue(), methodDecl->getLoc()});
+      methods.push_back({methodOp, selector.getValue(), encoding.getValue(),
+                         methodDecl->getLoc()});
     }
   }
 
@@ -4000,31 +4052,6 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   finish.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
   CValue objcId =
       emitter.emitNamedMethodCall("register_and_instantiate", std::move(finish));
-
-  StructFieldOp idField;
-  for (StructFieldOp field : structOp.getFieldDecls())
-    if (field.getName() == "__objc_id")
-      idField = field;
-  if (!idField)
-    return;
-
-  Value selfValue = funcOp.getBody()->getArgument(
-      funcOp.getBody()->getNumArguments() - 1);
-
-  // Every field default-constructed, id included: definite initialization
-  // rightly refuses an __init__ that returns half a value. The zeroes match
-  // the box's own ground state -- the runtime zero-fills ivars at alloc --
-  // and the id is overwritten with the real pointer just below. A field whose
-  // type has no default init is an error naming the field, not a mystery.
-  for (StructFieldOp field : structOp.getFieldDecls()) {
-    ASTType fieldType = field.getReboundType(
-        sugarCast<LIT::StructType>(selfType.mlirType),
-        &shared.getEvaluationContext());
-    Value ref = RefStructGEROp::create(builder, selfValue, field);
-    CallOperands init(CallSyntax::kTypeCall, &loc,
-                      ExprDest(MLValue(ref), EC_ReturnValue));
-    emitter.emitConstructorCall(fieldType, std::move(init));
-  }
 
   auto fieldRef = RefStructGEROp::create(builder, selfValue, idField);
   emitter.emitStoreToLValue({objcId, &loc}, MLValue(fieldRef),
@@ -4729,15 +4756,22 @@ LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
   // the self type.
   decl.setTypeDeclSelf(ASTDecl::computeSelfTypeForStruct(structOp));
 
-  // Structs are memory-only unless they opt-in to being passed in registers.
   if (isClass)
     validateObjCBases(shared, structOp, decl);
 
-  // (3) A class is a pointer: it is passed in a register, always. Not trivial,
-  // though -- copying one retains and destroying one releases, which is why
-  // this is RegisterPassable and not RegisterPassableTrivial.
-  structOp.setConvention(isClass ? TypeConvention::RegisterPassable
-                                 : TypeConvention::MemoryOnly);
+  // Structs are memory-only unless they opt-in to being passed in registers.
+  // (3) A class is memory-only, exactly like the struct it is. It carries real
+  // fields -- the id, and the author's own once the box landed -- and
+  // memory-only is what lets a field be any Mojo type rather than only a
+  // register-passable one. The C ABI's registers-only view of the receiver
+  // exists at exactly one place, the trampoline, which is where the conversion
+  // lives: registers at the boundary, memory inside.
+  //
+  // Sprint 2b briefly made a class RegisterPassable, when it had no fields but
+  // the id and the trampoline wanted `self` in a register. The box made that
+  // wrong in two ways at once -- a String field cannot be register-passable,
+  // and `self` is a Ref into the box rather than the id.
+  structOp.setConvention(TypeConvention::MemoryOnly);
 
   // Now that we have the basic struct set up, process signature decorators.
   Decorators(decl).applySignatureDecorators(
