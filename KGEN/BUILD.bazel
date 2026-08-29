@@ -870,6 +870,7 @@ modular_cc_library(
         ("//:modular_config_ci_build", "//:modular_config_release", "//:modular_config_production"): ["BUILD_TYPE=release"],
     }),
     deps = [
+        ":CocoaKB",
         ":HLCFDialect",
         ":Interpreter",
         ":KGENAttrInterfacesIncGen",

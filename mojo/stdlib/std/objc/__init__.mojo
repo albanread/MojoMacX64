@@ -15,6 +15,7 @@
 # ===----------------------------------------------------------------------=== #
 
 from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, send, autoreleasepool, load_framework, load_framework_dynamic
+from .typed import Obj, Bound
 from .geometry import CGPoint, CGSize, CGRect, NSRange
 from .ownership import ObjCRef, ObjCWeakRef
 from .foundation import NSString, nsstring, extern_object, ns_to_string
@@ -23,6 +24,7 @@ from .classes import (
     ObjCClassBuilder,
     ObjCClassRegistrar,
     box_offset,
+    box_ref,
     IMP0,
     IMP1,
     IMP0Bool,

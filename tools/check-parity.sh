@@ -136,6 +136,15 @@ PY
 # --- Property checks: invariants a diff cannot express -------------------
 # Every ABI query must read an x86-64 table. This is the divergence that is
 # REQUIRED, so it is asserted rather than diffed.
+# x86-64 has three send entry points. Upstream answers a constant because arm64
+# has one; a literal surviving here means a struct return would be fetched from
+# a register that was never written.
+if grep -n "'objc_msgSend'" KGEN/lib/CocoaKB/CocoaKBDatabase.cpp >/dev/null 2>&1; then
+  echo "DRIFT  CocoaKBDatabase.cpp hard-codes a send variant; x86-64 must read m.msgsend"
+  grep -n "'objc_msgSend'" KGEN/lib/CocoaKB/CocoaKBDatabase.cpp
+  fails=$((fails+1))
+fi
+
 if grep -nE "FROM (method_abi|posix_function_abi)\b" KGEN/lib/CocoaKB/CocoaKBDatabase.cpp >/dev/null 2>&1; then
   echo "DRIFT  CocoaKBDatabase.cpp reads an arm64 ABI table; every ABI query must use the _x64 form"
   grep -nE "FROM (method_abi|posix_function_abi)\b" KGEN/lib/CocoaKB/CocoaKBDatabase.cpp

@@ -3680,10 +3680,10 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
           shared.emitError(methodLoc)
               << "'" << selector << "' takes argument " << size_t(i)
               << " as the Objective-C class '" << argStruct.getSymName()
-              << "', but the runtime sends an 'id'; turning one back into a "
-                 "class value needs the receiver's box conversion, which the "
-                 "argument path does not have yet -- declare it as "
-                 "'ObjCObject'";
+              << "', but the runtime sends an 'id', which may be nil and has "
+                 "no box until it is checked; declare it as 'ObjCObject' and "
+                 "use 'box_ref[" << argStruct.getSymName()
+              << "](arg.addr())', which answers nothing for a nil";
           return {};
         }
   }

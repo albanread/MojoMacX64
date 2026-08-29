@@ -11,6 +11,7 @@
 // limitations under the License.
 //===----------------------------------------------------------------------===//
 
+#include "KGEN/CocoaKB/CocoaKBDatabase.h"
 #include "KGEN/KGENDialect/KGENAttrs.h"
 #include "KGEN/Interpreter/InterpreterAttrs.h"
 #include "KGEN/KGENDialect/FoldUtils.h"
@@ -2546,11 +2547,12 @@ LogicalResult ParamOperatorAttr::verify(
     break;
   case POC::CocoaKBQuery:
     // (query, argument...) -- the first operand names the query, the rest are
-    // its arguments. Three is enough: a method lookup takes (class, selector,
-    // kind); everything else takes fewer.
-    if (operands.size() < 1 || operands.size() > 4)
+    // its arguments. Four: a method lookup takes (class, selector, kind), and
+    // the call direction's name-keyed lookups take (class, name, kind, arity)
+    // because the Mojo-side name becomes a selector inside the SQL.
+    if (operands.size() < 1 || operands.size() > 5)
       return emitError() << "'cocoakb_query' expects a query name and up to "
-                            "three arguments";
+                            "four arguments";
     for (auto operand : operands)
       if (!::isa<StringType>(operand.getType()))
         return emitError() << "'cocoakb_query' operands must all be strings";
@@ -3762,6 +3764,63 @@ static Attribute simplifyTargetGetField(SmallVectorImpl<TypedAttr> &operands,
 
 /// Simplifies a `get_sizeof` operator. Try to narrow the operand to a type
 /// constant. If it does, query its data layout.
+/// Fold a `cocoakb_query` the moment its operands are constant strings.
+///
+/// This used to be listed as unfoldable, with the comment "the answer comes
+/// from the metadata database during elaboration". True, and it was also
+/// answered too late to be useful: a conditional TYPE has to pick its branch
+/// while types are being checked, long before the elaborator runs, so
+///
+///     comptime T: AnyType = Int if cocoakb_struct_size["CGSize"]() == 16
+///                           else Bool
+///
+/// stayed symbolic and the whole unevaluated conditional was printed as the
+/// type. That is what stands between us and typing an Objective-C result from
+/// its `@encode` -- MacModula2's trick, and the reason `[arr count]` is a
+/// CARDINAL there with no cast.
+///
+/// There is no reason to wait. The database is a file, open by the time
+/// anything is parsed, and the parser already reads it directly for
+/// selectors, encodings and frameworks. Folding here makes a query an
+/// ordinary compile-time constant.
+///
+/// Failure is silent on purpose: an operand that has not narrowed to a string
+/// yet simply is not ready, and a missing row is diagnosed with a location by
+/// the elaborator, which still runs on whatever this leaves behind. Answering
+/// "no fold" is the honest response to both.
+static Attribute simplifyCocoaKBQuery(SmallVectorImpl<TypedAttr> &operands,
+                                      Type resultType) {
+  SmallVector<StringRef> args;
+  for (TypedAttr operand : operands) {
+    auto str = dyn_cast_or_null<StringAttr>(operand);
+    if (!str)
+      return {}; // Not narrowed yet; the elaborator will get there.
+    args.push_back(str.getValue());
+  }
+  if (args.empty())
+    return {};
+
+  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+  StringRef query = args.front();
+  ArrayRef<StringRef> rest = ArrayRef<StringRef>(args).drop_front();
+
+  if (isa<IndexType>(resultType)) {
+    auto value = database.queryInt(query, rest);
+    if (!value) {
+      llvm::consumeError(value.takeError());
+      return {}; // Let the elaborator report it, where there is a location.
+    }
+    return IntegerAttr::get(resultType, *value);
+  }
+
+  auto value = database.queryString(query, rest);
+  if (!value) {
+    llvm::consumeError(value.takeError());
+    return {};
+  }
+  return StringAttr::get(*value, StringType::get(resultType.getContext()));
+}
+
 static Attribute simplifyGetSizeOf(SmallVectorImpl<TypedAttr> &operands,
                                    Type &resultType) {
   Builder b(operands[0].getContext());
@@ -4320,11 +4379,14 @@ static TypedAttr getParamOperator(MLIRContext *ctx, POC opcode,
   case POC::Rebind:
     result = simplifyRebind(operands, resultType);
     break;
+  case POC::CocoaKBQuery:
+    // Folded here rather than only in the elaborator: a conditional type has
+    // to pick its branch while types are checked, and the database is a file
+    // that is already open. See simplifyCocoaKBQuery.
+    result = simplifyCocoaKBQuery(operands, resultType);
+    break;
   case POC::ApplyResultSlot:
   case POC::GetEnv:
-  // Not foldable here: the answer comes from the metadata database during
-  // elaboration, so there is nothing to simplify at attribute level.
-  case POC::CocoaKBQuery:
   case POC::AttrToStr:
     result = {};
     break;

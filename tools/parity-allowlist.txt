@@ -13,3 +13,5 @@
 # PARITY_SPRINT.md.
 mojo/stdlib/std/objc/runtime.mojo|_nth_class_kind|330876b62450c803|System V classifies each eightbyte (all-'f' is SSE); AAPCS64 has Homogeneous Floating-point Aggregates in v0-v3 and there is no such concept here
 KGEN/lib/CocoaKB/CocoaKBDatabase.cpp|WHOLEFILE|-|every ABI query reads the _x64 tables; theirs reads the arm64 ones. Enforced by property instead of by diff: see check-parity.sh
+KGEN/lib/CocoaKB/CocoaKBDatabase.cpp|kSelectorVariantSQL|-|same divergence as kMsgSendVariantSQL, selector-keyed
+KGEN/lib/CocoaKB/CocoaKBDatabase.cpp|kMsgSendVariantSQL|-|upstream hard-codes 'objc_msgSend' because arm64 has exactly one send; x86-64 has three, and 3670 SDK methods need _stret and 2 need _fpret. Answering the constant reads results from registers never written

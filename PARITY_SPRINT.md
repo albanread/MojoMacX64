@@ -10,6 +10,15 @@ changes there. We do not fix it locally first.
 
 ## The two rules that were learned the hard way
 
+**Rule 0 — their history gets rewritten; track content, not SHAs.**
+On 2026-08-30 MojoCocoa force-pushed a rebased history: every commit we had
+ported got a new SHA, and the old ones became orphans that still resolve
+locally (because we fetched them) but are no longer on their `main`. The
+CONTENT was identical -- five shared files compared byte for byte across the
+old base and its new twin. So a rewrite is not a re-port; it is a
+`parity-base.txt` update. Verify content before assuming either way, and if
+`check-parity.sh` starts reporting mass drift, suspect this first.
+
 **Rule 1 — port in THEIR chronological order, never by sprint label.**
 Their history contains mid-arc corrections in commits whose titles name no
 sprint (`693f426c`, `e289fa28`). Both defects found during our sprint 3 were
@@ -109,3 +118,68 @@ diffed against their tree at that commit, one commit pushed.
   incompatible", or `mojo run` import failures).
 - The trace hatch `VEGA_TRACE_OBJC_REGISTER` shows what registration emits
   when a binary strips the evidence.
+
+---
+
+## STOP POINT — 2026-08-30, mid step 12/13
+
+**The working tree has UNCOMMITTED, UNVERIFIED changes.** Steps 11-13 were in
+progress when work stopped. Read this before touching anything.
+
+### Committed and pushed (all green when committed)
+
+Steps 1-10 plus the zlib fix, through `74b396b7`. At that point:
+`./spikes/run-cocoa-checks.sh` was 29 passed / 0 failed, GPU regression clean,
+and **all six class-based acceptance examples built unmodified** — which was
+the arc's definition of done.
+
+### Uncommitted, and NOT verified
+
+box_ref (step 11), the returned-class trio and `std.objc.typed` (steps 12-13),
+adopted from their tree. Last known suite state was **29 passed, 3 failed** —
+`struct_ret_test`, `typed_test`, `abi_oracle_test`. Do not assume these are
+fixed; the last build+test cycle never ran.
+
+### The live issue, and it is the important one
+
+Upstream **hard-codes the send variant** as `'objc_msgSend'`, with the comment
+"arm64 has exactly one send". On x86-64 there are three, and the SDK needs them:
+
+    objc_msgSend        418681
+    objc_msgSend_stret    3670
+    objc_msgSend_fpret       2
+
+Answering the constant fetches a struct return from a register that was never
+written. It appears in **two** queries and both must read `m.msgsend`:
+
+  * `kMsgSendVariantSQL`   — FIXED in the tree, compiler rebuilt, verified:
+    `NSView.frame -> objc_msgSend_stret` again.
+  * `kSelectorVariantSQL`  — FIXED in the tree but **NOT rebuilt or tested**.
+    This is the selector-keyed path, which is what `send[...]` and the ABI
+    oracle use, and is the likely cause of the three failures above.
+
+### Next steps, in order
+
+1. `./bazelw build //KGEN/tools/mojo:mojo` and rebuild the 16 `.mojoc`
+   packages, then `./spikes/run-cocoa-checks.sh`. Expect the three failures to
+   clear; if they do not, the selector-keyed path is the place to look.
+2. Add the allowlist row for `kSelectorVariantSQL` (the kMsgSendVariantSQL row
+   is already there) — these are now **three** allowed divergences: the SysV
+   eightbyte classifier and the two send-variant queries.
+3. Add a property check to `check-parity.sh`: **no `'objc_msgSend'` string
+   literal may survive in CocoaKBDatabase.cpp.** A diff cannot express this,
+   the file is whole-file allowlisted, and it has now bitten twice in one
+   sitting. This is the highest-value item here.
+4. Bump `parity-base.txt` to `d3ce7c8a` only once the suite is green, and
+   commit steps 11-13 together.
+5. Then re-run the acceptance six, and the cocoa arc is finished.
+
+### Also true, and easy to trip over
+
+**They force-pushed a rewritten history** (see Rule 0). Every SHA in earlier
+commit messages is orphaned — resolvable locally because we fetched it, absent
+from their `main`. Content was verified identical across the rewrite. The
+current base is `d3ce7c8a`.
+
+Remaining upstream work after this arc is **IDE, debugger and installer** —
+116 new commits — which is explicitly the next project, not this one.
