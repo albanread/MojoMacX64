@@ -4002,6 +4002,21 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
         sugarCast<LIT::StructType>(selfType.mlirType),
         &shared.getEvaluationContext());
     Value ref = RefStructGEROp::create(builder, selfValue, field);
+
+    // A field initializer runs here too, and not only into the box below.
+    // The local is a copy nobody should read a field through -- that is the
+    // constructor-copy wart -- but somebody will, and `Counter().hits`
+    // answering 0 while the object holds 41 is a worse lie than the cost of
+    // evaluating the expression twice. It joins the doubling already true of
+    // every field's constructor and destructor, and it goes away with
+    // sprint 6's handle.
+    auto found = shared.objcFieldInitializers.find(field.getOperation());
+    if (found != shared.objcFieldInitializers.end()) {
+      ExprDest dest(MLValue(ref), EC_ReturnValue);
+      emitter.emitExpr(found->second, dest);
+      continue;
+    }
+
     CallOperands init(CallSyntax::kTypeCall, &loc,
                       ExprDest(MLValue(ref), EC_ReturnValue));
     emitter.emitConstructorCall(fieldType, std::move(init));
@@ -4262,6 +4277,18 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
           sugarCast<LIT::StructType>(selfType.mlirType),
           &shared.getEvaluationContext());
       Value ref = RefStructGEROp::create(builder, boxRef, field);
+
+      // `var count: Int = 3`: the declaration's own expression, emitted into
+      // the box. This is the ONLY copy that matters -- the local `self` the
+      // constructor hands back is a copy nothing reads through -- so the
+      // initializer is evaluated exactly once per instance, here.
+      auto found = shared.objcFieldInitializers.find(field.getOperation());
+      if (found != shared.objcFieldInitializers.end()) {
+        ExprDest dest(MLValue(ref), EC_ReturnValue);
+        emitter.emitExpr(found->second, dest);
+        continue;
+      }
+
       CallOperands init(CallSyntax::kTypeCall, &loc,
                         ExprDest(MLValue(ref), EC_ReturnValue));
       emitter.emitConstructorCall(fieldType, std::move(init));
@@ -5637,6 +5664,39 @@ LogicalResult DeclResolver::resolveSignature(StructFieldOp fieldOp,
   }
 
   fieldOp.setType(type);
+
+  // `var count: Int = 3` -- a field initializer, and only on a `class`.
+  //
+  // The grammar in COCOA_CLASS_DESIGN.md promised this from the start and the
+  // parser has been rejecting it with "unknown tokens at the end of a
+  // declaration", which is true and unhelpful. A struct still refuses it,
+  // deliberately: a struct's initial values belong in its `__init__`, where
+  // Mojo can check that every field is set exactly once. A class has no such
+  // place -- its `__init__` is the compiler's registration function -- so the
+  // declaration is the only place left to say it.
+  //
+  // Parsed here, where the field's type is finally known, and emitted much
+  // later: the class's synthesized `__init__` runs it into the box.
+  if (p.getToken().is(Token::equal)) {
+    SMLoc eqLoc = p.getToken().getLoc();
+    ASTDecl *parent = decl.getParentDecl();
+    auto parentStruct = parent ? dyn_cast_or_null<StructDeclOp>(
+                                     parent->getIfOperation())
+                               : nullptr;
+    p.consumeToken();
+    ExprNode *initExpr = nullptr;
+    if (p.parseVarInitExpression(initExpr, decl.getIndentation()))
+      return failure();
+    if (parentStruct && parentStruct.getObjcClass()) {
+      shared.objcFieldInitializers[fieldOp.getOperation()] = initExpr;
+    } else {
+      shared.emitError(eqLoc)
+          << "a struct field cannot have an initializer here; set it in "
+             "'__init__', where Mojo checks that every field is initialised "
+             "exactly once (a 'class' field may have one, because a class's "
+             "'__init__' is the compiler's)";
+    }
+  }
 
   // Process field decorators syntactically to avoid recursive scope lookups
   // that can arise when using the IR emitter from within a struct's scope.

@@ -276,7 +276,17 @@ struct ObjCClassRegistrar:
             self._cls = Int(already)
             self._ok = True
             self._existing = True
-            self._has_box = False
+            # Ask the runtime, do not assume. Everything else on this path is
+            # skipped for an already-registered class -- the ivar, the
+            # methods, the protocols are all there from the first instance --
+            # but the BOX still has to be constructed, once per instance, and
+            # `box_of` will not hand out its address unless this says there is
+            # one. Getting this wrong gave the first instance its field
+            # initializers and every instance after it a box of zeroes.
+            #
+            # Offset zero means no box: an ivar can never live there, because
+            # that is where the isa pointer is.
+            self._has_box = box_offset(ObjCClass(Int(already))) != 0
             return
         self._existing = False
         self._has_box = False

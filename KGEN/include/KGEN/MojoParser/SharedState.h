@@ -144,6 +144,16 @@ public:
   /// This is used to efficiently walk MLIR types to find embedded origins.
   CachedOriginFinder cachedOriginFinder;
 
+  /// Field initializers on the fields of a `class` -- COCOA_CLASS_DESIGN.md.
+  ///
+  /// A side table rather than an attribute on the field, because the value is
+  /// an unemitted EXPRESSION: it is parsed with the field's signature and
+  /// emitted much later, by the class's synthesized `__init__`, into the box
+  /// inside the Objective-C instance. ExprNodes live in `persistentAllocator`
+  /// and so outlive the parse that produced them, which is what makes the
+  /// deferral safe. Keyed by the StructFieldOp.
+  llvm::DenseMap<mlir::Operation *, ExprNode *> objcFieldInitializers;
+
   /// Find all ParamDeclRefAttr's in side the type at the current scope.
   void collectParamRefsInType(Type type,
                               SmallVectorImpl<ParamDeclRefAttr> &uses);
