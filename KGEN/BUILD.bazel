@@ -1189,6 +1189,25 @@ modular_cc_library(
     ],
 )
 
+# VEGA-FORK: everything that reads cocoa.sqlite. Lifted out of the elaborator
+# so the PARSER can reach it too -- a `class` declaration needs encodings,
+# framework attribution, and a superclass the runtime has actually heard of.
+#
+# Every ABI query inside reads the _x64 tables. The sibling port is arm64 and
+# reads method_abi / posix_function_abi; those disagree, so this library is
+# deliberately NOT a copy of theirs.
+modular_cc_library(
+    name = "CocoaKB",
+    srcs = ["lib/CocoaKB/CocoaKBDatabase.cpp"],
+    hdrs = ["include/KGEN/CocoaKB/CocoaKBDatabase.h"],
+    # The macOS SDK ships sqlite3.h and libsqlite3.tbd, so no vendored copy.
+    linkopts = ["-lsqlite3"],
+    deps = [
+        ":Support",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
 modular_cc_library(
     name = "Elaborator",
     srcs = glob([
@@ -1199,6 +1218,7 @@ modular_cc_library(
     # pinned macOS SDK ships sqlite3.h + libsqlite3.tbd, so no vendored copy.
     linkopts = ["-lsqlite3"],
     deps = [
+        ":CocoaKB",
         ":KGENDialect",
         ":LITDialect",
         ":ToolCommon.headers",
