@@ -2583,3 +2583,132 @@ the same machine. Ten source files sit on it. Do not go looking in `AirBackend`.
   no vectorised access), or the driver. A fix lifts every kernel at once.
 - `compute_capability()` returns a hardcoded 0 (VegaRT.cpp:255). Harmless until
   something branches on it; check the kernel library for `!= 5` guards.
+
+## 2026-08-29 — 195 commits from the sister fork: review, and the parity plan
+
+MojoCocoa moved from `1896979b` to `ce53b96e`: 195 commits, 191 files, +42,727
+lines. Reviewed in full. Five themes, in dependency order:
+
+**1. The revived-keyword language surface — `let`, `fn`, `class`, keyword
+selectors.** The headline. `class` makes Objective-C classes a language
+feature: fields as one hidden ivar boxing a Mojo struct, methods that may
+raise (caught at the trampoline), selectors derived from signatures,
+encodings cross-checked at comptime against cocoa.sqlite, `class B(A)`
+inheritance, `@objc`, `@staticmethod`, field initializers, and a returned
+class that can parameterise a type. `fn` revived as the foreign-callable
+function (the IMP contract), `let` as the immutable owning binding, and
+keyword arguments mapping to selectors
+(`NSWindow(contentRect=r, styleMask=m, ...)` →
+`initWithContentRect:styleMask:backing:defer:`) — resolved in the library at
+comptime. ~4,060 insertions across 33 KGEN files, six sprints, each landed
+green. **Built on our own `cocoakb_query` elaborator intrinsic** — the
+mechanism we sent them has come back as a language.
+
+Their motivation audit is ours verbatim: 49 hand-written encodings, 11 IMP
+shapes, 84 named_globals, 10 builder rituals in *their* IDE — our playground,
+life, and mandelbrot are written in exactly that dialect.
+
+**2. Roast — an IDE for Mojo, written in Mojo.** 22 files. Persistent rope
+(undo = a stack of old roots), Core Text grid view, NSTextInputClient in
+full, LSP client with Cocoa-selector completion (a CocoaKB completion lib
+added to mojo-lsp-server), tabs, find, rename-across-workspace, a DAP
+debugger client, an Apple Events agent surface so the app can be driven and
+photographed unattended, .app + .dmg distribution. Entirely `class`-based —
+it is the dogfood for theme 1. This is the full answer to the original
+"the lldb REPL is un-Mac-like" request; our playground was P0/P1 of it.
+
+**3. Bazel-free toolchain.** LLVM and MLIR as shared libraries via CMake, the
+bazel action graph extracted to Ninja, compiler front end shipped as a
+library so phases embed, LSP shipped, `make-dist` with gates. Relevant to
+shipping vega-sdk without requiring bazel.
+
+**4. Backend and tooling fixes.** Checked each against our tree:
+  - `nosync` overclaim (76d955d0): **not shared** — verified; we never set
+    function attributes on legalised kernels, so there is nothing to gate.
+  - Async-launch races (0bd12581): four classes — an early-return that loses
+    a committed buffer from the drain list; destroyContext tearing down
+    without draining; unguarded pending/deferredError state; a later error
+    overwriting an earlier deferred one. **This is the checklist for our
+    launch-wait deferral** (next-steps #2), adapted to VegaRTMetal's
+    single-queue structure.
+  - Corpus tooling (e133752a, baba9e47): mostly bazel-runner-specific; the
+    transferable lesson — absence scored as evidence — is already in our
+    runner's design.
+  - Family gating clamp: `== 5` guards would silently disable fast paths on
+    newer hardware. N/A here (we report 0), but the same trap exists if we
+    ever report a real capability: audit the guards first.
+
+**5. The AppKit/JIT finding (83e28a90) — applies to us.** A JIT process links
+nothing against AppKit: `objc_getClass("NSApplication")` returns nil and
+every message to it silently no-ops — app "runs", no window, no diagnostic.
+Our wrapper links AppKit only into AOT binaries; `vega-sdk/bin/mojo run` of
+any windowed demo will fail exactly this way. Their fix is structural:
+`std.objc.load_framework[name]` (dlopen, RTLD_NOW, idempotent, loud failure),
+called first by every windowed demo. Small and portable.
+
+Plus: a 14-entry fix list from human testing of Roast (LSP never told where
+cocoa.sqlite lives; LSP sees one import root while the build sees three;
+double-click word selection; completion starvation; Return loses indent) —
+most are Roast-internal, several are lessons for our playground's LSP phase.
+And new examples: fluid (many dispatches per frame — on our 0.235 ms
+synchronous launch this will crawl until async lands; a perfect stress test),
+ferns/fernwind (GPU meadow), five of Modular's examples unmodified.
+
+### The parity plan
+
+Dependency order, cheapest first. Port by cherry-pick where trees agree — we
+have not touched MojoParser, so the language work should apply nearly clean;
+the one overlap is AirBackend.cpp, where their delta (nosync gate + knob
+file) is N/A here and is *skipped*, not merged.
+
+**Phase 0 — same-day value, no dependencies:**
+  a. Port `std.objc.load_framework`; audit every windowed spike to call it
+     first and fail loudly. Test `mojo run` (JIT) of window_smoke.
+  b. Journal-record the nosync non-share (done above) so nobody re-checks.
+  c. Pull their five unmodified Modular examples + fluid/ferns as our
+     acceptance corpus for later phases.
+
+**Phase 1 — the language surface (the big one):**
+  Replay their six sprints in order, each green before the next: parse →
+  resolve → selectors → registration → trampolines → fields/box. Then the
+  follow-ons (@objc, @staticmethod, inheritance, field initializers,
+  returned-class-parameterises-type, box_ref, typed/dispatch/error/geometry
+  stdlib modules).
+
+  **The critical port risk is the ABI, and it is concentrated in one sprint.**
+  Their trampolines were built and verified on arm64/AAPCS64. We are
+  x86-64/System V: struct returns go through `objc_msgSend_stret` sret,
+  x87 `long double` through `objc_msgSend_fpret` — cases arm64 does not
+  have. cocoa.sqlite already classifies both ABIs per method (it was built
+  for exactly this), and their `f8c4e8af` "clang becomes the ABI oracle" is
+  the verification tool — port it early and re-verify every trampoline shape
+  against the x86_64 rows. Everything else in phase 1 is
+  architecture-neutral parser/elaborator/runtime code.
+
+  Acceptance: their converted examples (window, life, mandelbrot, fluid,
+  fern) compile and run here; our three Cocoa apps rewritten in `class` as
+  the dogfood, mirroring their IDE conversion.
+
+**Phase 2 — Roast:**
+  Port ide/ (22 files) + the mojo-lsp-server CocoaKB completion. Their fix
+  list becomes the test checklist. **Machine caveat to verify in the first
+  hour:** the DAP debugger track ends at lldb, and unsigned lldb cannot
+  ptrace on this Mac (signing happens off-box). Spike that immediately; if
+  blocked, ship Roast without the debugger and mark it as needing a signed
+  build, rather than discovering it at the end.
+
+**Phase 3 — infrastructure, parallel or after:**
+  a. Async launch in VegaRTMetal with their four-race checklist (was already
+     next-steps #2; now it has a spec). Re-run benchmarks, replace the
+     estimate table upstream in oracles.
+  b. Bazel-free dist for vega-sdk, using their CMake/Ninja extraction as the
+     map. Optional until we want to hand the SDK to someone.
+
+**Deliberately not ported:** the nosync gate (nothing to gate), the /tmp knob
+file (we use env vars), arm64-only fixes (x86 probe warning), their
+bazel-corpus classifier (ours is direct-build).
+
+The census backlog (instantiation_fail 153, metallib 63, air_verify 51) does
+not vanish under this plan — it interleaves. But their `class` conversion of
+the examples means phase 1 also *changes* what some tests exercise; the fair
+sequencing is census triage after phase 1's dogfood, not before.
