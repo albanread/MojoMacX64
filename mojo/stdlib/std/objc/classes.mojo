@@ -378,6 +378,35 @@ struct ObjCClassRegistrar:
             return False
         return self.add_method("dealloc", "v@:", _box_dealloc_imp[T])
 
+    def box_of(mut self, id: Int, size: __mlir_type.index) -> P:
+        """Where an instance's box lives, as a POINTER.
+
+        The compiler needs to construct the fields into the box, and for that
+        it needs an address it can offset and bitcast. It has the `id` as a
+        Mojo `Int`, and there is no int-to-pointer operation at that level --
+        Mojo itself spells it as a bitcast through a local -- so the crossing
+        happens here, once, in a language that can say it in a line.
+
+        On the failure path -- a class that would not register, so a nil
+        instance -- this returns `size` bytes of scratch instead. It cannot
+        return nothing: `Pointer` is non-nullable by construction, and the
+        caller is compiler-emitted straight-line code with nowhere to branch
+        to. The fields are constructed into memory that is then abandoned,
+        which costs one allocation in a program that is already broken (its
+        class does not exist) and avoids writing through a null pointer to
+        say so.
+        """
+        var bytes = Int(SIMDLength(mlir_value=size))
+        if id != 0 and self._has_box and self._ok:
+            var off = box_offset(ObjCClass(self._cls))
+            if off != 0:
+                return P(unsafe_from_address=id + off)
+        return P(
+            unsafe_from_address=Int(
+                external_call["malloc", P](bytes)
+            )
+        )
+
     def register(mut self) -> ObjCClass:
         """Finish the class. Returns a null ObjCClass if anything above
         failed, which is what a caller should check before instantiating."""

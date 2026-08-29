@@ -4198,6 +4198,80 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
           RefFromPointerOp::create(builder, slot, immortal, false, false);
       RefStoreOp::create(builder, rawOffset, slotRef);
     }
+
+    // And now construct the fields INTO THE BOX.
+    //
+    // Until this, the box's contents were whatever the Objective-C runtime
+    // left there -- zeroes, since it zero-fills ivars at alloc -- and the
+    // field constructors ran only over the local `self` the constructor
+    // returns, which is a copy nothing else ever reads. That worked only
+    // because zero happens to be a valid `String`, a valid `List` and a valid
+    // `Int`, and it silently would not have worked for a type whose default
+    // is anything else. The ground state is now a constructed one.
+    //
+    // The address comes back from `box_of` as a POINTER rather than an Int:
+    // there is no int-to-pointer operation at this level (Mojo itself spells
+    // that as a bitcast through a local), so the crossing happens once, in
+    // std.objc, in a language that can say it in a line.
+    CallOperands boxPtrOps(CallSyntax::kMethodCall, &loc,
+                           ExprDest(EC_CallArgValue));
+    boxPtrOps.addSelf(
+        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(objcId), &loc});
+    // The size again, for the failure path: `Pointer` is non-nullable, so
+    // `box_of` answers a nil instance with scratch rather than with nothing.
+    auto boxTypeOperand =
+        TypeParamAttr::get(selfType.mlirType, M::KGEN::TypeType::get(
+                                                  shared.getContext()));
+    auto boxTargetOperand = ParamOperatorAttr::get(
+        POC::CurrentTarget, {}, M::KGEN::TargetType::get(shared.getContext()));
+    auto boxRawSize = ParamOperatorAttr::get(
+        POC::GetSizeOf,
+        {cast<TypedAttr>(boxTypeOperand), cast<TypedAttr>(boxTargetOperand)},
+        IndexType::get(shared.getContext()));
+    Value boxSizeVal = ParamConstantOp::create(builder, boxRawSize);
+    boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(boxSizeVal)), &loc});
+    CValue boxPtr = emitter.emitNamedMethodCall("box_of", std::move(boxPtrOps));
+    if (!boxPtr.getIfSRValue()) {
+      shared.emitError(structDecl.getLoc(),
+                       "internal: box_of did not produce a register value; "
+                       "the box cannot be constructed");
+      return;
+    }
+    Value boxPtrVal = emitter.emitRebindOpIfNeeded(
+        boxPtr.getIfSRValue(), SugarAttr::strip(boxPtr.getIfSRValue().getType()),
+        structDecl.getLoc());
+    Value rawBox = LIT::StructExtractOp::create(
+        builder, builder.getLoc(),
+        PointerType::get(IntegerType::get(shared.getContext(), 8)), boxPtrVal,
+        StringAttr::get(shared.getContext(), "_mlir_value"));
+    Value typedBox = M::KGEN::POP::PointerBitcastOp::create(
+        builder, PointerType::get(selfType.mlirType), rawBox);
+    auto boxOrigin = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
+    // Not startUninit: that tells Mojo this reference brings a whole value
+    // into existence, and it then rightly insists the value be produced by
+    // an `__init__` rather than field by field -- but a class's `__init__`
+    // IS this function, so that would recurse. The box is memory the runtime
+    // already zero-filled, so it is "initialized" in Mojo's sense, and each
+    // field constructor writes over its own slot.
+    Value boxRef = RefFromPointerOp::create(builder, typedBox, boxOrigin,
+                                            /*startUninit=*/false,
+                                            /*endUninit=*/false);
+    for (StructFieldOp field : structOp.getFieldDecls()) {
+      ASTType fieldType = field.getReboundType(
+          sugarCast<LIT::StructType>(selfType.mlirType),
+          &shared.getEvaluationContext());
+      Value ref = RefStructGEROp::create(builder, boxRef, field);
+      CallOperands init(CallSyntax::kTypeCall, &loc,
+                        ExprDest(MLValue(ref), EC_ReturnValue));
+      emitter.emitConstructorCall(fieldType, std::move(init));
+    }
+    // The id, into the box's own id field, once. The trampolines still write
+    // it on every message -- eight bytes next to an objc_msgSend -- but this
+    // means the box is a complete, valid value before any message arrives.
+    Value boxIdRef = RefStructGEROp::create(builder, boxRef, idField);
+    emitter.emitStoreToLValue({objcId, &loc}, MLValue(boxIdRef),
+                              EC_AttributeRefBase);
   }
 
   emitter.emitNormalReturn(funcOp.getLoc());
