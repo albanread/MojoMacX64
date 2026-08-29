@@ -140,6 +140,25 @@ def _imp_ptr[F: AnyType](imp: F) -> P:
     return Pointer(to=imp).unsafe_bitcast[P]()[]
 
 
+comptime BOX_IVAR = "__mojo_box"
+
+
+def box_offset(cls: ObjCClass) -> Int:
+    """Where the box pointer sits inside an instance, in bytes.
+
+    Read once per class after registration and cached by the caller: the
+    runtime settles it when the class is registered, and it does not move.
+    Returns 0 if the class has no box, which no caller should be asking about.
+    """
+    var ivar = external_call["class_getInstanceVariable", P](
+        P(unsafe_from_address=cls.as_object().addr()),
+        _leak_cstr(String(BOX_IVAR)),
+    )
+    if Int(ivar) == 0:
+        return 0
+    return external_call["ivar_getOffset", Int](ivar)
+
+
 def sel_dynamic(name: StaticString) -> P:
     """Register a selector by name at runtime (custom selectors included)."""
     return external_call["sel_registerName", P](name.unsafe_ptr())
@@ -188,6 +207,7 @@ struct ObjCClassRegistrar:
     var _cls: Int
     var _ok: Bool
     var _existing: Bool
+    var _has_box: Bool
 
     def __init__(
         out self,
@@ -217,8 +237,10 @@ struct ObjCClassRegistrar:
             self._cls = Int(already)
             self._ok = True
             self._existing = True
+            self._has_box = False
             return
         self._existing = False
+        self._has_box = False
 
         var sup = external_call["objc_getClass", P](
             _leak_cstr(String(superclass))
@@ -229,12 +251,14 @@ struct ObjCClassRegistrar:
             self._cls = 0
             self._ok = False
             self._existing = False
+            self._has_box = False
             return
         var cls = external_call["objc_allocateClassPair", P](
             sup, _leak_cstr(String(name)), Int(0)
         )
         self._cls = Int(cls)
         self._ok = Int(cls) != 0
+        self._has_box = False
 
     def add_method[
         F: AnyType
@@ -272,6 +296,33 @@ struct ObjCClassRegistrar:
             P(unsafe_from_address=self._cls), proto
         )
 
+    def add_box(mut self, size: __mlir_type.index) -> Bool:
+        """Reserve the instance variable that holds a class's fields.
+
+        One ivar, a pointer to a Mojo struct -- not one ivar per field. The
+        box is ordinary Mojo memory, so a field can be any Mojo type rather
+        than only what Objective-C ivar layout can describe, and construction
+        and destruction happen where Mojo expects them.
+
+        Must be called before `register`: the runtime refuses to add an ivar
+        to a registered class, and says so by returning false.
+
+        `size` is a raw `index` because the compiler hands it over as
+        `#kgen.param.expr<get_sizeof, ...>` -- a comptime expression the
+        elaborator resolves after layout -- and an unresolved expression will
+        not wrap in an `Int` the way a literal would.
+        """
+        if not self._ok or self._existing:
+            return False
+        self._has_box = True
+        return external_call["class_addIvar", Bool](
+            P(unsafe_from_address=self._cls),
+            _leak_cstr(String(BOX_IVAR)),
+            Int(SIMDLength(mlir_value=size)),
+            UInt8(3),  # log2 alignment: 8 bytes
+            _leak_cstr(String("^v")),
+        )
+
     def register(mut self) -> ObjCClass:
         """Finish the class. Returns a null ObjCClass if anything above
         failed, which is what a caller should check before instantiating."""
@@ -282,6 +333,17 @@ struct ObjCClassRegistrar:
                 P(unsafe_from_address=self._cls)
             )
         return ObjCClass(self._cls)
+
+    def box_offset_of(mut self) -> Int:
+        """Where this class's box sits inside an instance.
+
+        Read after registration, when the runtime has settled it; the compiler
+        caches the answer in a per-class global because a trampoline has only
+        an `id` to work from and cannot afford three runtime calls per message.
+        """
+        if not self._ok:
+            return 0
+        return box_offset(ObjCClass(self._cls))
 
     def register_and_instantiate(mut self) -> Int:
         """Finish the class and return the `id` of a fresh instance.

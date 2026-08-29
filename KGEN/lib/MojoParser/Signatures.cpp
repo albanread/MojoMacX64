@@ -1914,7 +1914,8 @@ static ASTType typeCheckVariadicList(ParsedArgument &arg, IREmitter &emitter,
 ///
 /// One pointer, whose lifetime belongs to the runtime while it is borrowed.
 /// See the borrow-convention note below for why that earns an exception.
-static bool isObjCClassType(ASTType type, SharedState &shared) {
+[[maybe_unused]] static bool isObjCClassType(ASTType type,
+                                            SharedState &shared) {
   if (type.isNull() || type.isTypeCheckErrorType())
     return false;
   ASTDecl *typeDecl = type.getDecl(shared);
@@ -2130,8 +2131,14 @@ static void typeCheckOneArgument(size_t idx, ASTDecl *fnDecl,
     // would have the trampoline reading a pointer to the pointer. Passing it
     // in a register is what the ABI already says; letting the class be
     // non-trivial is what keeps retain and release on copy and destroy.
-    if (conv == TypeConvention::RegisterPassableTrivial ||
-        isObjCClassType(type, shared))
+    // NOTE: sprint 2b added `|| isObjCClassType(type, shared)` here, so a
+    // trampoline could take `self` by value in a register. Sprint 3 takes it
+    // back out, and the box is why: a boxed class's `self` is a Ref into the
+    // box, not the id, so forcing it into a register asks for a copy of a type
+    // that is not implicitly copyable. The trampoline gets what it needs
+    // instead by declaring its own receiver as a raw pointer and doing the
+    // id -> +offset -> Ref<Self> conversion itself.
+    if (conv == TypeConvention::RegisterPassableTrivial)
       arg.kgenConvention = ArgConvention::ReadReg;
     break;
   }

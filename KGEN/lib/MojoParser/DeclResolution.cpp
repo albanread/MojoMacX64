@@ -3401,19 +3401,45 @@ static LogicalResult buildTraitConstraintsMap(
 // Callers are expected to invoke them in order on the same `ASTDecl`.
 //===----------------------------------------------------------------------===//
 
-/// For a struct or trait declaration, parse an optional conformance list
-/// without resolving the trait types or emitting constraints.
+/// funcdef   ::=  [decorators] "def" identifier [param_signature]
+///                "(" [argument_list] ")" ["->" expression] ":" suite
+/// The global caching where a class's box sits inside its instances.
 ///
-/// Set `allowConformanceConstraints` to `false` for declarations that don't
-/// support conditional conformance (traits and extensions).
-/// Step over `(Name, Name.Qualified, ...)` after a class name.
-///
-/// The statement parser has already read these into the decl's `objcBases`;
-/// this exists because signature resolution re-parses the same source and has
-/// to get past them. Deliberately not `parseOptionalConformanceListSyntax`:
-/// these are Objective-C names for the runtime to resolve, and reading them as
-/// Mojo traits would report `NSView` as an undefined trait -- a confusing lie
-/// about a line that is perfectly correct.
+/// One per class, keyed by name so every reference finds the same storage.
+/// `__init__` writes it once the runtime has settled the ivar's offset; the
+/// trampolines read it on every call, which is why it is a global rather than
+/// three runtime calls per message.
+static Value objcBoxOffsetGlobal(ImplicitLocOpBuilder &builder,
+                                 SharedState &shared, StringRef className) {
+  MLIRContext *ctx = shared.getContext();
+  std::string name = "vega.objc.boxoffset/" + className.str();
+  auto intType = IndexType::get(ctx);
+  return M::KGEN::POP::GlobalAllocOp::create(
+      builder, PointerType::get(intType),
+      StringAttr::get(name, M::KGEN::StringType::get(ctx)),
+      IntegerAttr::get(IndexType::get(ctx), 1),
+      M::KGEN::POP::GlobalAllocAddressSpace::IGNORE,
+      IntegerAttr::get(IndexType::get(ctx), 8),
+      // NO initializer, and that is load-bearing: the LLVM lowering's
+      // shared-by-name dedup (ConvertPOPGlobalAlloc, "COCOA: a fixed-name
+      // host global") applies only to initializer-less globals. Adding an
+      // explicit zero once minted _0/_1 copies per function, so __init__
+      // wrote one global while every trampoline read its own -- forever
+      // zero. Initializer-less lowers to BSS, which the loader zero-fills,
+      // so the zero sentinel holds regardless: instantiation registers the
+      // class before any message can dispatch, so the write precedes every
+      // read.
+      /*initializer=*/TypedAttr());
+}
+
+/// Does this class declare fields of its own, beyond the id every class has?
+static bool objcClassHasBox(StructDeclOp structOp) {
+  for (StructFieldOp field : structOp.getFieldDecls())
+    if (field.getName() != "__objc_id")
+      return true;
+  return false;
+}
+
 /// Synthesize the C-ABI function the Objective-C runtime will actually call
 /// for one method, and return it.
 ///
@@ -3422,8 +3448,7 @@ static LogicalResult buildTraitConstraintsMap(
 /// the Mojo method wants `(self, args...)`. `self` already lines up -- a class
 /// is one pointer passed in a register, which is what the borrow rule in
 /// Signatures.cpp was taught -- so the only structural difference is the
-/// `_cmd` slot, which nothing reads and which exists to occupy the second
-/// argument register.
+/// `_cmd` slot, which nothing reads and which exists to occupy x1.
 ///
 /// It cannot be skipped even so. A method body may raise, and unwinding into
 /// objc_msgSend is undefined, so the boundary is where an exception has to
@@ -3439,7 +3464,37 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
   if (selfType.isNull() || cmdType.isNull() || cmdType.isTypeCheckErrorType())
     return {};
 
+  // A method taking another class as an argument would need the same
+  // id-to-box conversion the receiver gets; nothing needs it yet, so it is
+  // refused rather than wired half-way.
+  const bool selfHasBox = objcClassHasBox(structOp);
+  Block *calleeArgs = methodOp.getBody();
+  for (unsigned i = 1, e = calleeArgs->getNumArguments(); i != e; ++i) {
+    Type t = calleeArgs->getArgument(i).getType();
+    if (isa<RefType>(t))
+      t = ASTType(t).getReferenceElementType().mlirType;
+    if (ASTDecl *argDecl = ASTType(t).getDecl(shared))
+      if (auto argStruct =
+              dyn_cast_or_null<StructDeclOp>(argDecl->getIfOperation()))
+        if (argStruct.getObjcClass())
+          return {};
+  }
+
   ASTType resultType = ASTType(methodOp.getUserResultType());
+
+  // A memory-only RESULT is refused for now, and the reason is ABI, not
+  // laziness. AAPCS returns a small aggregate in x0/x1 or v0-v3 and a large
+  // one through x8 -- MacModula2's cocoa-send notes record that getting x8
+  // wrong bus-errors -- while a Mojo memory-only result becomes a by-ref
+  // slot in the signature, which is neither. selectedRange (NSRange, x0/x1)
+  // is the first real customer; until results are classified and lowered per
+  // the C ABI, a method with such a result goes unregistered rather than
+  // registered to return garbage.
+  if (!resultType.isNull() && !resultType.isNoneType() &&
+      !resultType.isTypeCheckErrorType() &&
+      resultType.getRegisterPassability(declLoc, shared) ==
+          TypeConvention::MemoryOnly)
+    return {};
 
   MLIRContext *ctx = shared.getContext();
   auto selfName = StringAttr::get(ctx, "self");
@@ -3447,7 +3502,19 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
 
   // The receiver, the selector slot, then the method's own arguments passed
   // straight through.
-  SmallVector<Type> argTypes{selfType.mlirType, cmdType.mlirType};
+  //
+  // The invariant, learned the hard way: the receiver is a FOREIGN ABI VALUE
+  // -- a raw pointer in x0 -- until the box offset has been added. Modelling
+  // it as Ref<Self> with ReadMem materialised a stack copy of Self at the
+  // argument boundary, and every box address was then computed relative to
+  // the copy: the writes all survived lowering and all landed in dead stack.
+  //   id -> raw pointer + ivar offset -> Ref<Self>   (never: id -> Self -> +)
+  // A boxless class keeps the by-value path: its whole state is the one id
+  // field, which is exactly what x0 holds.
+  auto i8 = IntegerType::get(ctx, 8);
+  auto rawPtrType = PointerType::get(i8);
+  SmallVector<Type> argTypes{
+      selfHasBox ? Type(rawPtrType) : selfType.mlirType, cmdType.mlirType};
   SmallVector<ArgConvention> argConvs{ArgConvention::ReadReg,
                                       ArgConvention::ReadReg};
   SmallVector<StringAttr> argNames{selfName, cmdName};
@@ -3458,16 +3525,21 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
   for (unsigned i = 1, e = methodBody->getNumArguments(); i != e; ++i) {
     Type argType = methodBody->getArgument(i).getType();
 
-    // A reference-typed argument is one Mojo passes in memory. Objective-C
-    // passes its arguments by value, so forwarding one straight through would
-    // hand the method a pointer where it expects a value. Those are refused
-    // rather than registered wrongly.
+    // A memory-only argument -- CGRect in drawRect: is the canonical case --
+    // reaches the Mojo method as a reference (Mojo passes such values in
+    // memory), but Objective-C sends it BY VALUE in registers: CGRect is a
+    // homogeneous aggregate of four doubles and arrives in v0-v3. So the
+    // trampoline declares the value type and receives it per the C ABI, and
+    // the forwarding code below materialises it -- stores the registers into
+    // a local and passes the borrow -- because a register value cannot become
+    // a memory borrow by wishing (the emitter asserts, correctly, if asked).
     if (isa<RefType>(argType))
-      return {};
+      argType = ASTType(argType).getReferenceElementType().mlirType;
 
     argTypes.push_back(argType);
     argConvs.push_back(ArgConvention::ReadReg);
-    argNames.push_back(StringAttr::get(ctx, "arg" + std::to_string(i)));
+    argNames.push_back(
+        StringAttr::get(ctx, "arg" + std::to_string(i)));
     argKinds.push_back(PassingKind::PosOnly);
   }
 
@@ -3505,12 +3577,91 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
 
   CallOperands operands(CallSyntax::kMethodCall, &loc,
                         ExprDest(EC_ReturnValue));
-  operands.addSelf(ASTExprAnd<AnyValue>{
-      AnyValue(SBValue(trampoline.getBody()->getArgument(0))), &loc});
-  // Argument 1 is _cmd, which is dropped: that is the whole job.
+  // Registers at the boundary, memory inside. The trampoline's arguments are
+  // the C ABI's -- everything by value, the receiver in x0, a CGRect spread
+  // over v0-v3 -- but a Mojo method takes anything non-trivial as a memory
+  // borrow, `self` included, because inside Mojo a borrowed class has to be
+  // addressable (`self.__objc_id` is a field projection). So each such value
+  // is stored into a local and the borrow of the local is what is passed:
+  // the store is the conversion between the two calling conventions.
+  // Argument 1, `_cmd`, is dropped -- that is the rest of the job.
+  Block *calleeBody = methodOp.getBody();
+  auto forward = [&](unsigned trampIndex,
+                     unsigned calleeIndex) -> ASTExprAnd<AnyValue> {
+    Value arg = trampoline.getBody()->getArgument(trampIndex);
+    Type calleeType = calleeBody->getArgument(calleeIndex).getType();
+    if (isa<RefType>(calleeType)) {
+      VarDeclOp local = emitter.emitVarDecl(
+          "arg" + std::to_string(trampIndex), arg.getType(),
+          trampoline.getLoc(), VarDeclKind::Var);
+      RefStoreOp::create(builder, arg, local);
+      // A var local is mutable, so hand over an MLValue: `mut self` on a
+      // boxless class writes into it, and it decays to a borrow elsewhere.
+      return {AnyValue(MLValue(local)), &loc};
+    }
+    return {AnyValue(SBValue(arg)), &loc};
+  };
+  // The receiver. Boxed: the id arrived as the "reference" in x0; self is
+  // that reference moved along by the cached ivar offset -- the box lives
+  // inline in the object, so the conversion is an add, and the box's own
+  // first field holds the id (the registrar wrote it at instantiation).
+  if (selfHasBox) {
+    Value rawId = trampoline.getBody()->getArgument(0);
+    Value slot = objcBoxOffsetGlobal(builder, shared, structOp.getSymName());
+    auto immortal = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
+    Value slotRef =
+        RefFromPointerOp::create(builder, slot, immortal, false, false);
+    Value offset = RefLoadOp::create(builder, slotRef);
+    // Pointer arithmetic on the raw id, then -- and only then -- a Ref<Self>.
+    Value moved = M::KGEN::POP::OffsetOp::create(builder, rawId, offset);
+    Value typedPtr = M::KGEN::POP::PointerBitcastOp::create(
+        builder, PointerType::get(selfType.mlirType), moved);
+    Value boxRef = RefFromPointerOp::create(builder, typedPtr, immortal,
+                                            /*startUninit=*/false,
+                                            /*endUninit=*/false);
+
+    // Seed the box's id field from the incoming receiver, every call. A write
+    // at "box offset zero" was tried and was wrong: the id field is not first
+    // -- the parser places author fields before synthesized ones -- and this
+    // store goes through the field itself, so layout is the compiler's
+    // problem and no one else's. Eight bytes per message, next to an
+    // objc_msgSend that already happened.
+    StructFieldOp idField;
+    for (StructFieldOp f : structOp.getFieldDecls())
+      if (f.getName() == "__objc_id")
+        idField = f;
+    ASTType intAst = shared.lookupBuiltinType("Int", structDecl, declLoc);
+    if (idField && !intAst.isNull()) {
+      auto intDecl = dyn_cast_or_null<StructDeclOp>(
+          intAst.getDecl(shared)->getIfOperation());
+      StructFieldOp mlirValueField;
+      if (intDecl)
+        for (StructFieldOp f : intDecl.getFieldDecls())
+          if (f.getName() == "_mlir_value")
+            mlirValueField = f;
+      if (mlirValueField) {
+        Value idx = M::KGEN::POP::PointerToIndexOp::create(
+            builder, IndexType::get(ctx), rawId);
+        auto scalarIndex = M::KGEN::SIMDType::get(
+            1, M::KGEN::DTypeConstantAttr::get(
+                   ctx, M::KGEN::KGENDType(M::KGEN::KGENDType::index)));
+        Value scalar =
+            M::KGEN::POP::CastFromBuiltinOp::create(builder, scalarIndex, idx);
+        Value idFieldRef = RefStructGEROp::create(builder, boxRef, idField);
+        Value innerRef =
+            RefStructGEROp::create(builder, idFieldRef, mlirValueField);
+        RefStoreOp::create(builder, scalar, innerRef);
+      }
+    }
+
+    // A mutable lvalue, not a borrow: `mut self` methods write through it,
+    // and an MLValue decays to a borrow where the method is read-only.
+    operands.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(boxRef)), &loc});
+  } else {
+    operands.addSelf(forward(0, 0));
+  }
   for (unsigned i = 2, e = trampoline.getBody()->getNumArguments(); i != e; ++i)
-    operands.add(ASTExprAnd<AnyValue>{
-        AnyValue(SBValue(trampoline.getBody()->getArgument(i))), &loc});
+    operands.add(forward(i, i - 1));
   CValue result = emitter.emitNamedMethodCall(
       methodOp.getSourceNameAttr().getValue(), std::move(operands));
 
@@ -3529,8 +3680,8 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
 /// for `self` to live, which is fine while nothing runs and impossible the
 /// moment something does. The field is named with a leading underscore so it
 /// cannot collide with anything written in the class body, and it is the only
-/// field a class has: the ones the author declares go in a box behind it,
-/// which is sprint 3.
+/// field a class has: the ones the author declares go in a box behind it
+/// (COCOA_CLASS_DESIGN.md), which is sprint 3.
 static void synthesizeObjCIdField(ASTDecl &structDecl, StructDeclOp structOp,
                                   DeclResolver &resolver) {
   SharedState &shared = structDecl.getShared();
@@ -3549,21 +3700,14 @@ static void synthesizeObjCIdField(ASTDecl &structDecl, StructDeclOp structOp,
 
 /// Synthesize the function that builds this class in the Objective-C runtime.
 ///
-/// An Objective-C class is built at run time, not linked: something has to call
-/// objc_allocateClassPair, add every method, adopt every protocol and register
-/// the pair. This is that function, one per class.
-///
-/// It emits a CALL to std.objc's ObjCClassRegistrar rather than teaching the
-/// compiler the Objective-C runtime. std.objc already knows how to build a
-/// class and is already tested on its own; the compiler supplies only what
-/// solely it knows -- the name, the superclass, and the frameworks that must be
-/// loaded before the superclass can be resolved at all.
+/// PROBE (COCOA_CLASS_DESIGN.md sprint 2b): declaration only so far -- the body
+/// is empty. What it proves is that a class can carry a synthesized function at
+/// all, which every later step depends on.
 static void synthesizeObjCRegistration(ASTDecl &structDecl,
                                        StructDeclOp structOp,
                                        DeclResolver &resolver) {
   StructEmitter structEmitter(structDecl);
   SharedState &shared = structDecl.getShared();
-  const bool trace = ::getenv("VEGA_TRACE_OBJC_REGISTER") != nullptr;
   ASTType selfType = structDecl.getTypeDeclSelf();
   if (selfType.isNull())
     return;
@@ -3571,26 +3715,22 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   // The class's initializer. Registration is lazy in the sense that matters:
   // it happens when a class is first instantiated, and the registrar itself
   // is idempotent, so the second instance costs one objc_getClass.
-  //
   // `out self` by reference rather than returned in a register. A class is
   // register-passable but not *trivially* so, and loading one into an SSA
   // register is refused -- which is right: the load is where a retain would
   // have to happen once class references own what they point at.
-  auto initSelfName = StringAttr::get(shared.getContext(), "self");
+  auto selfName = StringAttr::get(shared.getContext(), "self");
   auto [funcOp, funcDecl] = structEmitter.synthesizeMethodInStruct(
       "__init__",
       /*argTypes=*/{selfType.getRefForArgument("self", /*isMut=*/true)},
       /*argConvs=*/{ArgConvention::ByRefResult},
       /*argListAttrs=*/
-      PogListAttr::get(shared.getContext(), {initSelfName},
+      PogListAttr::get(shared.getContext(), {selfName},
                        {PassingKind::Implicit}),
       shared.getNoneType(), SpecialFunctionKind::kInit);
-  if (!funcOp) {
-    if (trace)
-      llvm::errs() << "objc-register: " << structOp.getSymName()
-                   << ": synthesizeMethodInStruct failed\n";
+  if (!funcOp)
     return;
-  }
+
   ImplicitLocOpBuilder builder =
       ImplicitLocOpBuilder::atBlockEnd(funcOp.getLoc(), funcOp.getBody());
   builder.setInsertionPointToStart(funcOp.getBody());
@@ -3620,21 +3760,17 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
         {cast<TypedAttr>(StringAttr::get(
             text, StringType::get(shared.getContext())))});
     return emitter.emitConstructorCall(
-        ASTType(bound),
-        CallOperands(CallSyntax::kTypeCall, &loc, EC_CallArgValue));
+        ASTType(bound), CallOperands(CallSyntax::kTypeCall, &loc,
+                                     EC_CallArgValue));
   };
 
-  // The registrar is std.objc's, imported on demand: a class needs the
-  // Objective-C runtime whether or not the file that declares it thought to
-  // say so.
+  // The registrar is std.objc's, and it is imported on demand: a class needs
+  // the Objective-C runtime whether or not the file that declares it thought
+  // to say so.
   ASTType registrarType = shared.lookupStdlibType(
       {"std", "objc"}, "ObjCClassRegistrar", structDecl.getLoc());
-  if (registrarType.isNull() || registrarType.isTypeCheckErrorType()) {
-    if (trace)
-      llvm::errs() << "objc-register: " << structOp.getSymName()
-                   << ": std.objc.ObjCClassRegistrar not found\n";
+  if (registrarType.isNull() || registrarType.isTypeCheckErrorType())
     return;
-  }
 
   // Frameworks are handed over as one comma-separated argument and loaded by
   // the registrar before it resolves the superclass. The ordering is the whole
@@ -3653,14 +3789,11 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   if (auto bases = structOp.getObjcBasesAttr())
     superclass = cast<StringAttr>(bases[0]).getValue();
 
-  VarDeclOp registrarVar = emitter.emitVarDecl(
-      "registrar", registrarType.mlirType, funcOp.getLoc(), VarDeclKind::Var);
-  if (!registrarVar) {
-    if (trace)
-      llvm::errs() << "objc-register: " << structOp.getSymName()
-                   << ": could not declare the registrar var\n";
+  VarDeclOp registrarVar =
+      emitter.emitVarDecl("registrar", registrarType.mlirType,
+                          funcOp.getLoc(), VarDeclKind::Var);
+  if (!registrarVar)
     return;
-  }
 
   CallOperands ctorOperands(CallSyntax::kTypeCall, &loc,
                             ExprDest(MLValue(registrarVar), EC_CallArgValue));
@@ -3676,30 +3809,52 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   auto callOnRegistrar = [&](StringRef method, ArrayRef<StringRef> args) {
     CallOperands operands(CallSyntax::kMethodCall, &loc,
                           ExprDest(EC_TopLevelStmt));
-    operands.addSelf(
-        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    operands.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)),
+                                          &loc});
     for (StringRef arg : args)
       operands.add(ASTExprAnd<AnyValue>{AnyValue(literal(arg)), &loc});
     emitter.emitNamedMethodCall(method, std::move(operands));
   };
 
-  // Protocols, after the class exists and before it is registered. Adoption is
-  // not decoration: AppKit asks conformsToProtocol: in places --
-  // NSTextInputClient among them -- and refuses a class that merely answers
-  // the selectors.
-  if (auto bases = structOp.getObjcBasesAttr())
-    for (size_t i = 1, e = bases.size(); i != e; ++i) {
-      StringRef protocol = cast<StringAttr>(bases[i]).getValue();
-      callOnRegistrar("add_protocol", {protocol});
-      if (trace)
-        llvm::errs() << "objc-register: " << structOp.getSymName()
-                     << ":   add_protocol(\"" << protocol << "\")\n";
-    }
+  // The box, before registration -- the runtime refuses an ivar on a class
+  // already registered. The size travels as the same expression Mojo's own
+  // sizeof produces: get_sizeof over a TypeParamAttr and a current_target,
+  // resolved by the elaborator after layout, so nothing here knows the number.
+  const bool hasBox = objcClassHasBox(structOp);
+  if (hasBox) {
+    MLIRContext *ctx = shared.getContext();
+    CallOperands boxOps(CallSyntax::kMethodCall, &loc,
+                        ExprDest(EC_TopLevelStmt));
+    boxOps.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    auto typeOperand = TypeParamAttr::get(
+        selfType.mlirType, M::KGEN::TypeType::get(ctx));
+    auto targetOperand = ParamOperatorAttr::get(
+        POC::CurrentTarget, {}, M::KGEN::TargetType::get(ctx));
+    auto rawSize = ParamOperatorAttr::get(
+        POC::GetSizeOf, {cast<TypedAttr>(typeOperand),
+                         cast<TypedAttr>(targetOperand)},
+        IndexType::get(ctx));
+    Value sizeVal = ParamConstantOp::create(builder, rawSize);
+    boxOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(sizeVal)), &loc});
+    emitter.emitNamedMethodCall("add_box", std::move(boxOps));
+  }
 
-  // Every method that answers a selector. Their signatures have to be resolved
-  // first: the body path deliberately does not resolve functions, but the
-  // selector and the SDK encoding are recorded during signature resolution, so
-  // without this there is nothing yet to read.
+  // Protocols, after the class exists and before it is registered: AppKit
+  // asks conformsToProtocol: in places -- NSTextInputClient among them -- and
+  // refuses a class that merely answers the selectors.
+  if (auto bases = structOp.getObjcBasesAttr())
+    for (size_t i = 1, e = bases.size(); i != e; ++i)
+      callOnRegistrar("add_protocol", {cast<StringAttr>(bases[i]).getValue()});
+
+  // Every method that answers a selector. Collected in full before anything
+  // is synthesized: synthesizing a trampoline adds a declaration to this very
+  // scope, and doing that while walking it invalidates the walk -- which
+  // presents as the compiler segfaulting, not as a diagnostic.
+  //
+  // Their signatures have to be resolved first, too. The body path
+  // deliberately does not resolve functions, but the selector and the SDK
+  // encoding are recorded during signature resolution, so without this there
+  // is nothing yet to read.
   struct ObjCMethod {
     FnOp op;
     StringRef selector;
@@ -3746,19 +3901,15 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     operands.add(ASTExprAnd<AnyValue>{AnyValue(literal(method.encoding)), &loc});
     operands.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(imp)), &loc});
     emitter.emitNamedMethodCall("add_method", std::move(operands));
-
-    if (trace)
-      llvm::errs() << "objc-register: " << structOp.getSymName()
-                   << ":   add_method(\"" << method.selector
-                   << "\", \"" << method.encoding << "\", IMP)\n";
   }
 
   // Register, make an instance, and keep its `id`: the three things that
   // turn a declaration into something Cocoa can be handed.
-  CallOperands finish(CallSyntax::kMethodCall, &loc, ExprDest(EC_CallArgValue));
+  CallOperands finish(CallSyntax::kMethodCall, &loc,
+                      ExprDest(EC_CallArgValue));
   finish.addSelf(ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
-  CValue objcId = emitter.emitNamedMethodCall("register_and_instantiate",
-                                              std::move(finish));
+  CValue objcId =
+      emitter.emitNamedMethodCall("register_and_instantiate", std::move(finish));
 
   StructFieldOp idField;
   for (StructFieldOp field : structOp.getFieldDecls())
@@ -3767,18 +3918,73 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   if (!idField)
     return;
 
-  Value selfValue =
-      funcOp.getBody()->getArgument(funcOp.getBody()->getNumArguments() - 1);
+  Value selfValue = funcOp.getBody()->getArgument(
+      funcOp.getBody()->getNumArguments() - 1);
+
+  // Every field default-constructed, id included: definite initialization
+  // rightly refuses an __init__ that returns half a value. The zeroes match
+  // the box's own ground state -- the runtime zero-fills ivars at alloc --
+  // and the id is overwritten with the real pointer just below. A field whose
+  // type has no default init is an error naming the field, not a mystery.
+  for (StructFieldOp field : structOp.getFieldDecls()) {
+    ASTType fieldType = field.getReboundType(
+        sugarCast<LIT::StructType>(selfType.mlirType),
+        &shared.getEvaluationContext());
+    Value ref = RefStructGEROp::create(builder, selfValue, field);
+    CallOperands init(CallSyntax::kTypeCall, &loc,
+                      ExprDest(MLValue(ref), EC_ReturnValue));
+    emitter.emitConstructorCall(fieldType, std::move(init));
+  }
+
   auto fieldRef = RefStructGEROp::create(builder, selfValue, idField);
   emitter.emitStoreToLValue({objcId, &loc}, MLValue(fieldRef),
                             EC_AttributeRefBase);
-  emitter.emitNormalReturn(funcOp.getLoc());
+  // Where the runtime put the box: settled at registration, constant after,
+  // read once here and cached in a global the trampolines can reach -- they
+  // have only an `id` to work from.
+  if (hasBox) {
+    CallOperands offsetOps(CallSyntax::kMethodCall, &loc,
+                           ExprDest(EC_CallArgValue));
+    offsetOps.addSelf(
+        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    CValue offset =
+        emitter.emitNamedMethodCall("box_offset_of", std::move(offsetOps));
+    if (!offset.getIfSRValue()) {
+      // A silent skip here is how "everything reads zero" gets debugged for a
+      // day. If the shape of box_offset_of's result ever changes, say so.
+      shared.emitError(structDecl.getLoc(),
+                       "internal: box_offset_of did not produce a register "
+                       "value; the box offset cannot be cached");
+      return;
+    }
+    if (Value offsetVal = offset.getIfSRValue()) {
+      // The Mojo Int is a struct around an index; the slot holds the index,
+      // because that is what pop.offset consumes in the trampolines. The
+      // extract op wants a bare struct type, so any sugar is rebound away
+      // first -- the same dance ExprNodes does before every extract.
+      offsetVal = emitter.emitRebindOpIfNeeded(
+          offsetVal, SugarAttr::strip(offsetVal.getType()),
+          structDecl.getLoc());
+      auto scalarIndex = M::KGEN::SIMDType::get(
+          1, M::KGEN::DTypeConstantAttr::get(
+                 shared.getContext(),
+                 M::KGEN::KGENDType(M::KGEN::KGENDType::index)));
+      Value asScalar = LIT::StructExtractOp::create(
+          builder, builder.getLoc(), scalarIndex, offsetVal,
+          StringAttr::get(shared.getContext(), "_mlir_value"));
+      Value rawOffset = M::KGEN::POP::CastToBuiltinOp::create(
+          builder, IndexType::get(shared.getContext()), asScalar);
+      Value slot = objcBoxOffsetGlobal(builder, shared, structOp.getSymName());
+      auto immortal = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
+      Value slotRef =
+          RefFromPointerOp::create(builder, slot, immortal, false, false);
+      RefStoreOp::create(builder, rawOffset, slotRef);
+    }
+  }
 
-  if (trace)
-    llvm::errs() << "objc-register: " << structOp.getSymName()
-                 << ": registrar(name=\"" << structOp.getSymName()
-                 << "\", superclass=\"" << superclass << "\", frameworks=\""
-                 << frameworks << "\")\n";
+  emitter.emitNormalReturn(funcOp.getLoc());
+  return;
+
 }
 
 /// Check a class's bases against the Objective-C runtime, and record which
@@ -4813,21 +5019,6 @@ ParseResult DeclResolver::resolveBody(StructDeclOp structOp, Lexer &lexer,
       auto fieldOp = dyn_cast_or_null<StructFieldOp>(decl->getIfOperation());
       if (!fieldOp)
         continue;
-
-      // A class's fields belong in a box reached through one hidden ivar, not
-      // in the class type -- which is one pointer and nothing else
-      // (COCOA_CLASS_DESIGN.md, "Fields"). Letting one through here would not
-      // fail, which is the danger: it would quietly become part of the
-      // reference's own layout, so `class C: var n: Int` would make C an Int
-      // rather than something pointing at one. Sprint 3 builds the box.
-      if (structOp.getObjcClass()) {
-        emitError(decl->getLoc())
-            << "class fields are not implemented yet: '"
-            << fieldOp.getName()
-            << "' -- COCOA_CLASS_DESIGN.md sprint 3";
-        hasBadField = true;
-        continue;
-      }
 
       if (failed(resolveSignature(*decl, decl->getLoc()))) {
         hasBadField = true;
