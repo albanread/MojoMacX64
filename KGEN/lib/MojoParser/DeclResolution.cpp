@@ -1947,6 +1947,55 @@ AnyValue DeclResolver::resolveAnonymousClosure(const LambdaNode *node,
 
 /// funcdef   ::=  [decorators] "def" identifier [param_signature]
 ///                "(" [argument_list] ")" ["->" expression] ":" suite
+/// The Objective-C selector a class method answers to, or nothing if the
+/// method is private to Mojo and never reaches the runtime.
+///
+/// Every `_` becomes `:` -- `drawRect_` is `drawRect:`,
+/// `outlineView_child_ofItem_` is `outlineView:child:ofItem:`. That is the
+/// PyObjC convention, mechanical and twenty years proven
+/// (COCOA_CLASS_DESIGN.md decision 2).
+///
+/// A leading underscore means the method is Mojo's own and is not exposed.
+/// That rule is doing real work. Without it, every snake_case helper in a
+/// class -- and Mojo is a snake_case language -- would derive a nonsense
+/// selector like `my:helper` and be rejected for having a colon it never
+/// wanted. With it, `_tab_width` is simply a private method, which is what
+/// both Mojo and Python already take a leading underscore to mean, and the
+/// dunders come along for free.
+///
+/// Returns nullopt for a private or dunder name. On a colon/argument mismatch
+/// it diagnoses and returns nullopt, because a wrong selector is worse than
+/// none: it registers, and then the message the framework sends goes nowhere.
+static std::optional<std::string>
+deriveObjCSelector(SharedState &shared, StringRef name, size_t argsAfterSelf,
+                   SMLoc loc) {
+  if (name.starts_with("_"))
+    return std::nullopt;
+
+  std::string selector;
+  selector.reserve(name.size());
+  size_t colons = 0;
+  for (char c : name) {
+    if (c == '_') {
+      selector += ':';
+      ++colons;
+    } else {
+      selector += c;
+    }
+  }
+
+  if (colons != argsAfterSelf) {
+    shared.emitError(loc)
+        << "method '" << name << "' derives the selector '" << selector
+        << "', which takes " << colons << " argument"
+        << (colons == 1 ? "" : "s") << ", but the method declares "
+        << argsAfterSelf << " after 'self'; an underscore in the name is a "
+           "colon in the selector";
+    return std::nullopt;
+  }
+  return selector;
+}
+
 LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
                                              ASTDecl &decl) {
   ParserBase p(shared, lexer);
@@ -2215,6 +2264,29 @@ LogicalResult DeclResolver::resolveSignature(FnOp funcOp, Lexer &lexer,
                            baseName, closureExternalRefConstraints);
   if (!signature)
     return failure();
+
+  // A method of an Objective-C class carries the selector the runtime will
+  // dispatch to it by. Derived here, where the signature is finally known,
+  // because the derivation is a claim about the argument count and this is the
+  // first point that can check it. Registration (sprint 2b) reads the
+  // attribute rather than re-deriving it, so there is one rule in one place.
+  if (auto ownerClass = dyn_cast_or_null<StructDeclOp>(
+          parentDecl ? parentDecl->getIfOperation() : nullptr);
+      ownerClass && ownerClass.getObjcClass() && !funcOp.getSynthetic()) {
+    size_t argsAfterSelf = 0;
+    for (const ParsedArgument &arg : fnSignature.parsedArgs) {
+      // The result slot is not an argument anybody wrote.
+      if (arg.convention == ParsedArgument::kConventionByRefResult)
+        continue;
+      if (arg.name && arg.name.getValue() == "self")
+        continue;
+      ++argsAfterSelf;
+    }
+    if (auto selector = deriveObjCSelector(shared, baseName.getValue(),
+                                           argsAfterSelf, decl.getLoc()))
+      funcOp->setAttr("objcSelector",
+                      StringAttr::get(getContext(), *selector));
+  }
 
   // Check for API author error: stable function should return stable types.
   checkStableFunctionReturnType(decl, ASTType(signature.getUserResultType()),
@@ -3144,6 +3216,30 @@ static LogicalResult buildTraitConstraintsMap(
 ///
 /// Set `allowConformanceConstraints` to `false` for declarations that don't
 /// support conditional conformance (traits and extensions).
+/// Step over `(Name, Name.Qualified, ...)` after a class name.
+///
+/// The statement parser has already read these into the decl's `objcBases`;
+/// this exists because signature resolution re-parses the same source and has
+/// to get past them. Deliberately not `parseOptionalConformanceListSyntax`:
+/// these are Objective-C names for the runtime to resolve, and reading them as
+/// Mojo traits would report `NSView` as an undefined trait -- a confusing lie
+/// about a line that is perfectly correct.
+static ParseResult skipObjCBaseList(ParserBase &p) {
+  if (!p.getToken().is(Token::l_paren) || p.getToken().isStartOfLine())
+    return success();
+  p.consumeToken(Token::l_paren);
+  while (!p.getToken().is(Token::r_paren)) {
+    if (p.parseIdentifier("expected base class or protocol name"))
+      return failure();
+    while (p.consumeIf(Token::dot))
+      if (p.parseIdentifier("expected name after '.'"))
+        return failure();
+    if (!p.consumeIf(Token::comma))
+      break;
+  }
+  return p.parseToken(Token::r_paren, "expected ')' in class base list");
+}
+
 static ParseResult parseOptionalConformanceListSyntax(
     ParserBase &p, SmallVectorImpl<ParsedConformanceEntry> &parsedConformances,
     std::optional<size_t> stmtIndent, bool allowConformanceConstraints) {
@@ -3584,38 +3680,19 @@ static LogicalResult parseExplicitDestroyMessage(SharedState &shared,
 ///
 LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
                                              Lexer &lexer, ASTDecl &decl) {
-  // A class parses (COCOA_CLASS_DESIGN.md sprint 1) but does not yet lower.
-  // Refusing here, before anything below runs, is deliberate: the rest of this
-  // function is the value-type pipeline -- comptime parameters, a conformance
-  // list read as Mojo traits, and the unconditional injection of AnyType,
-  // Deinitable and Movable -- and none of it describes a reference type whose
-  // layout belongs to the Objective-C runtime. Sprint 2 gives classes their
-  // own path rather than teaching this one to be two things.
-  if (structOp.getObjcClass()) {
-    auto diag = emitError(decl.getLoc());
-    diag << "class lowering is not implemented yet: '" << structOp.getSymName()
-         << "' parses, but declaring an Objective-C class from Mojo is "
-            "COCOA_CLASS_DESIGN.md sprint 2";
-    // Say what the header was understood to mean. It tells the reader the
-    // parse was not the problem, it makes a mistyped base list visible now
-    // rather than in sprint 2, and it is the only window onto the parsed shape
-    // while there is no IR to print.
-    if (auto bases = structOp.getObjcBasesAttr()) {
-      std::string shape;
-      llvm::raw_string_ostream os(shape);
-      os << "superclass '" << cast<StringAttr>(bases[0]).getValue() << "'";
-      if (bases.size() > 1) {
-        os << ", protocols ";
-        for (size_t i = 1, e = bases.size(); i != e; ++i) {
-          if (i > 1)
-            os << ", ";
-          os << "'" << cast<StringAttr>(bases[i]).getValue() << "'";
-        }
-      }
-      diag.attachNote(decl.getLoc()) << shape;
-    }
-    return failure();
-  }
+  // A class (COCOA_CLASS_DESIGN.md) shares this pipeline rather than getting a
+  // parallel one, and the reason is the design's own conclusion: a class type
+  // *is* a register-passable struct of one pointer, whose copy retains and
+  // whose destructor releases. Everything below that describes such a type --
+  // the self type, the injected AnyType/Deinitable/Movable, the canonical
+  // trait -- is as true of a class as of a struct. Three things differ, and
+  // they are marked `isClass` where they occur:
+  //
+  //   1. the keyword the re-parse expects;
+  //   2. the parenthesised list, which for a class holds Objective-C names
+  //      already captured at parse time, not Mojo traits to resolve;
+  //   3. the convention: a reference is passed in a register, not in memory.
+  const bool isClass = structOp.getObjcClass();
 
   ParserBase p(shared, lexer);
   auto decoratorExprs = p.parseDecorators(decl);
@@ -3634,16 +3711,22 @@ LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
   SmallVector<ParsedConformanceEntry> parsedConformances;
   SmallVector<ParsedTraitConstraint> parsedConstraints;
   DenseSet<TraitSymbolAttr> explicitTraits;
-  if (p.parseToken(Token::kw_struct,
+  if (p.parseToken(isClass ? Token::kw_class : Token::kw_struct,
                    "internal error: checked by stmt parser") ||
       p.parseIdentifier("internal error: checked by stmt parser",
                         &identifierLoc) ||
       parsedParams.parseParametersIfPresent(p, ArgListKind::kParamList) ||
-      parseOptionalConformanceListSyntax(
-          p, parsedConformances, sigDecl.getIndentation(),
-          /*allowConformanceConstraints=*/true) ||
+      // (2) A class's bases are Objective-C class and protocol names, resolved
+      // against the runtime and not against Mojo's trait system. The statement
+      // parser already read them into `objcBases`; here they only have to be
+      // stepped over, because this re-parse walks the same source.
+      (isClass ? skipObjCBaseList(p)
+               : parseOptionalConformanceListSyntax(
+                     p, parsedConformances, sigDecl.getIndentation(),
+                     /*allowConformanceConstraints=*/true)) ||
       parsedParams.parseTrailingConstraintsIfPresent(p) ||
-      p.parseToken(Token::colon, "expected ':' in struct definition") ||
+      p.parseToken(Token::colon, isClass ? "expected ':' in class definition"
+                                         : "expected ':' in struct definition") ||
       decl.isErroneous())
     return failure();
 
@@ -3731,7 +3814,11 @@ LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
   decl.setTypeDeclSelf(ASTDecl::computeSelfTypeForStruct(structOp));
 
   // Structs are memory-only unless they opt-in to being passed in registers.
-  structOp.setConvention(TypeConvention::MemoryOnly);
+  // (3) A class is a pointer: it is passed in a register, always. Not trivial,
+  // though -- copying one retains and destroying one releases, which is why
+  // this is RegisterPassable and not RegisterPassableTrivial.
+  structOp.setConvention(isClass ? TypeConvention::RegisterPassable
+                                 : TypeConvention::MemoryOnly);
 
   // Now that we have the basic struct set up, process signature decorators.
   Decorators(decl).applySignatureDecorators(
@@ -4103,6 +4190,21 @@ ParseResult DeclResolver::resolveBody(StructDeclOp structOp, Lexer &lexer,
       auto fieldOp = dyn_cast_or_null<StructFieldOp>(decl->getIfOperation());
       if (!fieldOp)
         continue;
+
+      // A class's fields belong in a box reached through one hidden ivar, not
+      // in the class type -- which is one pointer and nothing else
+      // (COCOA_CLASS_DESIGN.md, "Fields"). Letting one through here would not
+      // fail, which is the danger: it would quietly become part of the
+      // reference's own layout, so `class C: var n: Int` would make C an Int
+      // rather than something pointing at one. Sprint 3 builds the box.
+      if (structOp.getObjcClass()) {
+        emitError(decl->getLoc())
+            << "class fields are not implemented yet: '"
+            << fieldOp.getName()
+            << "' -- COCOA_CLASS_DESIGN.md sprint 3";
+        hasBadField = true;
+        continue;
+      }
 
       if (failed(resolveSignature(*decl, decl->getLoc()))) {
         hasBadField = true;
