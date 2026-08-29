@@ -63,7 +63,7 @@ diffed against their tree at that commit, one commit pushed.
    the objc regions of MojoParser, CocoaKB) against `mojococoa/main`, fails on
    any divergence not in `tools/parity-allowlist.txt`. From here it runs as
    part of every step's exit criteria.
-5. **Port `spikes/run-cocoa-checks.sh`** — the whole cocoa suite (spikes,
+5. ~~**Port `spikes/run-cocoa-checks.sh`**~~ **DONE.** — the whole cocoa suite (spikes,
    parser tests, ABI oracle, parity check) behind one command. No more
    hand-typed test lists.
 6. **`@objc`** — their `8723fbd9`.
@@ -96,8 +96,12 @@ diffed against their tree at that commit, one commit pushed.
 
 ## Standing verification
 
-- After every step: the regression list (spikes + basics + class suite), the
-  ABI oracle, and — once step 4 lands — the parity checker.
+- After every step, run **`./spikes/run-cocoa-checks.sh`**. It is the whole
+  cocoa suite, the must-fail set, the clang ABI oracle and the parity checker
+  behind one command, and it reports `NOT PORTED` for anything in their test
+  list this fork has not reached — so the gap is visible without being a
+  failure. Do not hand-type a test list; that is how coverage drifts.
+- The GPU regression (spikes + basics) after any dialect or stdlib change.
 - Rebuild all 16 `.mojoc` packages after any dialect or stdlib change; a
   stale package presents as a false regression ("precompiled file is
   incompatible", or `mojo run` import failures).
