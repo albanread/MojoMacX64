@@ -1910,6 +1910,20 @@ static ASTType typeCheckVariadicList(ParsedArgument &arg, IREmitter &emitter,
 /// their type+default value expressions as PValues, so we need to ensure that
 /// they are emitted and have declarations registered in the scope so that later
 /// lookups can find them.
+/// Is this an Objective-C class declared with `class`?
+///
+/// One pointer, whose lifetime belongs to the runtime while it is borrowed.
+/// See the borrow-convention note below for why that earns an exception.
+static bool isObjCClassType(ASTType type, SharedState &shared) {
+  if (type.isNull() || type.isTypeCheckErrorType())
+    return false;
+  ASTDecl *typeDecl = type.getDecl(shared);
+  if (!typeDecl)
+    return false;
+  auto structOp = dyn_cast_or_null<StructDeclOp>(typeDecl->getIfOperation());
+  return structOp && structOp.getObjcClass();
+}
+
 static void typeCheckOneArgument(size_t idx, ASTDecl *fnDecl,
                                  TypeCheckedFnSignature &tcSignature) {
   ParsedArgument &arg = tcSignature.argList.parsedArgs[idx];
@@ -2105,7 +2119,19 @@ static void typeCheckOneArgument(size_t idx, ASTDecl *fnDecl,
     // We can pass trivial register borrowed arguments in a register.  We cannot
     // pass non-trivial ones because we cannot diagnose ownership and have other
     // lifetime issues.
-    if (conv == TypeConvention::RegisterPassableTrivial)
+    //
+    // An Objective-C class reference is the exception, and deliberately so.
+    // The restriction above is about lifetime tracking, not about how a value
+    // fits in a register -- see the FIXME. A class is one pointer, and when it
+    // is borrowed the object's lifetime is the runtime's to guarantee: a
+    // receiver is alive for the duration of the message send by construction.
+    // It also has to be this way. Objective-C hands a method its receiver by
+    // value in the first argument register, so a `self` passed by reference
+    // would have the trampoline reading a pointer to the pointer. Passing it
+    // in a register is what the ABI already says; letting the class be
+    // non-trivial is what keeps retain and release on copy and destroy.
+    if (conv == TypeConvention::RegisterPassableTrivial ||
+        isObjCClassType(type, shared))
       arg.kgenConvention = ArgConvention::ReadReg;
     break;
   }
