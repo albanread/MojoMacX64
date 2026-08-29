@@ -15,6 +15,7 @@ from std.memory import OpaquePointer, MutPointer, unsafe_destroy_n
 from std.collections.string.string_span import _get_kgen_string
 from std.sys._cocoakb import cocoakb_selector_encoding
 from .runtime import ObjCClass, ObjCObject, msg_send, sel, load_framework_dynamic
+from std.reflection import reflect
 
 
 comptime P = OpaquePointer[MutUntrackedOrigin]
@@ -286,7 +287,7 @@ struct ObjCClassRegistrar:
             #
             # Offset zero means no box: an ivar can never live there, because
             # that is where the isa pointer is.
-            self._has_box = box_offset(ObjCClass(Int(already))) != 0
+            self._has_box = box_offset(ObjCClass(Int(already)), name) != 0
             return
         self._existing = False
         self._has_box = False
@@ -308,6 +309,37 @@ struct ObjCClassRegistrar:
         self._cls = Int(cls)
         self._ok = Int(cls) != 0
         self._has_box = False
+
+    def __init__(
+        out self,
+        name: StringSlice,
+        superclass: StringSlice,
+        frameworks: StringSlice,
+        ensure_super: fn () -> None,
+    ):
+        """As above, but the superclass is another Mojo `class`.
+
+        A Mojo class does not exist in the runtime until something registers
+        it, and registration is lazy: it happens the first time that class is
+        instantiated. So `class B(A)` instantiated before any `A` ever was
+        would resolve its superclass to nil and allocate its pair against
+        nothing -- a root class, answering nothing, with no diagnostic. This
+        is where that is prevented.
+
+        `ensure_super` is compiler-synthesized and does exactly one thing:
+        construct an instance of the base, which registers it. It is called
+        only when the runtime does not have the class yet, so the cost is one
+        base instance per PROCESS, not per subclass instantiation. That
+        instance is not released -- there is no one to release it -- which is
+        the same bargain the class objects themselves make.
+        """
+        if (
+            Int(external_call["objc_getClass", P](_leak_cstr(String(superclass))))
+            == 0
+        ):
+            ensure_super()
+        self = Self(name, superclass, frameworks)
+
 
     def add_method[
         F: AnyType
@@ -345,7 +377,9 @@ struct ObjCClassRegistrar:
             P(unsafe_from_address=self._cls), proto
         )
 
-    def add_box(mut self, size: __mlir_type.index) -> Bool:
+    def add_box(
+        mut self, size: __mlir_type.index, class_name: StringSlice
+    ) -> Bool:
         """Reserve the instance variable that holds a class's fields.
 
         One ivar, a pointer to a Mojo struct -- not one ivar per field. The
@@ -367,7 +401,7 @@ struct ObjCClassRegistrar:
         self._has_box = True
         return external_call["class_addIvar", Bool](
             P(unsafe_from_address=self._cls),
-            _leak_cstr(String(BOX_IVAR)),
+            _leak_cstr(box_ivar_name(class_name)),
             Int(SIMDLength(mlir_value=size)),
             UInt8(3),  # log2 alignment: 8 bytes
             _leak_cstr(String("^v")),
@@ -386,9 +420,16 @@ struct ObjCClassRegistrar:
         """
         if not self._ok or self._existing or not self._has_box:
             return False
+        # The channel to the IMP: see `_DEFINING_CLASS_PREFIX`.
+        comptime slot = StaticString(
+            _get_kgen_string[_DEFINING_CLASS_PREFIX, reflect[T].base_name()]()
+        )
+        named_global[slot, Int]()[] = self._cls
         return self.add_method("dealloc", "v@:", _box_dealloc_imp[T])
 
-    def box_of(mut self, id: Int, size: __mlir_type.index) -> P:
+    def box_of(
+        mut self, id: Int, size: __mlir_type.index, class_name: StringSlice
+    ) -> P:
         """Where an instance's box lives, as a POINTER.
 
         The compiler needs to construct the fields into the box, and for that
@@ -407,8 +448,11 @@ struct ObjCClassRegistrar:
         say so.
         """
         var bytes = Int(SIMDLength(mlir_value=size))
-        if id != 0 and self._has_box and self._ok:
-            var off = box_offset(ObjCClass(self._cls))
+        # Looked up by NAME on the instance's class, not gated on `_has_box`:
+        # a derived class also constructs its BASE's box, and that ivar
+        # belongs to the base. The runtime walks the chain to find it.
+        if id != 0 and self._ok:
+            var off = box_offset(ObjCClass(self._cls), class_name)
             if off != 0:
                 return P(unsafe_from_address=id + off)
         return P(
@@ -429,7 +473,7 @@ struct ObjCClassRegistrar:
         return ObjCClass(self._cls)
 
 
-    def box_offset_of(mut self) -> Int:
+    def box_offset_of(mut self, class_name: StringSlice) -> Int:
         """Where this class's box sits inside an instance.
 
         Read after registration, when the runtime has settled it; the compiler
@@ -438,7 +482,7 @@ struct ObjCClassRegistrar:
         """
         if not self._ok:
             return 0
-        return box_offset(ObjCClass(self._cls))
+        return box_offset(ObjCClass(self._cls), class_name)
 
     def register_and_instantiate(mut self) -> Int:
         """Finish the class and return the `id` of a fresh instance.
@@ -476,26 +520,43 @@ struct _ObjCSuper(TrivialRegisterPassable):
     var super_class: Int
 
 
-def objc_super_send_void(id: Int, selector: P):
+def objc_super_send_void(id: Int, defining_class: Int, selector: P):
     """`[super <selector>]`, for a selector returning nothing.
 
-    Needed by any override that has to let its superclass do the real work --
-    `dealloc` is the one the compiler generates, but `drawRect:`, `mouseDown:`
-    and most of AppKit's other overridables want it too. Ordinary dispatch
-    cannot express this: `objc_msgSend` on `self` finds the override again.
+    Needed by any override that has to let its superclass do the real work.
+    Ordinary dispatch cannot express it: `objc_msgSend` on `self` finds the
+    override again.
 
-    The lookup starts above the class that DEFINES the method, which for a
-    Mojo `class` is the class itself, so `object_getClass` is the right
-    starting point here.
+    `defining_class` is the class the CALLING METHOD IS DEFINED ON, and it
+    must not be `object_getClass(id)`. The difference is invisible until a
+    Mojo class inherits from another and then it is total: for an instance of
+    `Leaf`, a method defined on `Middle` that asked the instance for its class
+    would look above LEAF, find `Middle` -- itself -- and call itself forever.
+    That is the classic Objective-C infinite loop, and it cost a stack
+    overflow in `dealloc` before this argument existed.
+
+    `objc_super`'s second word is not the class to send to. It is the class to
+    start looking ABOVE.
     """
-    if id == 0:
+    if id == 0 or defining_class == 0:
         return
-    var cls = external_call["object_getClass", P](P(unsafe_from_address=id))
-    var sup = external_call["class_getSuperclass", P](cls)
+    var sup = external_call["class_getSuperclass", P](
+        P(unsafe_from_address=defining_class)
+    )
     var frame = _ObjCSuper(id, Int(sup))
     external_call["objc_msgSendSuper", NoneType](
         MutPointer(to=frame), selector
     )
+
+
+comptime _DEFINING_CLASS_PREFIX = "boxclass/"
+"""Where `add_dealloc` leaves the class it registered a dealloc on.
+
+A plain function pointer closes over nothing, so the IMP cannot be told which
+class it belongs to -- and it must know, both to find its own box and to send
+`[super dealloc]` one level up rather than into itself. The type parameter is
+the key: it is the class, at compile time, so a global named for it is an
+exact and allocation-free channel between registration and dispatch."""
 
 
 fn _box_dealloc_imp[T: Deinitable](self_: P, _cmd: P):
@@ -511,11 +572,38 @@ fn _box_dealloc_imp[T: Deinitable](self_: P, _cmd: P):
        it leaks every object; doing it first would run the destructor over
        freed memory.
 
+    Everything here keys off the class this IMP was REGISTERED ON, which
+    `add_dealloc` left in a global named for T, and never off the instance's
+    dynamic class. With inheritance the two differ, and both uses would be
+    wrong: `object_getClass` on an instance of a derived class answers the
+    derived class, so this would destroy the derived box a second time while
+    its own was never touched, and then send `[super dealloc]` to itself
+    forever.
+
+    Inheritance then falls out: the derived dealloc empties the derived box
+    and passes `[super dealloc]` up, which reaches the base's dealloc, which
+    empties the base box and passes it on again.
+
     `fn`, not `def`: an IMP is C-ABI and may not raise. The runtime calls this
     with (self, _cmd) and ignores the result.
     """
-    var cls = external_call["object_getClass", P](self_)
-    var off = box_offset(ObjCClass(Int(cls)))
+    comptime name = reflect[T].base_name()
+    comptime cls_slot = StaticString(
+        _get_kgen_string[_DEFINING_CLASS_PREFIX, name]()
+    )
+    comptime off_slot = StaticString(
+        _get_kgen_string["boxoffset.dealloc/", name]()
+    )
+    var defining = named_global[cls_slot, Int]()[]
+    if defining == 0:
+        return  # Never registered by us; nothing here is ours to free.
+
+    # Cached, because the lookup leaks a C string and a dealloc is not rare.
+    var cache = named_global[off_slot, Int]()
+    var off = cache[]
+    if off == 0:
+        off = box_offset(ObjCClass(defining), name)
+        cache[] = off
     if off != 0:
         unsafe_destroy_n(
             MutPointer[T, MutUntrackedOrigin](
@@ -523,13 +611,26 @@ fn _box_dealloc_imp[T: Deinitable](self_: P, _cmd: P):
             ),
             1,
         )
-    objc_super_send_void(Int(self_), sel_dynamic("dealloc"))
+    objc_super_send_void(Int(self_), defining, sel_dynamic("dealloc"))
 
 
-comptime BOX_IVAR = "__mojo_box"
+comptime BOX_IVAR_PREFIX = "__mojo_box_"
+"""Every class's box is its OWN ivar, named for the class.
+
+One shared name would be ambiguous the moment a Mojo `class` inherits from
+another: `class_getInstanceVariable` walks the superclass chain and answers
+with the nearest, so a base's dealloc looking up "__mojo_box" on an instance
+of a derived class would find the DERIVED box and destroy it a second time
+while the base's own was never touched. Naming the ivar for the class it
+belongs to removes the question rather than reasoning about it."""
 
 
-def box_offset(cls: ObjCClass) -> Int:
+def box_ivar_name(class_name: StringSlice) -> String:
+    """The ivar name for a class's box. See `BOX_IVAR_PREFIX`."""
+    return String(BOX_IVAR_PREFIX) + String(class_name)
+
+
+def box_offset(cls: ObjCClass, class_name: StringSlice) -> Int:
     """Where the box pointer sits inside an instance, in bytes.
 
     Read once per class after registration and cached by the caller: the
@@ -538,7 +639,7 @@ def box_offset(cls: ObjCClass) -> Int:
     """
     var ivar = external_call["class_getInstanceVariable", P](
         P(unsafe_from_address=cls.as_object().addr()),
-        _leak_cstr(String(BOX_IVAR)),
+        _leak_cstr(box_ivar_name(class_name)),
     )
     if Int(ivar) == 0:
         return 0

@@ -90,7 +90,8 @@ targets = {
    "static SmallVector<StringRef> splitObjCEncoding(",
    "static void checkAgainstSDKEncoding(", "static void checkObjCABISupport(",
    "objcMethodEncoding(SharedState", "deriveObjCSelector(SharedState",
-   "void FnSigDecorators::applyObjCSelector("],
+   "void FnSigDecorators::applyObjCSelector(",
+   "static FnOp synthesizeObjCSuperThunk("],
  "mojo/stdlib/std/objc/runtime.mojo": ["def _nth_class_kind("],
 }
 allow = [l.strip().split("|") for l in open("tools/parity-allowlist.txt")

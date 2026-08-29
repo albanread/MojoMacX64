@@ -3887,6 +3887,56 @@ static void synthesizeObjCIdField(ASTDecl &structDecl, StructDeclOp structOp,
                                 structDecl.getLoc(), &structDecl);
 }
 
+/// A `fn () -> None` that puts this class's Mojo superclass in the runtime.
+///
+/// Registration is lazy -- a `class` reaches the runtime the first time it is
+/// instantiated -- so `class B(A)` used before any `A` ever was would resolve
+/// its superclass to nil and allocate its pair against nothing. That does not
+/// fail: it builds a ROOT class, which answers nothing, silently.
+///
+/// The body is one line: construct an `A`. That registers it, because
+/// registering is what a class's `__init__` does. The instance itself is
+/// dropped, and std.objc calls this only when `objc_getClass` says the class
+/// is missing, so the waste is one base instance per PROCESS.
+static FnOp synthesizeObjCSuperThunk(ASTDecl &structDecl, StructDeclOp structOp,
+                                     ASTType baseType,
+                                     DeclResolver &resolver) {
+  SharedState &shared = structDecl.getShared();
+  MLIRContext *ctx = shared.getContext();
+  SMLoc declLoc = structDecl.getLoc();
+
+  FnEffects effects;
+  effects.setCABI(true);
+  StructEmitter structEmitter(structDecl);
+  auto [thunk, thunkDecl] = structEmitter.synthesizeMethodInStruct(
+      "__objc_ensure_super", /*argTypes=*/{}, /*argConvs=*/{},
+      /*argListAttrs=*/PogListAttr::get(ctx, {}, {}),
+      shared.getNoneType(), SpecialFunctionKind::kNormal, effects);
+  if (!thunk)
+    return {};
+
+  ImplicitLocOpBuilder builder =
+      ImplicitLocOpBuilder::atBlockEnd(thunk.getLoc(), thunk.getBody());
+  builder.setInsertionPointToStart(thunk.getBody());
+  builder.setLoc(thunk->getLoc());
+  ASTDecl *resolved = shared.declResolver->getDeclForFuncSymbol(
+      getFullyResolvedSymbolRef(thunk));
+  if (!resolved)
+    return {};
+  IREmitter emitter(*resolved, builder);
+  SyntheticNode loc(declLoc);
+
+  VarDeclOp baseVar = emitter.emitVarDecl("base", baseType.mlirType,
+                                          thunk.getLoc(), VarDeclKind::Var);
+  if (!baseVar)
+    return {};
+  CallOperands ctor(CallSyntax::kTypeCall, &loc,
+                    ExprDest(MLValue(baseVar), EC_CallArgValue));
+  emitter.emitConstructorCall(baseType, std::move(ctor));
+  emitter.emitNormalReturn(thunk.getLoc());
+  return thunk;
+}
+
 /// Synthesize the function that builds this class in the Objective-C runtime.
 ///
 /// PROBE (COCOA_CLASS_DESIGN.md sprint 2b): declaration only so far -- the body
@@ -4028,6 +4078,52 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   if (!registrarVar)
     return;
 
+  // Every Mojo `class` above this one, nearest first, stopping at the first
+  // real Objective-C class. An instance carries one box per class in that
+  // chain -- ivar offsets are per class, which is what lets a base's methods
+  // work unchanged on an instance of a derived class -- and this function is
+  // the only thing that will ever construct them: a base's own `__init__`
+  // runs when a base is made, not when a derived one is.
+  struct ObjCAncestor {
+    StructDeclOp op;
+    ASTType type;
+  };
+  SmallVector<ObjCAncestor> mojoAncestors;
+  {
+    StructDeclOp walk = structOp;
+    ASTDecl *scope = structDecl.getParentDecl();
+    while (walk && walk->hasAttr("objcMojoSuperclass") && scope) {
+      StringRef baseName =
+          cast<StringAttr>(walk.getObjcBasesAttr()[0]).getValue();
+      baseName = baseName.rsplit('.').second.empty()
+                     ? baseName
+                     : baseName.rsplit('.').second;
+      LookupResult lookup = shared.lookupAndResolveDecl(
+          baseName, structDecl.getLoc(), *scope, /*searchParentScopes=*/true);
+      StructDeclOp found;
+      ASTType foundType;
+      if (!lookup.isErroneous())
+        for (ASTDecl *candidateDecl : lookup.getIfSuccess())
+          if (auto candidate = dyn_cast_or_null<StructDeclOp>(
+                  candidateDecl->getIfOperation()))
+            if (candidate.getObjcClass()) {
+              found = candidate;
+              foundType = candidateDecl->getTypeDeclSelf();
+            }
+      if (!found || foundType.isNull()) {
+        shared.emitError(structDecl.getLoc())
+            << "internal: superclass '" << baseName
+            << "' is a 'class' but could not be resolved here";
+        return;
+      }
+      mojoAncestors.push_back({found, foundType});
+      walk = found;
+    }
+  }
+  bool anyAncestorHasBox = false;
+  for (ObjCAncestor &ancestor : mojoAncestors)
+    anyAncestorHasBox |= objcClassHasBox(ancestor.op);
+
   CallOperands ctorOperands(CallSyntax::kTypeCall, &loc,
                             ExprDest(MLValue(registrarVar), EC_CallArgValue));
   StringRef runtimeName = structOp.getSymName();
@@ -4037,6 +4133,26 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   ctorOperands.add(ASTExprAnd<CValue>{literal(runtimeName), &loc});
   ctorOperands.add(ASTExprAnd<CValue>{literal(superclass), &loc});
   ctorOperands.add(ASTExprAnd<CValue>{literal(frameworks), &loc});
+
+  // A Mojo superclass has to be in the runtime before this class allocates
+  // its pair against it, and it will not be unless something instantiated it
+  // first. The four-argument registrar takes a thunk that does exactly that,
+  // and calls it only when the class is actually missing.
+  if (!mojoAncestors.empty()) {
+    FnOp thunk = synthesizeObjCSuperThunk(structDecl, structOp,
+                                          mojoAncestors.front().type, resolver);
+    if (!thunk) {
+      shared.emitError(structDecl.getLoc())
+          << "internal: could not synthesize the registration of superclass '"
+          << mojoAncestors.front().op.getSymName() << "'";
+      return;
+    }
+    Value ensure = KGEN::CreateClosureOp::create(
+        builder, builder.getLoc(), thunk.getFuncTypeGenerator(),
+        thunk.getBoundSymbolRef(shared.getEvaluationContext()), ValueRange());
+    ctorOperands.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(ensure)), &loc});
+  }
+
   emitter.emitConstructorCall(registrarType, std::move(ctorOperands));
 
   // A method call on the registrar, result discarded: these all report success
@@ -4073,6 +4189,10 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
         IndexType::get(ctx));
     Value sizeVal = ParamConstantOp::create(builder, rawSize);
     boxOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(sizeVal)), &loc});
+    // The MOJO name, not the @objc runtime name: the ivar identifies the box
+    // to code that knows the Mojo type, and `reflect[T].base_name()` in
+    // std.objc is the other end of that agreement.
+    boxOps.add(ASTExprAnd<CValue>{literal(structOp.getSymName()), &loc});
     emitter.emitNamedMethodCall("add_box", std::move(boxOps));
 
     // And the dealloc that empties it again. Until this existed, a field
@@ -4175,11 +4295,12 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
   // Where the runtime put the box: settled at registration, constant after,
   // read once here and cached in a global the trampolines can reach -- they
   // have only an `id` to work from.
-  if (hasBox) {
+  if (hasBox || anyAncestorHasBox) {
     CallOperands offsetOps(CallSyntax::kMethodCall, &loc,
                            ExprDest(EC_CallArgValue));
     offsetOps.addSelf(
         ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+    offsetOps.add(ASTExprAnd<CValue>{literal(structOp.getSymName()), &loc});
     CValue offset =
         emitter.emitNamedMethodCall("box_offset_of", std::move(offsetOps));
     if (!offset.getIfSRValue()) {
@@ -4214,7 +4335,8 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
       RefStoreOp::create(builder, rawOffset, slotRef);
     }
 
-    // And now construct the fields INTO THE BOX.
+    // And now construct the fields INTO THE BOX -- this class's, and every
+    // Mojo ancestor's.
     //
     // Until this, the box's contents were whatever the Objective-C runtime
     // left there -- zeroes, since it zero-fills ivars at alloc -- and the
@@ -4224,81 +4346,107 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     // `Int`, and it silently would not have worked for a type whose default
     // is anything else. The ground state is now a constructed one.
     //
+    // The ancestors matter for the same reason. An instance of `class B(A)`
+    // carries TWO boxes -- A's at A's ivar offset, B's at B's -- because ivar
+    // offsets are per class, which is exactly what lets A's methods work
+    // unchanged on a B. Nothing else will construct A's box in that instance:
+    // A's own `__init__` runs when an A is made, not when a B is.
+    //
     // The address comes back from `box_of` as a POINTER rather than an Int:
     // there is no int-to-pointer operation at this level (Mojo itself spells
     // that as a bitcast through a local), so the crossing happens once, in
     // std.objc, in a language that can say it in a line.
-    CallOperands boxPtrOps(CallSyntax::kMethodCall, &loc,
-                           ExprDest(EC_CallArgValue));
-    boxPtrOps.addSelf(
-        ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
-    boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(objcId), &loc});
-    // The size again, for the failure path: `Pointer` is non-nullable, so
-    // `box_of` answers a nil instance with scratch rather than with nothing.
-    auto boxTypeOperand =
-        TypeParamAttr::get(selfType.mlirType, M::KGEN::TypeType::get(
-                                                  shared.getContext()));
-    auto boxTargetOperand = ParamOperatorAttr::get(
-        POC::CurrentTarget, {}, M::KGEN::TargetType::get(shared.getContext()));
-    auto boxRawSize = ParamOperatorAttr::get(
-        POC::GetSizeOf,
-        {cast<TypedAttr>(boxTypeOperand), cast<TypedAttr>(boxTargetOperand)},
-        IndexType::get(shared.getContext()));
-    Value boxSizeVal = ParamConstantOp::create(builder, boxRawSize);
-    boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(boxSizeVal)), &loc});
-    CValue boxPtr = emitter.emitNamedMethodCall("box_of", std::move(boxPtrOps));
-    if (!boxPtr.getIfSRValue()) {
-      shared.emitError(structDecl.getLoc(),
-                       "internal: box_of did not produce a register value; "
-                       "the box cannot be constructed");
-      return;
-    }
-    Value boxPtrVal = emitter.emitRebindOpIfNeeded(
-        boxPtr.getIfSRValue(), SugarAttr::strip(boxPtr.getIfSRValue().getType()),
-        structDecl.getLoc());
-    Value rawBox = LIT::StructExtractOp::create(
-        builder, builder.getLoc(),
-        PointerType::get(IntegerType::get(shared.getContext(), 8)), boxPtrVal,
-        StringAttr::get(shared.getContext(), "_mlir_value"));
-    Value typedBox = M::KGEN::POP::PointerBitcastOp::create(
-        builder, PointerType::get(selfType.mlirType), rawBox);
-    auto boxOrigin = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
-    // Not startUninit: that tells Mojo this reference brings a whole value
-    // into existence, and it then rightly insists the value be produced by
-    // an `__init__` rather than field by field -- but a class's `__init__`
-    // IS this function, so that would recurse. The box is memory the runtime
-    // already zero-filled, so it is "initialized" in Mojo's sense, and each
-    // field constructor writes over its own slot.
-    Value boxRef = RefFromPointerOp::create(builder, typedBox, boxOrigin,
-                                            /*startUninit=*/false,
-                                            /*endUninit=*/false);
-    for (StructFieldOp field : structOp.getFieldDecls()) {
-      ASTType fieldType = field.getReboundType(
-          sugarCast<LIT::StructType>(selfType.mlirType),
-          &shared.getEvaluationContext());
-      Value ref = RefStructGEROp::create(builder, boxRef, field);
-
-      // `var count: Int = 3`: the declaration's own expression, emitted into
-      // the box. This is the ONLY copy that matters -- the local `self` the
-      // constructor hands back is a copy nothing reads through -- so the
-      // initializer is evaluated exactly once per instance, here.
-      auto found = shared.objcFieldInitializers.find(field.getOperation());
-      if (found != shared.objcFieldInitializers.end()) {
-        ExprDest dest(MLValue(ref), EC_ReturnValue);
-        emitter.emitExpr(found->second, dest);
-        continue;
+    auto constructBox = [&](StructDeclOp op, ASTType type,
+                            StringRef mojoName) -> bool {
+      MLIRContext *ctx = shared.getContext();
+      CallOperands boxPtrOps(CallSyntax::kMethodCall, &loc,
+                             ExprDest(EC_CallArgValue));
+      boxPtrOps.addSelf(
+          ASTExprAnd<AnyValue>{AnyValue(MLValue(registrarVar)), &loc});
+      boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(objcId), &loc});
+      // The size again, for the failure path: `Pointer` is non-nullable, so
+      // `box_of` answers a nil instance with scratch rather than nothing.
+      auto typeOperand =
+          TypeParamAttr::get(type.mlirType, M::KGEN::TypeType::get(ctx));
+      auto targetOperand = ParamOperatorAttr::get(
+          POC::CurrentTarget, {}, M::KGEN::TargetType::get(ctx));
+      auto rawSize = ParamOperatorAttr::get(
+          POC::GetSizeOf,
+          {cast<TypedAttr>(typeOperand), cast<TypedAttr>(targetOperand)},
+          IndexType::get(ctx));
+      Value sizeArg = ParamConstantOp::create(builder, rawSize);
+      boxPtrOps.add(ASTExprAnd<AnyValue>{AnyValue(SRValue(sizeArg)), &loc});
+      boxPtrOps.add(ASTExprAnd<CValue>{literal(mojoName), &loc});
+      CValue boxPtr =
+          emitter.emitNamedMethodCall("box_of", std::move(boxPtrOps));
+      if (!boxPtr.getIfSRValue()) {
+        shared.emitError(structDecl.getLoc(),
+                         "internal: box_of did not produce a register value; "
+                         "the box cannot be constructed");
+        return false;
       }
+      Value boxPtrVal = emitter.emitRebindOpIfNeeded(
+          boxPtr.getIfSRValue(),
+          SugarAttr::strip(boxPtr.getIfSRValue().getType()),
+          structDecl.getLoc());
+      Value rawBox = LIT::StructExtractOp::create(
+          builder, builder.getLoc(),
+          PointerType::get(IntegerType::get(ctx, 8)), boxPtrVal,
+          StringAttr::get(ctx, "_mlir_value"));
+      Value typedBox = M::KGEN::POP::PointerBitcastOp::create(
+          builder, PointerType::get(type.mlirType), rawBox);
+      auto boxOrigin = builder.getAttr<AnyOriginAttr>(/*isMut=*/true);
+      // Not startUninit: that tells Mojo this reference brings a whole value
+      // into existence, and it then rightly insists the value be produced by
+      // an `__init__` rather than field by field -- but a class's `__init__`
+      // IS this function, so that would recurse. The box is memory the
+      // runtime already zero-filled, so it is "initialized" in Mojo's sense,
+      // and each field constructor writes over its own slot.
+      Value boxRef = RefFromPointerOp::create(builder, typedBox, boxOrigin,
+                                              /*startUninit=*/false,
+                                              /*endUninit=*/false);
+      StructFieldOp boxIdField;
+      for (StructFieldOp field : op.getFieldDecls()) {
+        if (field.getName() == "__objc_id")
+          boxIdField = field;
+        ASTType fieldType =
+            field.getReboundType(sugarCast<LIT::StructType>(type.mlirType),
+                                 &shared.getEvaluationContext());
+        Value ref = RefStructGEROp::create(builder, boxRef, field);
 
-      CallOperands init(CallSyntax::kTypeCall, &loc,
-                        ExprDest(MLValue(ref), EC_ReturnValue));
-      emitter.emitConstructorCall(fieldType, std::move(init));
-    }
-    // The id, into the box's own id field, once. The trampolines still write
-    // it on every message -- eight bytes next to an objc_msgSend -- but this
-    // means the box is a complete, valid value before any message arrives.
-    Value boxIdRef = RefStructGEROp::create(builder, boxRef, idField);
-    emitter.emitStoreToLValue({objcId, &loc}, MLValue(boxIdRef),
-                              EC_AttributeRefBase);
+        // `var count: Int = 3`: the declaration's own expression, emitted
+        // into the box. This is the copy that matters -- the local `self` the
+        // constructor hands back is one nothing reads through.
+        auto found = shared.objcFieldInitializers.find(field.getOperation());
+        if (found != shared.objcFieldInitializers.end()) {
+          ExprDest dest(MLValue(ref), EC_ReturnValue);
+          emitter.emitExpr(found->second, dest);
+          continue;
+        }
+
+        CallOperands init(CallSyntax::kTypeCall, &loc,
+                          ExprDest(MLValue(ref), EC_ReturnValue));
+        emitter.emitConstructorCall(fieldType, std::move(init));
+      }
+      // The id, into that box's own id field, once. The trampolines still
+      // write it on every message -- eight bytes next to an objc_msgSend --
+      // but this means the box is a complete, valid value before any message
+      // arrives, which for an ANCESTOR's box is the only write it would
+      // otherwise get.
+      if (boxIdField) {
+        Value boxIdRef = RefStructGEROp::create(builder, boxRef, boxIdField);
+        emitter.emitStoreToLValue({objcId, &loc}, MLValue(boxIdRef),
+                                  EC_AttributeRefBase);
+      }
+      return true;
+    };
+
+    if (hasBox && !constructBox(structOp, selfType, structOp.getSymName()))
+      return;
+    for (ObjCAncestor &ancestor : mojoAncestors)
+      if (objcClassHasBox(ancestor.op) &&
+          !constructBox(ancestor.op, ancestor.type, ancestor.op.getSymName()))
+        return;
   }
 
   emitter.emitNormalReturn(funcOp.getLoc());
@@ -4359,13 +4507,56 @@ static void attributeObjCBases(SharedState &shared, StructDeclOp structOp,
   // fail -- it produces a root class and a window that never appears.
   StringRef super = cast<StringAttr>(bases[0]).getValue();
   super = super.rsplit('.').second.empty() ? super : super.rsplit('.').second;
+
+  // ...or it is another Mojo `class`, which the design has promised since the
+  // first draft and which the database will never have heard of. Inheritance
+  // between two Mojo classes needs no new runtime machinery, and that is not
+  // luck: ivar offsets are per class, so a base's methods find the base's box
+  // at the base's offset inside an instance of the derived class, exactly as
+  // they would in an instance of the base. What it does need is ORDER, and
+  // that is handled at registration.
+  //
+  // Two things are inherited here. The frameworks, because the base already
+  // worked out which one its own ancestor came from and the answer cannot
+  // change on the way down. And the SDK ancestor: the nearest real
+  // Objective-C class, which is what every selector-encoding lookup has to
+  // key on, since `method_encoding` for a class the SDK has never heard of
+  // finds nothing.
+  bool superIsMojoClass = false;
   if (!database.lookup("superclass", {super}) &&
       !database.lookup("class_framework", {super})) {
-    shared.emitError(decl.getLoc())
-        << "the Objective-C runtime has no class '" << super
-        << "' to inherit from";
-    return;
+    LookupResult lookup = shared.lookupAndResolveDecl(
+        super, decl.getLoc(), *decl.getParentDecl(),
+        /*searchParentScopes=*/true);
+    StructDeclOp baseOp;
+    if (!lookup.isErroneous())
+      for (ASTDecl *found : lookup.getIfSuccess())
+        if (auto candidate =
+                dyn_cast_or_null<StructDeclOp>(found->getIfOperation()))
+          if (candidate.getObjcClass())
+            baseOp = candidate;
+
+    if (!baseOp) {
+      shared.emitError(decl.getLoc())
+          << "the Objective-C runtime has no class '" << super
+          << "' to inherit from, and no 'class' of that name is in scope";
+      return;
+    }
+    superIsMojoClass = true;
+
+    if (auto inherited = baseOp->getAttrOfType<StringAttr>("objcSDKAncestor"))
+      structOp->setAttr("objcSDKAncestor", inherited);
+    if (auto inheritedFrameworks = baseOp.getObjcFrameworksAttr())
+      for (Attribute fw : inheritedFrameworks)
+        if (seen.insert(fw).second)
+          frameworks.push_back(fw);
   }
+
+  if (!superIsMojoClass)
+    structOp->setAttr("objcSDKAncestor",
+                      StringAttr::get(shared.getContext(), super));
+  if (superIsMojoClass)
+    structOp->setAttr("objcMojoSuperclass", UnitAttr::get(shared.getContext()));
 
   if (!frameworks.empty())
     structOp.setObjcFrameworksAttr(

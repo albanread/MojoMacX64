@@ -44,7 +44,7 @@ def main() raises:
     var r = ObjCClassRegistrar("BoxProbe", "NSObject", "Foundation")
     # add_box takes a raw index -- the compiler's sizeof hands one over --
     # so the by-hand caller converts.
-    if not r.add_box(Int(16).__mlir_index__()):
+    if not r.add_box(Int(16).__mlir_index__(), "BoxProbe"):
         print("FAIL could not reserve the ivar")
         return
     var cls = r.register()
@@ -52,7 +52,7 @@ def main() raises:
         print("FAIL class did not register")
         return
 
-    var offset = box_offset(cls)
+    var offset = box_offset(cls, "BoxProbe")
     print("  OK   box ivar at offset", offset)
     if offset <= 0:
         print("FAIL the ivar has no offset")
