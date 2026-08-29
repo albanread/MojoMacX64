@@ -6,20 +6,7 @@
 # offset -- so `self` inside a method IS the box. The registrar seeds the id
 # into the box's first field at instantiation, which is why methods can reach
 # their own object. COCOA_CLASS_DESIGN.md, sprint 3.
-from std.objc import ObjCObject, msg_send, send
-
-
-@fieldwise_init
-struct NSRange(TrivialRegisterPassable):
-    """Local stand-in: std.objc.geometry is not ported to this fork yet.
-
-    TrivialRegisterPassable is not decoration -- two Ints come back in
-    registers (rax:rdx here, x0/x1 on arm64), and a memory-only result is
-    refused by the trampoline because a by-ref slot is neither.
-    """
-
-    var location: Int
-    var length: Int
+from std.objc import ObjCObject, msg_send, send, NSRange
 
 
 class Tally(NSObject):

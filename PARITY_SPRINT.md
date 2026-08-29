@@ -32,7 +32,7 @@ measurement on the Vega II). Today the list is:
 | where | ours | theirs | evidence |
 |---|---|---|---|
 | CocoaKB queries | `method_abi_x64`, `posix_function_abi_x64` | `method_abi`, `posix_function_abi` | the tables disagree by design; NSRect return is registers there, sret here |
-| `encodeObjCType` | Bool → `c` | Bool → `B` | `@encode(BOOL)` is `c` on x86-64; 393-vs-4 in the SDK |
+| ~~`encodeObjCType`~~ | ~~Bool → `c`~~ | ~~Bool → `B`~~ | **RETIRED at step 3** — their `canon()` treats `B` and `c` as one ABI class, which is the proper fix; our adaptation was a workaround for a check they had already corrected |
 | ~~IMP spelling~~ | ~~`def ... abi("C")`~~ | ~~`fn`~~ | **RETIRED at step 1** — `fn` is revived and `std/objc/classes.mojo` now matches their tree byte for byte |
 | `runtime.mojo` `_nth_class_kind` | every eightbyte `f` is SSE | scalar float **or HFA** (`h`) | System V classifies per eightbyte; AAPCS64 has Homogeneous Floating-point Aggregates in v0-v3 and we have no such concept |
 
@@ -51,7 +51,7 @@ diffed against their tree at that commit, one commit pushed.
 2. ~~**Revive `let`**~~ — their `b9ca66e1`. **DONE**, together with the
    predecessor `784e8f50` (weak refs, NSError) that their chronology puts
    first and step order had missed.
-3. **Close the skipped-commit residue** — `693f426c` and `e289fa28`: verify
+3. ~~**Close the skipped-commit residue**~~ **DONE.** — `693f426c` and `e289fa28`: verify
    the Signatures.cpp state matches theirs exactly; adopt
    `std/objc/geometry.mojo`; port `struct_arg_test.mojo` and
    `struct_ret_test.mojo` and run them (delete our local NSRange stand-in in

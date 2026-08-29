@@ -1972,20 +1972,7 @@ static std::optional<StringRef> encodeObjCType(SharedState &shared,
   if (!name)
     return std::nullopt;
   return llvm::StringSwitch<std::optional<StringRef>>(*name)
-      // ARCHITECTURE DIVERGENCE, and one the SDK cross-check caught rather
-      // than letting through: Objective-C `BOOL` is `signed char` on x86-64
-      // macOS and genuinely `bool` on arm64, so it encodes as 'c' here and
-      // 'B' there. The sibling port maps Mojo's Bool to 'B', which is correct
-      // on its machine and wrong on this one.
-      //
-      // Confirmed two ways before changing it. clang on this machine:
-      // @encode(BOOL) is "c", @encode(bool) is "B". And the SDK database: of
-      // the obvious BOOL-returning selectors, 393 encode as 'c' against 4 as
-      // 'B' -- those four being real C99 `bool` APIs.
-      //
-      // Same size and same ABI either way; only the character differs, and it
-      // is the character we hand to class_addMethod.
-      .Case("Bool", "c")
+      .Case("Bool", "B")
       .Case("ObjCObject", "@")
       .Case("ObjCClass", "#")
       .Case("SEL", ":")
@@ -2049,6 +2036,19 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
   if (parts.size() < 3)
     return; // Not a shape this understands; say nothing rather than guess.
 
+  // Signedness is a reinterpretation, not an ABI: q/Q, i/I, s/S and c/C/B all
+  // land in the same register the same way, and the SDK is inconsistent about
+  // which it writes (characterIndexForPoint: says Q where Mojo's Int says q).
+  // Compare ABI classes, not spellings.
+  auto canon = [](StringRef enc) -> StringRef {
+    return llvm::StringSwitch<StringRef>(enc)
+        .Case("Q", "q")
+        .Case("I", "i")
+        .Case("S", "s")
+        .Case("C", "c")
+        .Case("B", "c")
+        .Default(enc);
+  };
   auto disagree = [&](StringRef what, StringRef sdk, StringRef declared) {
     shared.emitError(loc)
         << "the SDK declares '" << selector << "' with " << what << " '" << sdk
@@ -2057,7 +2057,7 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
   };
 
   if (auto declaredRet = encodeObjCType(shared, resultType))
-    if (*declaredRet != parts[0])
+    if (canon(*declaredRet) != canon(parts[0]))
       disagree("a result of", parts[0], *declaredRet);
 
   ArrayRef<StringRef> sdkArgs = ArrayRef<StringRef>(parts).drop_front(3);
@@ -2065,7 +2065,7 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
     if (index >= sdkArgs.size())
       break;
     if (auto declaredArg = encodeObjCType(shared, ASTType(argType)))
-      if (*declaredArg != sdkArgs[index])
+      if (canon(*declaredArg) != canon(sdkArgs[index]))
         disagree(("argument " + Twine(index + 1) + " of").str(),
                  sdkArgs[index], *declaredArg);
   }
