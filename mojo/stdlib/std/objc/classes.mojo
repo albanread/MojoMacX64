@@ -187,6 +187,7 @@ struct ObjCClassRegistrar:
 
     var _cls: Int
     var _ok: Bool
+    var _existing: Bool
 
     def __init__(
         out self,
@@ -206,6 +207,19 @@ struct ObjCClassRegistrar:
             if framework.byte_length() > 0:
                 _ = load_framework_dynamic(framework)
 
+        # A class is registered once per process, but the synthesized __init__
+        # that registers it runs once per instance. Finding it already there is
+        # the ordinary case after the first, and costs one lookup.
+        var already = external_call["objc_getClass", P](
+            _leak_cstr(String(name))
+        )
+        if Int(already) != 0:
+            self._cls = Int(already)
+            self._ok = True
+            self._existing = True
+            return
+        self._existing = False
+
         var sup = external_call["objc_getClass", P](
             _leak_cstr(String(superclass))
         )
@@ -214,6 +228,7 @@ struct ObjCClassRegistrar:
             # that answers nothing. Refuse, and let `register` report it.
             self._cls = 0
             self._ok = False
+            self._existing = False
             return
         var cls = external_call["objc_allocateClassPair", P](
             sup, _leak_cstr(String(name)), Int(0)
@@ -231,7 +246,7 @@ struct ObjCClassRegistrar:
         compiler would otherwise have to emit five operations for -- stays on
         this side of the boundary.
         """
-        if not self._ok:
+        if not self._ok or self._existing:
             return False
         return external_call["class_addMethod", Bool](
             P(unsafe_from_address=self._cls),
@@ -246,7 +261,7 @@ struct ObjCClassRegistrar:
         """Conformance is not the same as implementing the methods: AppKit
         asks `conformsToProtocol:` -- NSTextInputClient among them -- and
         refuses a class that only responds to the selectors."""
-        if not self._ok:
+        if not self._ok or self._existing:
             return False
         var proto = external_call["objc_getProtocol", P](
             _leak_cstr(String(name))
@@ -262,7 +277,22 @@ struct ObjCClassRegistrar:
         failed, which is what a caller should check before instantiating."""
         if not self._ok:
             return ObjCClass(0)
-        external_call["objc_registerClassPair", NoneType](
-            P(unsafe_from_address=self._cls)
-        )
+        if not self._existing:
+            external_call["objc_registerClassPair", NoneType](
+                P(unsafe_from_address=self._cls)
+            )
         return ObjCClass(self._cls)
+
+    def register_and_instantiate(mut self) -> Int:
+        """Finish the class and return the `id` of a fresh instance.
+
+        One call because it is what a class's synthesized `__init__` needs and
+        nothing else does: every step the compiler would otherwise emit --
+        register, allocate, unwrap -- with no intermediate value it has to
+        find a type for. Returns 0 if the class could not be built, which the
+        caller sees as a nil instance rather than a crash.
+        """
+        var cls = self.register()
+        if cls.as_object().addr() == 0:
+            return 0
+        return new_instance(cls).addr()
