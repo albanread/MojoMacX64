@@ -2071,6 +2071,71 @@ static void checkAgainstSDKEncoding(SharedState &shared, StringRef selector,
   }
 }
 
+/// Refuse a method whose Objective-C ABI the compiler cannot know.
+///
+/// Narrow on purpose, and narrower than it first looked. The instinct was to
+/// gate every aggregate -- to refuse a struct larger than 16 bytes, and a large
+/// struct return. Both turn out to be handled already: the trampoline is a
+/// C-ABI function and the C ABI pass does the real classification for it, which
+/// on this machine means System V -- large arguments on the stack, large
+/// returns through the sret pointer. spikes/abi-oracle proves it against clang,
+/// the only authority that counts, since clang is what compiled AppKit.
+///
+/// So what is left is the case where the SDK's own shape is UNKNOWN: the ABI
+/// pass could not model the signature, usually a C++ type in it. There the
+/// compiler has nothing to check a declaration against, and a method built on
+/// a guess would register cleanly and then receive a message it cannot read.
+static void checkObjCABISupport(SharedState &shared, StringRef superclass,
+                                StringRef selector, size_t argCount,
+                                SMLoc loc) {
+  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+
+  // Same lookup order as the encoding: the superclass chain first, because an
+  // override must match what the framework will actually send; then the
+  // selector's majority reading, for one arriving from a protocol.
+  auto retClass = superclass.empty()
+                      ? std::nullopt
+                      : database.lookup("method_ret_class",
+                                        {superclass, selector, "0"});
+  auto argClasses = superclass.empty()
+                        ? std::nullopt
+                        : database.lookup("method_arg_classes",
+                                          {superclass, selector, "0"});
+  if (!retClass)
+    retClass = database.lookup("selector_ret_class", {selector});
+  if (!argClasses)
+    argClasses = database.lookup("selector_arg_classes", {selector});
+
+  auto unmodelable = [&](StringRef what) {
+    shared.emitError(loc)
+        << "the ABI pass could not model the " << what << " of '" << selector
+        << "' -- usually a C++ type in the signature; this compiler will not "
+           "guess at a shape the runtime will send";
+  };
+
+  if (retClass && *retClass == "?")
+    unmodelable("result");
+
+  if (!argClasses)
+    return;
+  SmallVector<StringRef> tokens;
+  StringRef(*argClasses).split(tokens, ',', /*MaxSplit=*/-1,
+                               /*KeepEmpty=*/false);
+
+  // A C++ type in the signature can split into more tokens than the selector
+  // has arguments -- `function<void ()>` becomes several -- so a count that
+  // disagrees is itself the signal, and indexing by argument number would be
+  // meaningless. Such a row always carries a '?'.
+  if (tokens.size() != argCount) {
+    if (llvm::is_contained(tokens, StringRef("?")))
+      unmodelable("arguments");
+    return;
+  }
+  for (auto [index, token] : llvm::enumerate(tokens))
+    if (token == "?")
+      unmodelable(("type of argument " + Twine(index + 1)).str());
+}
+
 static std::optional<std::string>
 objcMethodEncoding(SharedState &shared, StringRef superclass,
                    StringRef selector, ArrayRef<Type> argTypes,
@@ -2092,6 +2157,7 @@ objcMethodEncoding(SharedState &shared, StringRef superclass,
   if (fromSDK) {
     checkAgainstSDKEncoding(shared, selector, *fromSDK, argTypes, resultType,
                             loc);
+    checkObjCABISupport(shared, superclass, selector, argTypes.size(), loc);
     return fromSDK;
   }
 
@@ -3455,7 +3521,7 @@ static bool objcClassHasBox(StructDeclOp structOp) {
 /// stop. That is what this function will grow next; today it forwards.
 static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
                                      FnOp methodOp, StringRef selector,
-                                     DeclResolver &resolver) {
+                                     SMLoc methodLoc, DeclResolver &resolver) {
   SharedState &shared = structDecl.getShared();
   SMLoc declLoc = structDecl.getLoc();
 
@@ -3467,6 +3533,12 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
   // A method taking another class as an argument would need the same
   // id-to-box conversion the receiver gets; nothing needs it yet, so it is
   // refused rather than wired half-way.
+  //
+  // Refused OUT LOUD. This used to return quietly, and quiet is the worst
+  // possible answer here: the method compiles, the class registers without
+  // it, and the framework's message finds nothing -- a window that does not
+  // respond, with no diagnostic anywhere to say why. An unimplementable
+  // method is a compile error, not a silent omission.
   const bool selfHasBox = objcClassHasBox(structOp);
   Block *calleeArgs = methodOp.getBody();
   for (unsigned i = 1, e = calleeArgs->getNumArguments(); i != e; ++i) {
@@ -3476,25 +3548,41 @@ static FnOp synthesizeObjCTrampoline(ASTDecl &structDecl, StructDeclOp structOp,
     if (ASTDecl *argDecl = ASTType(t).getDecl(shared))
       if (auto argStruct =
               dyn_cast_or_null<StructDeclOp>(argDecl->getIfOperation()))
-        if (argStruct.getObjcClass())
+        if (argStruct.getObjcClass()) {
+          shared.emitError(methodLoc)
+              << "'" << selector << "' takes argument " << size_t(i)
+              << " as the Objective-C class '" << argStruct.getSymName()
+              << "', but the runtime sends an 'id'; turning one back into a "
+                 "class value needs the receiver's box conversion, which the "
+                 "argument path does not have yet -- declare it as "
+                 "'ObjCObject'";
           return {};
+        }
   }
 
   ASTType resultType = ASTType(methodOp.getUserResultType());
 
-  // A memory-only RESULT is refused for now, and the reason is ABI, not
-  // laziness. AAPCS returns a small aggregate in x0/x1 or v0-v3 and a large
-  // one through x8 -- MacModula2's cocoa-send notes record that getting x8
-  // wrong bus-errors -- while a Mojo memory-only result becomes a by-ref
-  // slot in the signature, which is neither. selectedRange (NSRange, x0/x1)
-  // is the first real customer; until results are classified and lowered per
-  // the C ABI, a method with such a result goes unregistered rather than
-  // registered to return garbage.
+  // A memory-only RESULT is refused, and the reason is ABI, not laziness.
+  // The C ABI lowering underneath does classify a returned struct correctly
+  // -- in registers, or through the hidden sret pointer -- but it only ever
+  // sees a VALUE. A Mojo memory-only result never becomes one: it turns into
+  // a by-ref slot in the signature before the C ABI is consulted, which is
+  // neither. Declaring the type register-passable is the whole fix.
+  //
+  // Said out loud, for the same reason as above: silence here produces a
+  // method that exists in Mojo and not in the runtime.
   if (!resultType.isNull() && !resultType.isNoneType() &&
       !resultType.isTypeCheckErrorType() &&
       resultType.getRegisterPassability(declLoc, shared) ==
-          TypeConvention::MemoryOnly)
+          TypeConvention::MemoryOnly) {
+    shared.emitError(methodLoc)
+        << "'" << selector
+        << "' returns a type Mojo passes in memory, so it reaches the C ABI "
+           "as a by-ref slot rather than a value, and Objective-C would read "
+           "the result from a register that was never written; give the type "
+           "'@register_passable(\"trivial\")'";
     return {};
+  }
 
   MLIRContext *ctx = shared.getContext();
   auto selfName = StringAttr::get(ctx, "self");
@@ -3859,6 +3947,7 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
     FnOp op;
     StringRef selector;
     StringRef encoding;
+    SMLoc loc; // the method's own line: a refusal must point at the method
   };
   SmallVector<ObjCMethod> methods;
   for (std::pair<StringAttr, TinyPtrVector<ASTDecl *>> entry :
@@ -3874,13 +3963,14 @@ static void synthesizeObjCRegistration(ASTDecl &structDecl,
       if (!selector || !encoding)
         continue; // Private to Mojo, or its shape could not be established.
 
-      methods.push_back({methodOp, selector.getValue(), encoding.getValue()});
+      methods.push_back({methodOp, selector.getValue(),
+                         encoding.getValue(), methodDecl->getLoc()});
     }
   }
 
   for (const ObjCMethod &method : methods) {
     FnOp trampoline = synthesizeObjCTrampoline(
-        structDecl, structOp, method.op, method.selector, resolver);
+        structDecl, structOp, method.op, method.selector, method.loc, resolver);
     if (!trampoline)
       continue;
 
