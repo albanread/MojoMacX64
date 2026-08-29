@@ -423,3 +423,19 @@ def load_framework[name: StaticString]() -> Bool:
     )
     var h = external_call["dlopen", _RawPtr](path.unsafe_ptr(), Int(2))
     return Int(h) != 0
+
+
+def load_framework_dynamic(name: StringSlice) -> Bool:
+    """`load_framework` with the name known only at run time.
+
+    The compiler emits calls to this when registering a `class`: the framework
+    comes from the SDK database at compile time, but it reaches the runtime as
+    an ordinary string argument, because a synthesized call with a plain
+    argument is a great deal simpler to emit than a parametric one.
+    """
+    var path = String("/System/Library/Frameworks/")
+    path += name
+    path += ".framework/"
+    path += name
+    var h = external_call["dlopen", _RawPtr](path.as_c_string_slice(), Int(2))
+    return Int(h) != 0

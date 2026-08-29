@@ -26,6 +26,7 @@ from .ownership import ObjCRef
 from .foundation import NSString, nsstring, extern_object
 from .classes import (
     ObjCClassBuilder,
+    ObjCClassRegistrar,
     IMP0,
     IMP1,
     IMP0Bool,
