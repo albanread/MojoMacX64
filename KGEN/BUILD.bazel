@@ -1402,6 +1402,7 @@ modular_cc_library(
     ]),
     tags = ["no-clang-tidy-headers"],
     deps = [
+        ":CocoaKB",
         ":Compiler",
         ":DialectChecksum",
         ":ToolCommon",

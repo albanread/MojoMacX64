@@ -489,7 +489,13 @@ def LIT_StructDeclOp : LITOp<"struct.decl", [
     // the first is the superclass and the rest are protocols. Names only --
     // they are resolved against the Objective-C runtime, not against Mojo's
     // trait system, so nothing here is a TraitSymbolAttr.
-    OptionalAttr<StrArrayAttr>:$objcBases
+    OptionalAttr<StrArrayAttr>:$objcBases,
+    // The frameworks that declare this class's bases, deduplicated, in the
+    // order first seen. Registration loads these before asking the runtime for
+    // the superclass: objc_getClass("NSView") returns nil in a process that
+    // has not loaded AppKit, and objc_allocateClassPair then silently builds a
+    // ROOT class -- a window that never appears, with nothing to say why.
+    OptionalAttr<StrArrayAttr>:$objcFrameworks
   );
   let regions = (region SizedRegion<1>:$fields);
   let assemblyFormat = [{

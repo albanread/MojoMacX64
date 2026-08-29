@@ -1434,7 +1434,8 @@ void StructDeclOp::build(OpBuilder &builder, OperationState &result,
         /*hasStableDecorator=*/{}, /*stableSinceVersion=*/{}, /*sourceName=*/{},
         /*minAlignment=*/{}, /*convention=*/{}, /*definesClosure=*/{},
         /*registerPassableConstraint=*/{}, /*objcClass=*/{},
-        /*objcBases=*/{});
+        /*objcBases=*/{},
+        /*objcFrameworks=*/{});
   result.regions[0]->push_back(new Block());
 }
 

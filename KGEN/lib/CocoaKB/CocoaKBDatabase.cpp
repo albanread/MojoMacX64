@@ -113,6 +113,124 @@ constexpr StringRef kPosixRetClassSQL =
 constexpr StringRef kPosixArgClassesSQL =
     "SELECT arg_classes FROM posix_function_abi_x64 WHERE name = ?1";
 
+//===----------------------------------------------------------------------===//
+// Sprint 4 additions: framework attribution and result types.
+//
+// These are ABI-NEUTRAL -- they answer which framework declares a class, and
+// what TYPE a result is, never which register it arrives in -- so unlike the
+// queries above they are identical on both architectures and were taken from
+// the sibling port unchanged. They read method_ret_kind and method_ret_class,
+// which the CocoaBaseMCP rebuild added.
+//===----------------------------------------------------------------------===//
+
+// Which framework declares a class. Needed before the runtime can be asked
+// anything about it: objc_getClass("NSView") is nil until AppKit is in the
+// process, and objc_allocateClassPair against a nil superclass builds a root
+// class that silently does nothing. BridgeSupport carries the attribution the
+// runtime dump cannot -- see "Two oracles" in COCOA_CLASS_DESIGN.md.
+// Ordered, not just LIMIT 1: BridgeSupport lists NSObject in every framework
+// that mentions it -- around seventy of them -- so an unordered pick answers
+// "AVFAudio" for NSObject and the compiler emits a dlopen of AVFAudio into
+// every class that inherits from it. Foundation first, then AppKit, then
+// alphabetically so the answer is at least the same on two runs.
+constexpr StringRef kClassFrameworkSQL =
+    "SELECT framework FROM bs_classes WHERE name = ?1 "
+    "ORDER BY CASE framework WHEN 'Foundation' THEN 0 WHEN 'AppKit' THEN 1 "
+    "ELSE 2 END, framework LIMIT 1";
+
+// Returned as the character's CODE POINT rather than the character, so it
+// arrives as an integer the parameter evaluator can fold into a conditional
+// type. The table itself stays readable.
+// Written out rather than macro-generated: COCOAKB_METHOD_CTE projects
+// `m.<column>` and this needs a function call around the column. It is also
+// #undef'd well above here.
+constexpr StringRef kMethodRetKindSQL =
+    "WITH RECURSIVE chain(c, depth) AS ("
+    "  SELECT ?1, 0"
+    "  UNION ALL"
+    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
+    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
+    " SELECT unicode(m.kind) FROM chain JOIN method_ret_kind m"
+    "   ON m.class = chain.c AND m.selector = ?2"
+    "  AND m.is_class = CAST(?3 AS INTEGER)"
+    " ORDER BY chain.depth LIMIT 1";
+
+// Resolving it in SQL rather than in the caller is not only tidier. The
+// caller would have to compare the answer against "@self", and a string
+// comparison does not fold during parameter evaluation -- so a type
+// conditioned on it stays symbolic and the whole point is lost.
+constexpr StringRef kMethodRetObjCClassSQL =
+    "WITH RECURSIVE chain(c, depth) AS ("
+    "  SELECT ?1, 0"
+    "  UNION ALL"
+    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
+    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
+    // ?1, not chain.c: the chain walk finds `alloc` on NSObject, which is
+    // where it is DECLARED, and the whole point of the sentinel is that the
+    // answer is where the message was SENT. `[NSString alloc]` is an NSString.
+    " SELECT CASE WHEN m.ret_class = '@self' THEN ?1 ELSE m.ret_class END"
+    "   FROM chain JOIN method_ret_class m"
+    "     ON m.class = chain.c AND m.selector = ?2"
+    "    AND m.is_class = CAST(?3 AS INTEGER)"
+    " ORDER BY chain.depth LIMIT 1";
+
+// Answers 0 rather than nothing for a name the class does not have. A
+// missing row would make the query fail to fold, the result type would stay
+// symbolic, and the author would see a wall of unevaluated conditional
+// instead of "NSString has no lenght". The caller turns 0 into that sentence.
+constexpr StringRef kRetKindForNameSQL =
+    "WITH RECURSIVE chain(c, depth) AS ("
+    "  SELECT ?1, 0"
+    "  UNION ALL"
+    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
+    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
+    " SELECT COALESCE(("
+    "   SELECT unicode(m.kind) FROM chain JOIN method_ret_kind m"
+    "     ON m.class = chain.c"
+    "    AND m.selector = CASE WHEN CAST(?4 AS INTEGER) = 0"
+    "                        THEN replace(?2, '_', ':')"
+    "                        ELSE replace(?2, '_', ':') || ':' END"
+    "    AND m.is_class = CAST(?3 AS INTEGER)"
+    "  ORDER BY chain.depth LIMIT 1), 0)";
+
+// An object whose class is not recorded is answered as NSObject, which is
+// true of every object and is the honest upper bound: precise where the SDK
+// knows, sound where it does not. Always returns a row, so a caller can ask
+// unconditionally and use the answer only when the kind says object.
+// COALESCE has to wrap the whole lookup, not the selected column: a JOIN
+// that matches nothing returns NO ROWS, and a default inside the projection
+// never runs. Written out rather than macro-generated for that reason.
+constexpr StringRef kRetClassForNameSQL =
+    "WITH RECURSIVE chain(c, depth) AS ("
+    "  SELECT ?1, 0"
+    "  UNION ALL"
+    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
+    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
+    " SELECT COALESCE(("
+    "   SELECT CASE WHEN m.ret_class = '@self' THEN ?1 ELSE m.ret_class END"
+    "     FROM chain JOIN method_ret_class m"
+    "       ON m.class = chain.c"
+    "      AND m.selector = CASE WHEN CAST(?4 AS INTEGER) = 0"
+    "                          THEN replace(?2, '_', ':')"
+    "                          ELSE replace(?2, '_', ':') || ':' END"
+    "      AND m.is_class = CAST(?3 AS INTEGER)"
+    "    ORDER BY chain.depth LIMIT 1), 'NSObject')";
+
+constexpr StringRef kSelectorRetKindSQL =
+    "SELECT unicode(kind) FROM method_ret_kind WHERE selector = ?1 "
+    "GROUP BY kind ORDER BY COUNT(*) DESC LIMIT 1";
+
+// NOT ABI-neutral, despite arriving with the batch above: `ret_class` is the
+// REGISTER class of the result, so this reads the x86-64 table. Imported from
+// the sibling as `method_abi` (arm64) and corrected here -- the second time in
+// this file that a straight copy would have answered for the wrong machine.
+constexpr StringRef kSelectorRetClassSQL =
+    "SELECT ret_class FROM method_abi_x64 WHERE selector = ?1 "
+    "GROUP BY ret_class ORDER BY COUNT(*) DESC LIMIT 1";
+
+
+
+
 const CocoaKBQueryDef kCocoaQueries[] = {
     {"struct_size", 1, kStructSizeSQL},
     {"struct_align", 1, kStructAlignSQL},
@@ -130,6 +248,15 @@ const CocoaKBQueryDef kCocoaQueries[] = {
     {"posix_sig", 1, kPosixSigSQL},
     {"posix_ret_class", 1, kPosixRetClassSQL},
     {"posix_arg_classes", 1, kPosixArgClassesSQL},
+    // Sprint 4: framework attribution and result types. Declared below the
+    // table, so they are forward-declared here rather than moving the table.
+    {"class_framework", 1, kClassFrameworkSQL},
+    {"method_ret_kind", 3, kMethodRetKindSQL},
+    {"method_ret_objc_class", 3, kMethodRetObjCClassSQL},
+    {"ret_kind_for_name", 4, kRetKindForNameSQL},
+    {"ret_class_for_name", 4, kRetClassForNameSQL},
+    {"selector_ret_kind", 1, kSelectorRetKindSQL},
+    {"selector_ret_class", 1, kSelectorRetClassSQL},
 };
 
 llvm::Error CocoaKBDatabase::openLocked() {
@@ -273,124 +400,6 @@ CocoaKBDatabase::queryString(StringRef query, ArrayRef<StringRef> args) {
   return std::string(reinterpret_cast<const char *>(text),
                      sqlite3_column_bytes(*stmt, 0));
 }
-
-//===----------------------------------------------------------------------===//
-// Sprint 4 additions: framework attribution and result types.
-//
-// These are ABI-NEUTRAL -- they answer which framework declares a class, and
-// what TYPE a result is, never which register it arrives in -- so unlike the
-// queries above they are identical on both architectures and were taken from
-// the sibling port unchanged. They read method_ret_kind and method_ret_class,
-// which the CocoaBaseMCP rebuild added.
-//===----------------------------------------------------------------------===//
-
-// Which framework declares a class. Needed before the runtime can be asked
-// anything about it: objc_getClass("NSView") is nil until AppKit is in the
-// process, and objc_allocateClassPair against a nil superclass builds a root
-// class that silently does nothing. BridgeSupport carries the attribution the
-// runtime dump cannot -- see "Two oracles" in COCOA_CLASS_DESIGN.md.
-// Ordered, not just LIMIT 1: BridgeSupport lists NSObject in every framework
-// that mentions it -- around seventy of them -- so an unordered pick answers
-// "AVFAudio" for NSObject and the compiler emits a dlopen of AVFAudio into
-// every class that inherits from it. Foundation first, then AppKit, then
-// alphabetically so the answer is at least the same on two runs.
-constexpr StringRef kClassFrameworkSQL =
-    "SELECT framework FROM bs_classes WHERE name = ?1 "
-    "ORDER BY CASE framework WHEN 'Foundation' THEN 0 WHEN 'AppKit' THEN 1 "
-    "ELSE 2 END, framework LIMIT 1";
-
-// Returned as the character's CODE POINT rather than the character, so it
-// arrives as an integer the parameter evaluator can fold into a conditional
-// type. The table itself stays readable.
-// Written out rather than macro-generated: COCOAKB_METHOD_CTE projects
-// `m.<column>` and this needs a function call around the column. It is also
-// #undef'd well above here.
-constexpr StringRef kMethodRetKindSQL =
-    "WITH RECURSIVE chain(c, depth) AS ("
-    "  SELECT ?1, 0"
-    "  UNION ALL"
-    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
-    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
-    " SELECT unicode(m.kind) FROM chain JOIN method_ret_kind m"
-    "   ON m.class = chain.c AND m.selector = ?2"
-    "  AND m.is_class = CAST(?3 AS INTEGER)"
-    " ORDER BY chain.depth LIMIT 1";
-
-// Resolving it in SQL rather than in the caller is not only tidier. The
-// caller would have to compare the answer against "@self", and a string
-// comparison does not fold during parameter evaluation -- so a type
-// conditioned on it stays symbolic and the whole point is lost.
-constexpr StringRef kMethodRetObjCClassSQL =
-    "WITH RECURSIVE chain(c, depth) AS ("
-    "  SELECT ?1, 0"
-    "  UNION ALL"
-    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
-    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
-    // ?1, not chain.c: the chain walk finds `alloc` on NSObject, which is
-    // where it is DECLARED, and the whole point of the sentinel is that the
-    // answer is where the message was SENT. `[NSString alloc]` is an NSString.
-    " SELECT CASE WHEN m.ret_class = '@self' THEN ?1 ELSE m.ret_class END"
-    "   FROM chain JOIN method_ret_class m"
-    "     ON m.class = chain.c AND m.selector = ?2"
-    "    AND m.is_class = CAST(?3 AS INTEGER)"
-    " ORDER BY chain.depth LIMIT 1";
-
-// Answers 0 rather than nothing for a name the class does not have. A
-// missing row would make the query fail to fold, the result type would stay
-// symbolic, and the author would see a wall of unevaluated conditional
-// instead of "NSString has no lenght". The caller turns 0 into that sentence.
-constexpr StringRef kRetKindForNameSQL =
-    "WITH RECURSIVE chain(c, depth) AS ("
-    "  SELECT ?1, 0"
-    "  UNION ALL"
-    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
-    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
-    " SELECT COALESCE(("
-    "   SELECT unicode(m.kind) FROM chain JOIN method_ret_kind m"
-    "     ON m.class = chain.c"
-    "    AND m.selector = CASE WHEN CAST(?4 AS INTEGER) = 0"
-    "                        THEN replace(?2, '_', ':')"
-    "                        ELSE replace(?2, '_', ':') || ':' END"
-    "    AND m.is_class = CAST(?3 AS INTEGER)"
-    "  ORDER BY chain.depth LIMIT 1), 0)";
-
-// An object whose class is not recorded is answered as NSObject, which is
-// true of every object and is the honest upper bound: precise where the SDK
-// knows, sound where it does not. Always returns a row, so a caller can ask
-// unconditionally and use the answer only when the kind says object.
-// COALESCE has to wrap the whole lookup, not the selected column: a JOIN
-// that matches nothing returns NO ROWS, and a default inside the projection
-// never runs. Written out rather than macro-generated for that reason.
-constexpr StringRef kRetClassForNameSQL =
-    "WITH RECURSIVE chain(c, depth) AS ("
-    "  SELECT ?1, 0"
-    "  UNION ALL"
-    "  SELECT rc.superclass, chain.depth + 1 FROM rt_classes rc, chain"
-    "    WHERE rc.name = chain.c AND rc.superclass IS NOT NULL)"
-    " SELECT COALESCE(("
-    "   SELECT CASE WHEN m.ret_class = '@self' THEN ?1 ELSE m.ret_class END"
-    "     FROM chain JOIN method_ret_class m"
-    "       ON m.class = chain.c"
-    "      AND m.selector = CASE WHEN CAST(?4 AS INTEGER) = 0"
-    "                          THEN replace(?2, '_', ':')"
-    "                          ELSE replace(?2, '_', ':') || ':' END"
-    "      AND m.is_class = CAST(?3 AS INTEGER)"
-    "    ORDER BY chain.depth LIMIT 1), 'NSObject')";
-
-constexpr StringRef kSelectorRetKindSQL =
-    "SELECT unicode(kind) FROM method_ret_kind WHERE selector = ?1 "
-    "GROUP BY kind ORDER BY COUNT(*) DESC LIMIT 1";
-
-// NOT ABI-neutral, despite arriving with the batch above: `ret_class` is the
-// REGISTER class of the result, so this reads the x86-64 table. Imported from
-// the sibling as `method_abi` (arm64) and corrected here -- the second time in
-// this file that a straight copy would have answered for the wrong machine.
-constexpr StringRef kSelectorRetClassSQL =
-    "SELECT ret_class FROM method_abi_x64 WHERE selector = ?1 "
-    "GROUP BY ret_class ORDER BY COUNT(*) DESC LIMIT 1";
-
-
-
 
 llvm::Error CocoaKBDatabase::availability() {
   std::lock_guard<std::mutex> lock(mutex);

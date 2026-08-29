@@ -17,6 +17,7 @@
 #include "DLValues.h"
 #include "ExprNodes.h"
 #include "IREmitter.h"
+#include "KGEN/CocoaKB/CocoaKBDatabase.h"
 #include "KGEN/MojoParser/ASTDecl.h"
 #include "KGEN/MojoParser/Constraints.h"
 #include "MojoUtils.h"
@@ -3224,6 +3225,69 @@ static LogicalResult buildTraitConstraintsMap(
 /// these are Objective-C names for the runtime to resolve, and reading them as
 /// Mojo traits would report `NSView` as an undefined trait -- a confusing lie
 /// about a line that is perfectly correct.
+/// Check a class's bases against the Objective-C runtime, and record which
+/// frameworks declare them.
+///
+/// Both halves exist because the failures they prevent are silent. A mistyped
+/// superclass -- `class Typo(NSVeiw)` -- does not fail at runtime: it produces
+/// a ROOT class, and a window that never appears with nothing anywhere saying
+/// why. And a framework that was never loaded makes objc_getClass return nil,
+/// which produces exactly the same root class from correct source.
+static void validateObjCBases(SharedState &shared, StructDeclOp structOp,
+                              ASTDecl &decl) {
+  auto bases = structOp.getObjcBasesAttr();
+  if (!bases || bases.empty())
+    return; // no bases means NSObject, which always exists
+
+  auto &database = M::KGEN::CocoaKB::CocoaKBDatabase::get();
+
+  // Tell "the SDK has no such class" from "there is no SDK metadata here".
+  // They are the same empty answer and completely different problems, and
+  // reporting the second as the first blames correct code for a configuration
+  // mistake -- every class in the file reporting an undefined superclass.
+  if (llvm::Error unavailable = database.availability()) {
+    shared.emitError(decl.getLoc())
+        << "declaring an Objective-C class needs the Cocoa metadata database: "
+        << llvm::toString(std::move(unavailable));
+    return;
+  }
+
+  // `foundation.NSView` names the same class as `NSView`; the qualifier says
+  // where the author found it, not what the runtime calls it.
+  auto runtimeName = [](StringRef base) {
+    auto split = base.rsplit('.');
+    return split.second.empty() ? base : split.second;
+  };
+
+  SmallVector<Attribute> frameworks;
+  SmallPtrSet<Attribute, 4> seen;
+  for (auto baseAttr : bases) {
+    StringRef base = runtimeName(cast<StringAttr>(baseAttr).getValue());
+    auto framework = database.lookup("class_framework", {base});
+    if (!framework)
+      continue;
+    auto attr = StringAttr::get(shared.getContext(), *framework);
+    if (seen.insert(attr).second)
+      frameworks.push_back(attr);
+  }
+
+  // The superclass specifically has to exist. A protocol the SDK does not know
+  // is not checked here: protocols are adopted, not inherited, and an unknown
+  // one costs a missing conformance rather than a wrong root class.
+  StringRef super = runtimeName(cast<StringAttr>(bases[0]).getValue());
+  if (!database.lookup("superclass", {super}) &&
+      !database.lookup("class_framework", {super})) {
+    shared.emitError(decl.getLoc())
+        << "the Objective-C runtime has no class '" << super
+        << "' to inherit from";
+    return;
+  }
+
+  if (!frameworks.empty())
+    structOp.setObjcFrameworksAttr(
+        ArrayAttr::get(shared.getContext(), frameworks));
+}
+
 static ParseResult skipObjCBaseList(ParserBase &p) {
   if (!p.getToken().is(Token::l_paren) || p.getToken().isStartOfLine())
     return success();
@@ -3814,6 +3878,9 @@ LogicalResult DeclResolver::resolveSignature(StructDeclOp structOp,
   decl.setTypeDeclSelf(ASTDecl::computeSelfTypeForStruct(structOp));
 
   // Structs are memory-only unless they opt-in to being passed in registers.
+  if (isClass)
+    validateObjCBases(shared, structOp, decl);
+
   // (3) A class is a pointer: it is passed in a register, always. Not trivial,
   // though -- copying one retains and destroying one releases, which is why
   // this is RegisterPassable and not RegisterPassableTrivial.
