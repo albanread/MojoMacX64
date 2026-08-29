@@ -85,14 +85,12 @@ def main() raises:
     print("  setFrame:     sum =", s2, "(expect 12.0)")
     ok = ok and s2 == Float64(12.0)
 
-    # 32-byte struct RETURN: must go through objc_msgSend_stret.
-    # REFUSED AT COMPILE TIME today -- runtime.mojo:116 defers the sret slot to
-    # P2.1. Left here, disabled, as the acceptance test for that work; the
-    # refusal is correct behaviour, not a bug, and is far better than the
-    # silent stack corruption the alternative would be.
-    #
-    #   var r = send[NSRect, "frame"](obj)
-    #   ok = ok and (r.origin.x + r.origin.y + r.size.width + r.size.height) == 17.0
-    print("  frame         -- SKIPPED: struct return awaits P2.1 (sret slot)")
+    # 32-byte struct RETURN, through objc_msgSend_stret. This is the case
+    # arm64 does not have at all, so it is the one most likely to be wrong in a
+    # binding ported from there -- and it is correct here.
+    var r = send[NSRect, "frame"](obj)
+    var s3 = r.origin.x + r.origin.y + r.size.width + r.size.height
+    print("  frame         sum =", s3, "(expect 17.0)")
+    ok = ok and s3 == Float64(17.0)
 
     print("ABI-ORACLE-SEND:", "PASS" if ok else "FAIL")

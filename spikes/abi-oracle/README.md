@@ -38,25 +38,42 @@ writing any such test.
 
 ## Status
 
-**Direction A — Mojo sends, clang receives.** PASS.
+**Direction A — Mojo sends, clang receives.** PASS, all three.
 
 | case | shape | result |
 |---|---|---|
 | `setFrameSize:` | 16B struct arg, SSE registers | 31.0 ✓ |
 | `setFrame:` | 32B struct arg, MEMORY/stack | 12.0 ✓ |
-| `frame` | 32B struct **return** | **skipped** |
+| `frame` | 32B struct **return**, `_stret` | 17.0 ✓ |
 
 The database independently agrees with clang on the entry point: it answers
 `objc_msgSend_stret` for `frame` and plain `objc_msgSend` for the setters,
 and clang's own dylib references exactly those two symbols.
 
-The struct return is **refused at compile time**, by design —
-`runtime.mojo:116` defers the sret slot to P2.1. That refusal is correct
-behaviour and much better than the silent stack corruption the alternative
-would be, but it means **no NSRect-returning API is reachable today**
-(`frame`, `bounds`, `visibleRect`, …). P2.1 is therefore on phase 1's critical
-path, not a nicety: a `class` method returning a struct needs the same slot on
-the receiving side.
+The struct return is the case arm64 does not have at all — there is no
+`objc_msgSend_stret` on Apple silicon — so it is the one most likely to be
+wrong in a binding ported from there. It is correct here.
+
+### A correction
+
+An earlier version of this file said the struct return was *refused at compile
+time by design*, with `runtime.mojo:116` deferring an sret slot to "P2.1", and
+concluded that no NSRect-returning API was reachable and that P2.1 was on phase
+1's critical path. **All of that was wrong**, and worth recording because the
+reasoning failed in an instructive way.
+
+The compile error was real but was a *database* miss — `selector_arg_classes`
+had no row for `frame` — and it surfaced through `send`, the selector-keyed
+path. I read the failure, found a comment in `runtime.mojo` describing an
+unimplemented sret slot, and treated the comment as the explanation without
+testing it. Two checks would have caught it: the class-keyed `msg_send` path
+returned a correct 32-byte `NSRect` from a real `NSWindow` all along, and the
+comment itself was stale. Rebuilding `cocoa.sqlite` supplied the missing row
+and the selector-keyed path works too.
+
+The stale comment has been corrected. There is no sret slot to wire: the stub
+is cast to the exact function-pointer type of the call site, so the C ABI
+inserts the hidden pointer from the declared return type.
 
 **Direction B — clang sends, Mojo receives.** Not yet. The `poke_*` functions
 in the `.m` are written and waiting; they target a class registered *from

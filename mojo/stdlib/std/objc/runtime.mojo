@@ -113,9 +113,12 @@ struct ObjCObject(TrivialRegisterPassable):
 #   objc_msgSend_fpret  -- long double returns (x87)
 #   objc_msgSend_stret  -- MEMORY returns (aggregates > 16 bytes): a hidden
 #                          buffer pointer is passed in rdi, shifting self->rsi.
-# P2 implements the register paths (plain + fpret). A struct return is a
-# comptime error here until P2.1 wires the sret slot -- caught at compile
-# time, never miscompiled into a silent stack corruption.
+# All three paths work. The stub is cast to the exact function-pointer type of
+# the call site, so the C ABI inserts the hidden sret pointer from the RETURN
+# TYPE the caller declares -- there is no separate slot to wire, which an
+# earlier version of this comment claimed there was. Verified against clang as
+# the oracle: spikes/abi-oracle returns a 32-byte NSRect through _stret and
+# gets the exact value back.
 # ===----------------------------------------------------------------------=== #
 
 
