@@ -396,3 +396,27 @@ struct autoreleasepool:
         external_call["objc_autoreleasePoolPop", NoneType](
             _RawPtr(unsafe_from_address=token)
         )
+
+
+def load_framework[name: StaticString]() -> Bool:
+    """Force a system framework into the process (dlopen, RTLD_NOW).
+
+    Foundation arrives free -- something in every process drags it in -- but
+    AppKit does NOT unless the binary was linked against it. Our AOT wrapper
+    passes `-framework AppKit`, so a built binary is fine; a JIT-run program
+    (`mojo run`) links nothing, so `objc_getClass("NSApplication")` returns nil
+    and every message sent to nil silently no-ops. The app "runs" and exits
+    with no window and no diagnostic anywhere.
+
+    Call this first in anything windowed, and check the result -- failing
+    loudly is the entire point, because the failure it prevents is silent.
+
+    Idempotent (dlopen refcounts), cheap after the first call.
+    """
+    comptime path = StaticString(
+        _get_kgen_string[
+            "/System/Library/Frameworks/", name, ".framework/", name
+        ]()
+    )
+    var h = external_call["dlopen", _RawPtr](path.unsafe_ptr(), Int(2))
+    return Int(h) != 0

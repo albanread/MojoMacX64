@@ -12,7 +12,16 @@
 # selector is a compile error.
 # ===----------------------------------------------------------------------=== #
 
-from .runtime import ObjCClass, ObjCObject, SEL, sel, msg_send, send, autoreleasepool
+from .runtime import (
+    ObjCClass,
+    ObjCObject,
+    SEL,
+    sel,
+    msg_send,
+    send,
+    autoreleasepool,
+    load_framework,
+)
 from .ownership import ObjCRef
 from .foundation import NSString, nsstring, extern_object
 from .classes import (

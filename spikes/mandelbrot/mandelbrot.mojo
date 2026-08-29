@@ -19,6 +19,7 @@ from std.math import cos
 from max.gpu.host import DeviceContext
 from std.time import perf_counter_ns
 from std.objc import (
+    load_framework,
     ObjCClass,
     ObjCObject,
     msg_send,
@@ -220,6 +221,12 @@ def nsstring(s: String) -> ObjCObject:
 
 
 def main() raises:
+    # A JIT process links nothing against AppKit, so NSApplication resolves
+    # to nil and every message to it silently no-ops -- no window, no error.
+    # Fail loudly instead; the failure this prevents is invisible.
+    if not load_framework["AppKit"]():
+        print("FATAL: could not load AppKit")
+        return
     comptime cx = Float32(-0.743643)
     comptime cy = Float32(0.131826)
     var scale = Float32(3.0) / Float32(WIDTH)

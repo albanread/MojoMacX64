@@ -12,6 +12,7 @@
 # ===----------------------------------------------------------------------=== #
 
 from std.objc import (
+    load_framework,
     ObjCClass,
     ObjCObject,
     msg_send,
@@ -581,6 +582,12 @@ from std.time import perf_counter_ns
 
 
 def main():
+    # A JIT process links nothing against AppKit, so NSApplication resolves
+    # to nil and every message to it silently no-ops -- no window, no error.
+    # Fail loudly instead; the failure this prevents is invisible.
+    if not load_framework["AppKit"]():
+        print("FATAL: could not load AppKit")
+        return
     var total = 0
     for i in range(1_000_000):
         total += i
