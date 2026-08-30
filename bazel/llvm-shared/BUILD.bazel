@@ -1,0 +1,155 @@
+"""LLVM as one shared library.
+
+The mojo binary links against this rather than absorbing ~100 MB of LLVM
+archives, and it is the piece an out-of-tree tool -- an IDE, a language server --
+can link against without rebuilding LLVM itself.
+
+Two things had to be true for this to work, both easy to lose:
+
+1. LLVM must be compiled with default symbol visibility. The toolchain applies
+   -fvisibility=hidden to everything (bazel/internal/cc-toolchain/args/BUILD.bazel:124),
+   which leaves a dylib with tens of thousands of defined symbols and a couple
+   of hundred exported. --config=release overrides it for this external path;
+   see the per_file_copt in .bazelrc.
+
+2. Every LLVM cc_library in the binary's transitive closure must be listed
+   here. Anything left out gets linked statically into the binary as well, and
+   two copies of LLVM in one process means two ManagedStatic registries and two
+   sets of cl::opt -- which fails at startup, not at link time.
+
+The dep list is the answer to
+
+    bazel query 'kind("cc_library rule",
+                      filter("llvm-project//llvm", deps(//KGEN/tools/mojo:mojo)))'
+
+Regenerate it with that query if the compiler starts using a new LLVM library;
+bazel will tell you, loudly, if one is missing. (rules_cc calls this attribute
+'deps' -- it was 'roots' until recently, and the error for the old name is
+clear about it.)
+"""
+
+load("@rules_cc//cc:defs.bzl", "cc_shared_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_shared_library(
+    name = "LLVM",
+    shared_lib_name = "libLLVM.dylib",
+    # Export everything LLVM defines: consumers outside this build (the IDE)
+    # need symbols that nothing inside it happens to call.
+    exports_filter = [
+        "@llvm-project//llvm:__subpackages__",
+        # LLVM's Support links zlib-ng and zstd, so they end up inside this
+        # dylib. Whatever else in the binary wants them has to get them from
+        # here rather than linking a second copy; bazel refuses to guess and
+        # asks to be told, which is what this is.
+        # Canonical (@@...+) names: neither repo is a direct dependency of this
+        # module, so the plain @zlib-ng form is not visible from here.
+        "@@zlib-ng+//:__subpackages__",
+        "@@zstd+//:__subpackages__",
+    ],
+    deps = [
+        "@llvm-project//llvm:AArch64AsmParser",
+        "@llvm-project//llvm:AArch64CodeGen",
+        "@llvm-project//llvm:AArch64CommonTableGen",
+        "@llvm-project//llvm:AArch64Disassembler",
+        "@llvm-project//llvm:AArch64DisassemblerInternalHeaders",
+        "@llvm-project//llvm:AArch64Info",
+        "@llvm-project//llvm:AArch64TargetMCA",
+        "@llvm-project//llvm:AArch64UtilsAndDesc",
+        "@llvm-project//llvm:AggressiveInstCombine",
+        "@llvm-project//llvm:AllTargetsAsmParsers",
+        "@llvm-project//llvm:AllTargetsCodeGens",
+        "@llvm-project//llvm:AllTargetsDisassemblers",
+        "@llvm-project//llvm:AllTargetsMCAs",
+        "@llvm-project//llvm:Analysis",
+        "@llvm-project//llvm:AsmParser",
+        "@llvm-project//llvm:BinaryFormat",
+        "@llvm-project//llvm:BinaryFormatELF",
+        "@llvm-project//llvm:BitReader",
+        "@llvm-project//llvm:BitWriter",
+        "@llvm-project//llvm:BitstreamReader",
+        "@llvm-project//llvm:BitstreamWriter",
+        "@llvm-project//llvm:CFGuard",
+        "@llvm-project//llvm:CGData",
+        "@llvm-project//llvm:CodeGen",
+        "@llvm-project//llvm:CodeGenTypes",
+        "@llvm-project//llvm:Core",
+        "@llvm-project//llvm:Coroutines",
+        "@llvm-project//llvm:DTLTO",
+        "@llvm-project//llvm:DebugInfo",
+        "@llvm-project//llvm:DebugInfoBTF",
+        "@llvm-project//llvm:DebugInfoCodeView",
+        "@llvm-project//llvm:DebugInfoDWARF",
+        "@llvm-project//llvm:DebugInfoDWARFLowLevel",
+        "@llvm-project//llvm:DebugInfoGSYM",
+        "@llvm-project//llvm:DebugInfoMSF",
+        "@llvm-project//llvm:DebugInfoPDB",
+        "@llvm-project//llvm:Demangle",
+        "@llvm-project//llvm:ExecutionEngine",
+        "@llvm-project//llvm:FrontendAtomic",
+        "@llvm-project//llvm:FrontendDebug",
+        "@llvm-project//llvm:FrontendDirective",
+        "@llvm-project//llvm:FrontendDriver",
+        "@llvm-project//llvm:FrontendHLSL",
+        "@llvm-project//llvm:FrontendOffloading",
+        "@llvm-project//llvm:FrontendOpenMP",
+        "@llvm-project//llvm:HTTP",
+        "@llvm-project//llvm:HipStdPar",
+        "@llvm-project//llvm:IPO",
+        "@llvm-project//llvm:IRPrinter",
+        "@llvm-project//llvm:IRReader",
+        "@llvm-project//llvm:InstCombine",
+        "@llvm-project//llvm:Instrumentation",
+        "@llvm-project//llvm:JITLink",
+        "@llvm-project//llvm:JITLinkTableGen",
+        "@llvm-project//llvm:LTO",
+        "@llvm-project//llvm:LibDriver",
+        "@llvm-project//llvm:LibOptionsTableGen",
+        "@llvm-project//llvm:Linker",
+        "@llvm-project//llvm:MC",
+        "@llvm-project//llvm:MCA",
+        "@llvm-project//llvm:MCDisassembler",
+        "@llvm-project//llvm:MCParser",
+        "@llvm-project//llvm:ObjCARC",
+        "@llvm-project//llvm:Object",
+        "@llvm-project//llvm:ObjectYAML",
+        "@llvm-project//llvm:Option",
+        "@llvm-project//llvm:OrcDebugging",
+        "@llvm-project//llvm:OrcJIT",
+        "@llvm-project//llvm:OrcShared",
+        "@llvm-project//llvm:OrcTargetProcess",
+        "@llvm-project//llvm:PPCGenTargetFeaturesGen",
+        "@llvm-project//llvm:PPCTargetParser",
+        "@llvm-project//llvm:Passes",
+        "@llvm-project//llvm:Plugins",
+        "@llvm-project//llvm:ProfileData",
+        "@llvm-project//llvm:Remarks",
+        "@llvm-project//llvm:SandboxIR",
+        "@llvm-project//llvm:Scalar",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//llvm:Symbolize",
+        "@llvm-project//llvm:TableGen",
+        "@llvm-project//llvm:TableGenGlobalISel",
+        "@llvm-project//llvm:Target",
+        "@llvm-project//llvm:TargetParser",
+        "@llvm-project//llvm:TextAPI",
+        "@llvm-project//llvm:TransformUtils",
+        "@llvm-project//llvm:Vectorize",
+        "@llvm-project//llvm:WindowsDriver",
+        "@llvm-project//llvm:WindowsManifest",
+        "@llvm-project//llvm:asm_printer_defs",
+        "@llvm-project//llvm:attributes_gen",
+        "@llvm-project//llvm:common_transforms",
+        "@llvm-project//llvm:config",
+        "@llvm-project//llvm:intrinsic_enums_gen",
+        "@llvm-project//llvm:intrinsics_impl_gen",
+        "@llvm-project//llvm:ir_headers",
+        "@llvm-project//llvm:llvm-tblgen-headers",
+        "@llvm-project//llvm:orc_headers",
+        "@llvm-project//llvm:pass_registry_def",
+        "@llvm-project//llvm:runtime_libcalls_gen",
+        "@llvm-project//llvm:target_library_info_gen",
+        "@llvm-project//llvm:vt_gen",
+    ],
+)

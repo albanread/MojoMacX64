@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_shared_library")
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load(
     "//bazel:api.bzl",
@@ -1658,4 +1659,62 @@ alias(
     actual = "//KGEN/tools/mojo:mojo-full",
     # Used as a run target
     tags = [TOP_LEVEL_TAG],
+)
+
+# COCOA: the Mojo front end as a shared library, for embedding compiler phases
+# in an editor rather than shelling out to `cocoamojo`.
+#
+# It lives here rather than under //bazel because half of what it needs --
+# //Cache:Cache, :KGENDialect.headers and friends -- is visible to consumer
+# groups that a new top-level package is not in.
+#
+# The seam an embedder uses is M::MojoParserContext in
+# KGEN/MojoTooling/ParserDriver.h: hand it an llvm::SourceMgr you own and a
+# LIT::ParserConfig, and diagnostics arrive through llvm::SourceMgr's ordinary
+# setDiagHandler hook as SMDiagnostic values. tools/ide-probe/syntax_probe.cpp
+# is the whole of it in 60 lines.
+#
+# LLVM and MLIR arrive as dynamic_deps rather than being absorbed: the
+# distribution ships those dylibs already, and a second copy of either is the
+# duplicate-registry problem this tree has hit twice.
+#
+# The dep list answers
+#
+#   bazel query 'kind("cc_library rule", deps(//KGEN:MojoTooling))
+#                except filter("llvm-project", deps(//KGEN:MojoTooling))'
+#
+# Regenerate it if the front end grows a dependency. Bazel fails at analysis,
+# not at run time, when one is missing.
+cc_shared_library(
+    name = "MojoCompilerShared",
+    shared_lib_name = "libMojoCompiler.dylib",
+    dynamic_deps = [
+        "//bazel/llvm-shared:LLVM",
+        "//bazel/mlir-shared:MLIR",
+    ],
+    exports_filter = [
+        "//KGEN:__subpackages__",
+        "//Support:__subpackages__",
+        "//Init:__subpackages__",
+        "//AsyncRT:__subpackages__",
+        "//Config:__subpackages__",
+        "//Cache:__subpackages__",
+    ],
+    # Phase entry points only. cc_shared_library absorbs the transitive closure,
+    # so listing all 111 first-party libraries underneath was both unnecessary
+    # and impossible -- some of them (//Support:BazelRunfiles) are not visible
+    # outside their own consumer group. The exhaustive list is only needed when
+    # a *binary* also links the same libraries and bazel has to arbitrate; no
+    # binary takes a dynamic_dep on this one.
+    deps = [
+        ":MojoTooling",     # parse, diagnostics, doc generation
+        ":Elaborator",      # comptime evaluation, cocoakb_query
+        ":Pipeline",        # lowering
+        ":ObjectCompiler",  # AOT object emission
+        # Init is not in MojoTooling's closure, but an embedder needs it: the
+        # process-wide M::Context holds init and runtime state the parser
+        # depends on, and getOrCreateContext is the first call any of this
+        # makes.
+        "//Init",
+    ],
 )

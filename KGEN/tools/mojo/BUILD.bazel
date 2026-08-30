@@ -151,6 +151,15 @@ modular_cc_library(
 
 modular_cc_binary(
     name = "mojo",
+    # LLVM comes in as a dylib rather than ~100 MB of archives folded into this
+    # binary. dynamic_deps passes straight through modular_cc_binary to
+    # cc_binary, and bazel takes care of not also linking those libraries
+    # statically -- which is the part that matters, since two copies of LLVM in
+    # one process means two ManagedStatic registries.
+    dynamic_deps = [
+        "//bazel/llvm-shared:LLVM",
+        "//bazel/mlir-shared:MLIR",
+    ],
     linkopts = _MOJO_LINKOPTS,
     deps = [":mojo_common"],
 )

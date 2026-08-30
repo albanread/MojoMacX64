@@ -28,6 +28,69 @@ build:public-cache --remote_cache=grpcs://modular-public.buildbuddy.io
 build:build-mojo --//:use_prebuilt_mojo_toolchain=false
 build:prebuilt-mojo --//:use_prebuilt_mojo_toolchain=true
 
+# ---------------------------------------------------------------------------
+# The release build: what ships in the distribution.
+#
+#   ./bazelw build --config=build-mojo --config=release //KGEN/tools/mojo:mojo
+#
+# Ported from the sister fork. The default build is `--compilation_mode=dbg`,
+# which is why the compiler is large and slower than it needs to be at the one
+# job it has. Nothing about this fork requires a debug LLVM.
+#
+# Every flag here changes the action key, so this config gets its own output
+# tree. That costs one full build and then stays warm -- and it means a failure
+# here leaves the working dbg toolchain exactly where it was.
+build:release --compilation_mode=opt
+
+# Tune for the machine this actually runs on. There is one, and we know what it
+# is: a Xeon W-3235, which is Cascade Lake.
+#
+# DIVERGENCE, and the only one in this block. Theirs is `-mcpu=apple-m4`, which
+# is the same decision for their single machine. `-mcpu` is not the x86 spelling
+# and `apple-m4` is not an x86 target, so the flag has to change; the intent
+# does not. Applied to host tools as well, because those run here too.
+build:release --copt=-march=cascadelake
+build:release --host_copt=-march=cascadelake
+build:release --cxxopt=-march=cascadelake
+build:release --host_cxxopt=-march=cascadelake
+
+# Link LLVM as a shared library rather than folding it into every binary.
+# bazel/internal/common.bazelrc turns dynamic linking off globally with a note
+# about circular dependency linking issues; those bite the full Modular graph,
+# which this fork does not build. Re-enabling it here keeps the blast radius
+# inside this config: if the link fails, the dbg tree is untouched.
+build:release --dynamic_mode=default
+build:release --features=supports_dynamic_linker
+
+# Compile LLVM and MLIR with default symbol visibility, so
+# //bazel/llvm-shared:LLVM and //bazel/mlir-shared:MLIR are libraries other
+# things can actually call.
+#
+# bazel/internal/cc-toolchain/args/BUILD.bazel applies -fvisibility=hidden across
+# the whole toolchain. For a single static binary that is free size; for a dylib
+# it is fatal and silently so. Measured here before this config existed:
+# libLLVM.dylib built at 101 MB and exported 177 symbols, and nothing outside
+# could call in -- their note records 192 on the other machine, which is the
+# same failure counted on different hardware.
+#
+# -fno-visibility-inlines-hidden matters too: without it LLVM's inline and
+# template members stay hidden, which is exactly the set a consumer needs and
+# the hardest to notice missing.
+build:release --per_file_copt=external/.*llvm-project/(llvm|mlir)/.*@-fvisibility=default,-fno-visibility-inlines-hidden
+build:release --host_per_file_copt=external/.*llvm-project/(llvm|mlir)/.*@-fvisibility=default,-fno-visibility-inlines-hidden
+
+# The compiler's own code, for //KGEN:MojoCompilerShared. Without this the front
+# end links into libMojoCompiler.dylib and exports nothing, which is the same
+# silent failure as LLVM's: the dylib builds, and no embedder can call in.
+build:release --per_file_copt=^(KGEN|Support|Init|Config|Cache|AsyncRT)/.*@-fvisibility=default,-fno-visibility-inlines-hidden
+build:release --host_per_file_copt=^(KGEN|Support|Init|Config|Cache|AsyncRT)/.*@-fvisibility=default,-fno-visibility-inlines-hidden
+
+# zlib-ng and zstd are compression backends LLVM's Support links, so they land
+# inside libLLVM.dylib and have to be callable from outside it for the same
+# reason everything else does.
+build:release --per_file_copt=external/.*(zlib-ng|zstd).*@-fvisibility=default
+build:release --host_per_file_copt=external/.*(zlib-ng|zstd).*@-fvisibility=default
+
 # Check for a local gitignored bazel config.
 # NOTE: Import this last so that local configs can override.
 try-import %workspace%/local.bazelrc
