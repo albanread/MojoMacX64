@@ -424,6 +424,49 @@ static void collectFrameVariables(
     if (!mojoType)
       continue;
 
+    // Can the WRAPPER name this type? Not every Mojo type a frame can hold
+    // can be written into the generated context struct, and one that cannot
+    // does not fail by itself -- it fails the whole expression:
+    //
+    //   MOJO_LLDB_FRAME_LOCALS=0   expr 1 + 41   -> evaluates
+    //   MOJO_LLDB_FRAME_LOCALS=1   expr 1 + 41   -> fails
+    //
+    // on an expression that mentions no local at all. The wrapper declares
+    // every collected variable as `Pointer[mut, Pointer[mut, T, ...], ...]`,
+    // and `Pointer`'s parameter T is an `AnyType`. A struct that survived
+    // lowering with its source identity intact is not one: it arrives as a
+    // KIND, and the parse dies on the field declaration --
+    //
+    //   'Pointer' parameter 'T' has 'AnyType' type,
+    //   but value has type 'AnyStruct[Point]'
+    //
+    // -- before it ever looks at the expression. So collection without this
+    // filter works only by breaking everything else.
+    //
+    // Rejected HERE, before AddVariable, and that ordering is the point: a
+    // materializer entity registered for a variable we then drop would leave
+    // the entity list and the wrapper's fields disagreeing about position,
+    // which is the offset bug this file's parse() already warns about at
+    // length. Do not move this below the registration.
+    //
+    // The boundary this draws is exactly the level-1/level-2 split in
+    // spikes/MOJOLLDB-SPIKE.md, and drawing it is what makes that split
+    // MEASURABLE: a scalarized local is admitted and can be named, a
+    // preserved struct is not, and the debugger says which and why instead
+    // of failing wholesale. It widens on its own when the semantic type
+    // contract lands -- nothing here needs revisiting to let structs
+    // through, because they will stop being kinds.
+    if (isa<LIT::StructType>(mojoType)) {
+      std::string typeText;
+      llvm::raw_string_ostream typeOS(typeText);
+      mojoType.print(typeOS);
+      logger.debugLog("frame variable '{0}' has a type the expression wrapper "
+                      "cannot declare ({1}); not collected",
+                      name, typeOS.str());
+      alreadyPresent.erase(name);
+      continue;
+    }
+
     // Materializable? If lldb cannot arrange to move the value in and out,
     // the expression must not be able to mention it -- an unmaterialized
     // argument is a wild pointer at JIT time.

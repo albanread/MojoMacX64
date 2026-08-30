@@ -178,6 +178,52 @@ RuntimeGlobals, three of which are `tc_new`/`tc_delete`, so it genuinely wants
 tcmalloc for its own allocation. **Left alone deliberately, recorded here rather
 than fixed quietly.** Revisit if the CLI is ever shipped as a product surface.
 
+## Step 4 — the frame-local type filter. DONE, and it is AHEAD OF THEM.
+
+**Read this before touching MojoExpressionParser.cpp.** Every other file in this
+sprint is byte-identical to `mojococoa/main`. This one is not, and the
+difference is not an x86-64 divergence — it is a step of the shared plan taken
+here first. Their `spikes/MOJOLLDB-SPIKE.md`, which we carry verbatim, names it
+as the next thing to do and specifies its purpose; it does not implement it.
+**Send this upstream rather than letting the two forks solve it twice.**
+
+The defect, reproduced here exactly as they recorded it, on an expression that
+mentions no local at all:
+
+    MOJO_LLDB_FRAME_LOCALS=0   expr 1 + 41   -> evaluates
+    MOJO_LLDB_FRAME_LOCALS=1   expr 1 + 41   -> 'Pointer' parameter 'T' has
+                                                'AnyType' type, but value has
+                                                type 'AnyStruct[Point]'
+
+The wrapper declares every collected variable as `Pointer[mut, Pointer[mut, T,
+...], ...]` and `Pointer`'s `T` is an `AnyType`. A struct that survived lowering
+with its source identity intact is not one — it arrives as a KIND, and the parse
+dies on the field declaration before it ever reaches the expression. Collection
+"worked" only by breaking everything else.
+
+The filter rejects such types in `collectFrameVariables`, **before**
+`AddVariable` — that ordering is deliberate. Registering a materializer entity
+for a variable that is then dropped leaves the entity list and the wrapper's
+fields disagreeing about position, which is the offset bug `parse()` already
+warns about at length. It is commented in place; do not move it below the
+registration.
+
+Measured after, at a breakpoint with `p: Point` and `total: Int` in scope:
+
+    expr 1 + 41       ->  evaluates (42, warns the value is unused)
+    expr total + 41   ->  '!kgen.scalar<index>' does not implement '__add__'
+    expr p            ->  use of unknown declaration 'p'
+
+The middle line is **their recorded frontier, reached here**: the name binds and
+a type flows, but the wrapper receives DWARF's scalar rather than Mojo's `Int`.
+The third is honest rather than silent. That is the whole point of the filter —
+it does not make structs work, it makes the level-1/level-2 boundary
+OBSERVABLE, which is what their doc asks of it and why it is the smallest of the
+three pieces.
+
+It widens on its own when the semantic type contract lands. Nothing in it needs
+revisiting to let structs through; they will simply stop being kinds.
+
 ## Next
 
 * **A fixture matching their description** (nested shadowing, sibling scopes
