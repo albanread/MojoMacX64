@@ -134,6 +134,50 @@ of them described by more than one die, widest fan-out 18, validation OK. Their
 central requirement — one record to many offsets — is confirmed here: a 1:1
 table would drop 801 of 1154 dies (69%, against their 81% at `-O0`).
 
+## Step 3 — it debugs. Developer mode was the only gate.
+
+`sudo DevToolsSecurity -enable`, and the whole path works on x86-64:
+
+    Breakpoint 1: where = dbg_min2`dbg_min::main() + 34 at dbg_min.mojo:9:10
+    Process stopped ... at dbg_min.mojo:9:10
+    (lldb) frame variable
+    (Point) p = (x = 7, y = 9)
+    (__mlir_type.`!kgen.scalar<index>`) total = 16
+
+Breakpoints bind by file:line, the program stops, source displays, and named
+Mojo locals come back with values -- their spike's own success criterion. The
+level split is visible in the output: `Point` keeps its identity and its fields,
+`total` is an `Int` and arrives as erased storage with the right value.
+
+**The DAP path -- which is the one the IDE uses -- also works**, verified with
+`spikes/dap-probe.py`: breakpoint verified, stop lands on it, and the stopped
+frame answers with `p` and `total`.
+
+Two things needed for the CLI that DAP does not need, both of them theirs:
+`lldb-argdumper` must sit beside the binaries (the CLI's `run` shells out to
+it), and the layout must be `bin/` + `lib/`, because the staged `lldb` resolves
+`liblldb` through `@rpath/../lib`.
+
+### The one real defect, and why it is NOT being fixed by changing the allocator
+
+The lldb CLI aborts on `quit` -- exit 134, `tcmalloc: Attempt to free invalid
+pointer`, from CoreFoundation's autorelease pool draining on thread exit. It is
+the plugin: without it the same session exits 0.
+
+The cause is ours rather than theirs. `libMojoLLDB` pulls `//AsyncRT:RuntimeGlobals`, which statically links gperftools, and **our gperftools is a local
+x86-64 build because upstream's artifact is arm64-only** (`common.MODULE.bazel`
+says so). On Apple, gperftools registers a malloc zone and becomes the system
+allocator; that is right for the compiler, where it loads first, and wrong for a
+plugin dlopen'd into a process that has already allocated.
+
+The tempting fix -- rebuild our gperftools with the OSX override disabled --
+would change the allocator for the entire toolchain, including the compiler's
+hot path, to fix a crash after all work is done. Measurement said not to: the
+DAP path exits 0 and never aborts, and the plugin needs only 10 symbols from
+RuntimeGlobals, three of which are `tc_new`/`tc_delete`, so it genuinely wants
+tcmalloc for its own allocation. **Left alone deliberately, recorded here rather
+than fixed quietly.** Revisit if the CLI is ever shipped as a product surface.
+
 ## Next
 
 * **A fixture matching their description** (nested shadowing, sibling scopes
