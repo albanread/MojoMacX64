@@ -185,6 +185,36 @@ python max/kernels/benchmarks/autotune/kbench.py benchmarks/gpu/linalg/bench_mat
 - Follow value semantics and ownership conventions
 - Use `Origin` parameters (`ImmOrigin`/`MutOrigin`) with `Pointer` in APIs
 - Prefer `Pointer` to the deprecated `UnsafePointer` alias
+#### `let` binds by reference — that is what it is for
+
+`let x = some_global[]` does not copy. It names the storage, which is the
+point of `let`: no copy, no lifetime question, just another way to say the
+same location. So a value read into a `let` and then mutated at the source
+reads back *mutated*, and code written as snapshot-then-clear does neither:
+
+```mojo
+let clicked = g_click()[]     # a view of the global, not a snapshot
+if clicked != 0:
+    g_click()[] = 0           # clicked is now 0
+    handle(clicked - 1)       # handle(-1)
+```
+
+Read the value **out** before touching the source — compute what is needed
+from it, or bind a genuine copy — then clear:
+
+```mojo
+if g_click()[] != 0:
+    let square = g_click()[] - 1   # derived before the reset
+    g_click()[] = 0
+    handle(square)
+```
+
+This has cost real time three times in this project: a flag snapshotted
+then updated, a status line that reported the new value instead of the old,
+and Othello's mouse — where the handler fired, the coordinates were right,
+the square was legal, and the move still vanished one line later. Every
+observable signal says the code works, because the only thing wrong is a
+read that happens after a write nobody thought of as a write.
 
 ### MAX Kernel Development
 
