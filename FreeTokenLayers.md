@@ -224,6 +224,72 @@ dispatch" into "available, if we hook the right place."
 
 ---
 
+## 4.4 Measured: which policy, on an agentic trace
+
+**`MEASURED`** — `llama-moe-policy` replaying a 577,560-event routing trace from a
+synthetic agentic session (prose requests, code slabs, tool-call JSON, diffs) with
+the placement profile taken from a *different* corpus (pure code). Decode-order
+replay; Qwen3-30B-A3B; this machine's bandwidths.
+
+At 37.5% of slots resident:
+
+| policy | hit rate | exposed ms/1k events |
+|---|---:|---:|
+| `cpu_only` (≈ `-ncmoe` everywhere) | 0.0% | 248.6 |
+| `fixed` (offline profile) | 73.8% | 114.2 |
+| **`lru`** | **93.3%** | **66.6** |
+| `hybrid` (pinned core + LRU) | 90.3% | 75.2 |
+
+**LRU wins, and hybrid loses to it.** Pinning half the capacity to a profile fitted
+on another corpus both spends slots on the wrong distribution and starves the
+adaptive half. Dynamic residency is worth roughly 20 points of hit rate over static
+here — far more than the ~3 points the frequency analysis in §4.3 suggested,
+because temporal locality is a much stronger effect than frequency skew and a
+static profile cannot exploit it.
+
+### Two departures from the paper
+
+**Admit CPU-computed experts, not only fetched ones.** FreeToken admits set ℱ, the
+experts it transfers. That is reasonable at their `B_P/B_H` of 0.25–0.68; at our
+0.13 it admits 13% of misses and the cache never fills. Promoting what the CPU
+computed — it already holds the weights, and the copy is off the critical path —
+is worth:
+
+| admission | hit rate | PCIe GB | exposed ms/1k |
+|---|---:|---:|---:|
+| fetch only (theirs) | 80.6% | 91.5 | 98.7 |
+| **fetch + CPU (ours)** | **93.3%** | **25.9** | **66.6** |
+
+**The bandwidth split is neutral, and its real job is admission.** Substituting the
+optimal `q = m·B_P/B_H` back into either branch:
+
+```
+t_pcie = (m·B_P/B_H)·gb/B_P         = m·gb/B_H
+t_cpu  = m(1 − B_P/B_H)·gb/(B_H−B_P) = m·gb/B_H
+```
+
+Both equal `m·gb/B_H` — precisely the cost of running every miss on the CPU. Under
+its own residual model **the split cannot beat CPU-only on throughput.** What it
+actually buys is cache population, and once CPU-computed experts are admitted too,
+that benefit is available without the transfers. Measured: `all_cpu` 65.4 ms/1k
+against `residual` 66.6, and the adaptive balancer converges to ~0 PCIe traffic on
+its own.
+
+**Consequence for this machine:** run essentially every miss on the CPU, promote
+asynchronously, and treat PCIe as a cache-fill path of last resort. Our weak
+interconnect stops being the problem it looked like in §3.
+
+### Health warning
+
+Three measurement errors were made and caught while producing §4.3 and §4.4: a
+contiguous read of a strided view (fake uniform routing), pooling counts by expert
+index across layers (halved apparent skew), and layer-major trace replay (LRU at a
+fictional 97.4%). Every one produced a result that was *too clean*. The numbers
+above are the ones that survived; treat them as provisional until an implementation
+reproduces them.
+
+---
+
 ## 5. Staged plan
 
 Ordered so that each phase is useful alone and the cheap ones come first.
@@ -241,7 +307,11 @@ Neither can be read off a spec sheet. Both are load-bearing for everything below
    staged upload timings in `ggml_metal_buffer_set_tensor`.
 3. ~~**The expert-usage histogram.**~~ **DONE — see §4.3.**
 
-### Phase 1 — static hot/cold placement (small)
+### Phase 1 — static hot/cold placement (small) — **superseded by §4.4**
+
+Measurement says static placement reaches 73.8% where LRU reaches 93.3%. Worth
+building only as a fallback for models we cannot profile, or as a first step whose
+machinery Phase 3 reuses.
 
 If routing is skewed: pin frequently-routed experts to VRAM and push the cold
 tail to CPU, using `-ot` regexes generated from the Phase 0 histogram. This is
