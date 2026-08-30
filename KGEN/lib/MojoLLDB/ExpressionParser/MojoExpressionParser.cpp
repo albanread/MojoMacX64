@@ -36,6 +36,9 @@
 #include "lldb/Expression/Materializer.h"
 #include "lldb/Target/ExecutionContextScope.h"
 #include "lldb/Target/StackFrame.h"
+#include "lldb/Symbol/Type.h"
+#include "lldb/Symbol/Variable.h"
+#include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "mlir/IR/IRMapping.h"
@@ -62,6 +65,11 @@ struct MojoExpressionParser::Impl {
 
   /// The expression being parsed.
   MojoUserExpression &expr;
+
+  /// The scope the expression is evaluated in -- the stopped FRAME, when
+  /// there is one. Kept rather than only its target, because the frame is
+  /// what holds the local variables an expression wants to name.
+  ExecutionContextScope *exeScope = nullptr;
 
   /// The type system associated with the evaluation of the current expression.
   MojoTypeSystem *typeSystem = nullptr;
@@ -95,7 +103,7 @@ struct MojoExpressionParser::Impl {
 MojoExpressionParser::Impl::Impl(ExecutionContextScope *exeScope,
                                  MojoUserExpression &expr,
                                  const EvaluateExpressionOptions &options)
-    : expr(expr), options(options) {
+    : expr(expr), exeScope(exeScope), options(options) {
   // Bail out if we don't have a valid execution context.
   target = exeScope ? exeScope->CalculateTarget() : nullptr;
   if (!target)
@@ -323,6 +331,114 @@ MojoExpressionParser::MojoExpressionParser(
 
 MojoExpressionParser::~MojoExpressionParser() = default;
 
+/// The frame's own variables, as (name, type) pairs the REPL wrapper can
+/// take as arguments.
+///
+/// This is what makes `total + 41` mean something at a breakpoint. The REPL
+/// wrapper has always been able to receive variables -- that is how a
+/// notebook's `a` survives from one cell to the next -- but the only source
+/// ever wired to it was the persistent-variable state, which a debugger
+/// stopped in someone else's function has nothing in. The frame has them all
+/// along; nobody was asking.
+///
+/// One real condition, and one thing that is NOT a check although an earlier
+/// version of this comment claimed it was.
+///
+/// The condition: the variable's type must be a Mojo type. A Mojo frame can
+/// hold a C global whose type came from Clang, and handing that opaque
+/// pointer to the Mojo parser is a crash rather than a diagnostic. The test
+/// is the type system's KIND, not its identity -- a variable's type belongs
+/// to the type system of the MODULE whose DWARF declared it, while the
+/// expression compiles in the target's scratch instance, and those are
+/// legitimately different objects. One shared MLIR context makes that safe.
+///
+/// The non-check: `Materializer::AddVariable` validates nothing. It inserts
+/// an entity and returns its struct offset, and never touches the `Status`
+/// it is handed -- a variable with no location at this PC fails LATER,
+/// during materialization. So its success proves nothing about readability
+/// and this loop must not be read as a filter. The honest preflight is
+/// `GetValueObjectForFrameVariable(..., eNoDynamicValues)` and its error;
+/// that is not done yet.
+///
+/// Shadowing, stated as it BEHAVES rather than as it should: persistent
+/// variables are collected first and seed `alreadyPresent`, so a persistent
+/// variable of the same name currently wins. That is backwards -- the frame
+/// is what the user is looking at -- and it is a known wrong behaviour to
+/// fix deliberately, with a test, rather than by reordering two loops and
+/// hoping.
+static void collectFrameVariables(
+    ExecutionContextScope *exeScope, Materializer *materializer,
+    SmallVectorImpl<std::pair<StringRef, mlir::Type>> &variables,
+    MojoExpressionLogger &logger) {
+  if (!materializer)
+    return;
+  auto *frame = exeScope ? exeScope->CalculateStackFrame().get() : nullptr;
+  if (!frame)
+    return;
+
+  lldb::VariableListSP frameVars = frame->GetInScopeVariableList(
+      /*get_file_globals=*/false);
+  if (!frameVars)
+    return;
+
+  DenseSet<StringRef> alreadyPresent;
+  for (auto &[name, type] : variables)
+    alreadyPresent.insert(name);
+
+  for (size_t i = 0, e = frameVars->GetSize(); i != e; ++i) {
+    lldb::VariableSP var = frameVars->GetVariableAtIndex(i);
+    if (!var)
+      continue;
+    llvm::StringRef name = var->GetName().GetStringRef();
+    if (name.empty() || !alreadyPresent.insert(name).second)
+      continue;
+
+    // Ours, or another language's? A CompilerType carries the type system
+    // that made it; anything but ours is not a Mojo type and cannot be
+    // named in a Mojo expression.
+    lldb_private::CompilerType compilerType = var->GetType()
+                                                  ? var->GetType()->GetFullCompilerType()
+                                                  : lldb_private::CompilerType();
+    if (!compilerType)
+      continue;
+    // Ours, or another language's? The test is the type system's KIND, not
+    // its identity: a variable's type is created by the type system of the
+    // MODULE whose DWARF declared it, while the expression is compiled by
+    // the target's scratch instance, and those are legitimately different
+    // objects. Comparing pointers rejected every frame variable in the
+    // program. What must hold is that the type is a Mojo type at all --
+    // a C global whose type came from Clang cannot be named in a Mojo
+    // expression, and handing that opaque pointer to the parser is a crash
+    // rather than a diagnostic.
+    //
+    // Sharing one MLIR context across instances is what makes this safe,
+    // and it is not incidental: `MojoTypeSystem::Impl` takes the context
+    // from `getOrCreateGlobalContext()`, so every instance in the process
+    // interns types in the same place and a type from one is a valid type
+    // in another.
+    if (!compilerType.GetTypeSystem().isa_and_nonnull<MojoTypeSystem>())
+      continue;
+
+    mlir::Type mojoType =
+        mlir::Type::getFromOpaquePointer(compilerType.GetOpaqueQualType());
+    if (!mojoType)
+      continue;
+
+    // Materializable? If lldb cannot arrange to move the value in and out,
+    // the expression must not be able to mention it -- an unmaterialized
+    // argument is a wild pointer at JIT time.
+    Status err;
+    materializer->AddVariable(var, err);
+    if (err.Fail()) {
+      logger.debugLog("frame variable '{0}' is not materializable: {1}", name,
+                      err.AsCString());
+      alreadyPresent.erase(name);
+      continue;
+    }
+    variables.emplace_back(name, mojoType);
+  }
+}
+
 M::LogicalResult
 MojoExpressionParser::parse(MojoPersistentExpressionState &state,
                             DiagnosticManager &diagnosticManager) {
@@ -351,9 +467,57 @@ MojoExpressionParser::parse(MojoPersistentExpressionState &state,
     impl->expressionLogger->errorLog("{0}", errs);
   });
 
-  // Collect the current persistent variables.
+  // Collect the current persistent variables, then the stopped frame's own.
   SmallVector<std::pair<StringRef, mlir::Type>> variables;
   state.collectPersistentVariables(variables);
+  // Frame locals, behind a switch until they can EXECUTE.
+  //
+  // Collection works: set MOJO_LLDB_FRAME_LOCALS=1 and `total + 41` at a
+  // breakpoint stops saying "use of unknown declaration" -- the name
+  // resolves, because the frame's variables reach the REPL wrapper as
+  // arguments.
+  //
+  // What does not work is READING the value, and the shapes are specific:
+  //
+  //     persistent variable:  context -> reference cell -> T
+  //     frame local:          context -> T
+  //
+  // A persistent variable has an extra allocated reference cell, so the
+  // wrapper declares `Pointer[Pointer[T]]` and dereferences twice. What
+  // `AddVariable` puts in the context is ONE pointer-sized slot holding the
+  // frame variable's address -- so a frame local needs `Pointer[T]` and one
+  // dereference. A `(name, type)` pair cannot carry that distinction, which
+  // is why the wrapper generator cannot tell them apart today.
+  //
+  // Behind that sits an ordering bug that appears once both kinds coexist:
+  // the wrapper emits persistent fields first and frame locals after, while
+  // the materializer receives frame locals HERE (during parsing) and
+  // persistent entities later, in prepareForExecution. Two independently
+  // ordered lists -- and the offset `AddVariable` returns is discarded
+  // rather than checked against the field it is meant to match.
+  //
+  // The fix for both is one explicit contract instead of two implicit ones:
+  // an ordered list of bindings, each carrying its capture kind
+  //
+  //     struct ExpressionBinding {
+  //       StringRef name;
+  //       mlir::Type type;
+  //       CaptureKind kind;          // PersistentIndirect | FrameAddress
+  //       lldb::VariableSP frameVariable;
+  //     };
+  //
+  // used to generate the field AND its dereference depth, to register
+  // materializer entities in exactly that order after compilation, and to
+  // assert each returned offset equals the field the wrapper expects.
+  //
+  // Default off because half of it is worse than none: with collection on,
+  // an expression that used to fail with "unknown declaration" now fails
+  // without a diagnostic at all, and an unreadable error is a worse thing
+  // to ship than a missing feature.
+  if (const char *on = ::getenv("MOJO_LLDB_FRAME_LOCALS"))
+    if (StringRef(on) == "1")
+      collectFrameVariables(impl->exeScope, impl->expr.GetMaterializer(),
+                            variables, *impl->expressionLogger);
 
   // Parse the expression.
   auto [expressionId, exprModuleName] = state.getNextExpressionModuleName();
@@ -382,9 +546,17 @@ MojoExpressionParser::parse(MojoPersistentExpressionState &state,
     // LLDB retry execution with the fixed expression. Before then, we need to
     // emit all of the fixed diagnostics that were collected, given that these
     // won't be shown on the next parse.
-    auto filterFn = [](MojoDiagnostic &diag) { return diag.hadFixits(); };
-    impl->expressionLogger->broadcastDiagnostics(diagnosticManager, filterFn);
-    diagnosticManager.Clear();
+    // Same rule as MojoUserExpression::Parse: hand the diagnostics over only
+    // when somebody is listening. Jupyter listens and renders them itself,
+    // so clearing avoids a double report; lldb and lldb-dap do not, and
+    // clearing there turned a fix-it into "expression failed to parse (no
+    // further compiler diagnostics)" -- a message that names nothing.
+    if (impl->expressionLogger->EventTypeHasListeners(
+            MojoExpressionLogger::eBroadcastUserMessage)) {
+      auto filterFn = [](MojoDiagnostic &diag) { return diag.hadFixits(); };
+      impl->expressionLogger->broadcastDiagnostics(diagnosticManager, filterFn);
+      diagnosticManager.Clear();
+    }
 
     // If the parser was actually successful, make sure to reset it so that we
     // don't include the un-fixed module in the REPL history.
@@ -393,8 +565,23 @@ MojoExpressionParser::parse(MojoPersistentExpressionState &state,
     return failure();
   }
 
-  if (!result.isValid())
+  if (!result.isValid()) {
+    // Do not fail mutely. A fix-it is the common reason to land here -- the
+    // parser rewrites a bare `total + 41` into `_ = total + 41`, because the
+    // wrapper's body takes statements -- and a client that does not re-run
+    // fixed text (lldb-dap does not; `target.auto-apply-fixits` governs the
+    // CLI and is off there) would otherwise report "expression failed to
+    // parse (no further compiler diagnostics)". That sentence names neither
+    // the problem nor the remedy when both are in hand.
+    if (diagnosticManager.Diagnostics().empty() &&
+        !impl->expr.GetFixedText().empty())
+      diagnosticManager.PutString(
+          lldb::eSeverityError,
+          ("this expression has to be written as a statement: " +
+           impl->expr.GetFixedText().str())
+              .c_str());
     return failure();
+  }
   impl->expressionLogger->debugLog("Parsed module successfully");
 
   // Setup a diagnostic handler to process diagnostics emitted during lowering.

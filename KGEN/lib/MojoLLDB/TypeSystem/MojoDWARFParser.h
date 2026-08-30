@@ -129,6 +129,17 @@ private:
   MojoASTDeclRef
   getCachedDeclForDIE(const lldb_private::plugin::dwarf::DWARFDIE &die);
 
+  /// Read one keyed Mojo debug annotation off a die, empty if absent. This is
+  /// the whole transport: the compiler attaches DW_TAG_LLVM_annotation
+  /// children, and every piece of Mojo debug metadata is one of these.
+  llvm::StringRef
+  extractMojoAnnotation(const lldb_private::plugin::dwarf::DWARFDIE &die,
+                        llvm::StringRef key);
+
+  /// The Mojo debug metadata schema this die was emitted under, 0 if it
+  /// predates the contract.
+  unsigned extractMojoSchema(const lldb_private::plugin::dwarf::DWARFDIE &die);
+
   /// Extract the SourceName of a given die by inspecting its annotations.
   DebugInfo::SourceNameAttr
   extractSourceName(const lldb_private::plugin::dwarf::DWARFDIE &die);

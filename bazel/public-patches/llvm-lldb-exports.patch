@@ -383,3 +383,45 @@ index 7f254a1162bd..790403586faf 100644
  } // namespace lldb_private
  
  #endif // LLDB_SOURCE_PLUGINS_SYMBOLFILE_DWARF_LOGCHANNELDWARF_H
+diff --git a/lldb/include/lldb/Symbol/Variable.h b/lldb/include/lldb/Symbol/Variable.h
+--- a/lldb/include/lldb/Symbol/Variable.h
++++ b/lldb/include/lldb/Symbol/Variable.h
+@@ -45,7 +45,7 @@
+ 
+   const Declaration &GetDeclaration() const { return m_declaration; }
+ 
+-  ConstString GetName() const;
++  LLDB_PRIVATE_EXPORT ConstString GetName() const;
+ 
+   ConstString GetUnqualifiedName() const;
+ 
+@@ -60,7 +60,7 @@
+ 
+   bool NameMatches(const RegularExpression &regex) const;
+ 
+-  Type *GetType();
++  LLDB_PRIVATE_EXPORT Type *GetType();
+ 
+   lldb::LanguageType GetLanguage() const;
+ 
+diff --git a/lldb/include/lldb/Symbol/VariableList.h b/lldb/include/lldb/Symbol/VariableList.h
+--- a/lldb/include/lldb/Symbol/VariableList.h
++++ b/lldb/include/lldb/Symbol/VariableList.h
+@@ -37,7 +37,7 @@
+ 
+   void Dump(Stream *s, bool show_context) const;
+ 
+-  lldb::VariableSP GetVariableAtIndex(size_t idx) const;
++  LLDB_PRIVATE_EXPORT lldb::VariableSP GetVariableAtIndex(size_t idx) const;
+ 
+   lldb::VariableSP RemoveVariableAtIndex(size_t idx);
+ 
+@@ -64,7 +64,7 @@
+ 
+   uint32_t FindIndexForVariable(Variable *variable);
+ 
+-  size_t GetSize() const;
++  LLDB_PRIVATE_EXPORT size_t GetSize() const;
+   bool Empty() const { return m_variables.empty(); }
+ 
+   typedef collection::iterator iterator;

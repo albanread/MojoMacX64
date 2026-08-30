@@ -28,6 +28,8 @@
 #include "Support/SymbolExport.h"
 #include "TypeSystem/MojoTypeSystem.h"
 #include "lldb/API/SBCommandInterpreter.h"
+#include "llvm/MC/TargetRegistry.h"
+#include "llvm/TargetParser/Host.h"
 #include "lldb/API/SBDebugger.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/Support/TargetSelect.h"
@@ -98,10 +100,26 @@ static ContextRef getGlobalContext() {
 /// enabled, initialization will go through `lldb::PluginInitialize`.
 
 MODULAR_EXPORT bool LLDBPluginInitialize() {
-  llvm::InitializeAllTargets();
-  llvm::InitializeAllTargetMCs();
-  llvm::InitializeAllAsmParsers();
-  llvm::InitializeAllAsmPrinters();
+  // Register targets ONLY if the registry does not already know the host.
+  //
+  // Found by loading this plugin into our own lldb. Both liblldb and this
+  // dylib carry a static LLVM, and on macOS the TargetRegistry's list-head
+  // symbol unifies across the images -- so lldb's own initialization and
+  // this one both append to ONE registry, and the next lookup dies with
+  //   Cannot choose between targets "aarch64" and "aarch64"
+  // which surfaced three frames away as a null TargetInfoAttr and a crash
+  // at `breakpoint set`. Inside lldb the registry is already populated and
+  // this whole block must not run; embedded standalone (MojoJupyter) the
+  // registry is empty and it must. Asking the registry is the one check
+  // that is right in both worlds.
+  std::string lookupError;
+  if (!llvm::TargetRegistry::lookupTarget(
+          llvm::Triple(llvm::sys::getDefaultTargetTriple()), lookupError)) {
+    llvm::InitializeAllTargets();
+    llvm::InitializeAllTargetMCs();
+    llvm::InitializeAllAsmParsers();
+    llvm::InitializeAllAsmPrinters();
+  }
   LLVMLinkInMCJIT();
 
   // Ensure we have a legitimate context.

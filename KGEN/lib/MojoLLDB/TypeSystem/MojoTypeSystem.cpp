@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "MojoTypeSystem.h"
+#include <dlfcn.h>
 #include "../ExpressionParser/MojoDiagnostic.h"
 #include "../ExpressionParser/MojoExpressionParser.h"
 #include "../ExpressionParser/MojoExpressionVariable.h"
@@ -130,6 +131,43 @@ struct MojoTypeSystem::Impl {
     }
     compilationOptions.targetCpu = llvm::sys::getHostCPUName();
 
+    // Where the standard library lives. An EXPRESSION is real Mojo compiled
+    // by this type system's own parser, and `1 + 1` needs `Int.__add__`
+    // from a prelude the parser has to find -- with no search paths, every
+    // expression failed before it began, and (worse) failed with an empty
+    // message, which batch lldb turns into a silent exit(1) and DAP into
+    // an error nobody can read.
+    //
+    // The plugin locates the toolchain the way everything else in the
+    // distribution does: relative to itself. This dylib lives at
+    // <root>/lib/libMojoLLDB.dylib and the stdlib at <root>/lib/mojo/...,
+    // so dladdr on any symbol of ours names the root. COCOAMOJO_ROOT
+    // overrides, for running straight out of bazel-bin.
+    {
+      llvm::SmallString<256> root;
+      if (const char *env = ::getenv("COCOAMOJO_ROOT")) {
+        root = env;
+      } else {
+        Dl_info info;
+        if (dladdr(reinterpret_cast<void *>(&MojoTypeSystem::Initialize),
+                   &info) != 0 &&
+            info.dli_fname != nullptr) {
+          root = info.dli_fname;              // .../lib/libMojoLLDB.dylib
+          llvm::sys::path::remove_filename(root); // .../lib
+          llvm::sys::path::append(root, "..");    // <root>
+        }
+      }
+      if (!root.empty()) {
+        for (llvm::StringRef pkg : {"stdlib", "max", "kernels"}) {
+          llvm::SmallString<256> dir(root);
+          llvm::sys::path::append(dir, "lib", "mojo", pkg);
+          if (llvm::sys::fs::is_directory(dir))
+            compilationOptions.extraSearchPaths.push_back(
+                std::string(dir.str()));
+        }
+      }
+    }
+
     // TODO(#33931) workaround to disable module splitting for REPL.
     // TODO(MOTO-247) workaround to LLVM Module splitting which works
     // for ORC JIT but not always for MCJIT. Disable splitting for REPL.
@@ -147,8 +185,21 @@ struct MojoTypeSystem::Impl {
         /*tuneCpu=*/"",
         /*targetAccelerator=*/compilationOptions.targetAccelerator,
         compilationOptions.relocModel);
-    if (succeeded(targetInfoOr))
+    if (succeeded(targetInfoOr)) {
       targetInfo = *targetInfoOr;
+    } else {
+      // Say so. This used to fail SILENTLY, leaving `targetInfo` a null
+      // attribute that the first GetPointerByteSize() dereferenced -- which
+      // presents as lldb crashing at `breakpoint set`, three frames away
+      // from the cause, with nothing anywhere naming the triple that could
+      // not be resolved.
+      llvm::errs() << "MojoTypeSystem: no target info for triple '"
+                   << compilationOptions.targetTriple << "' (cpu '"
+                   << compilationOptions.targetCpu
+                   << "'): " << targetInfoOr.getError()
+                   << "\nType byte sizes will fall back to the "
+                      "architecture's pointer size.\n";
+    }
 
     dataLayoutContext =
         std::make_unique<MojoTypeDataLayoutContext>(*parserContext, targetInfo);
@@ -501,6 +552,15 @@ MojoTypeSystem::GetCanonicalType(lldb::opaque_compiler_type_t type) {
 }
 
 uint32_t MojoTypeSystem::GetPointerByteSize() {
+  // `targetInfo` is null when target-info resolution failed at construction
+  // (diagnosed there). A debugger must degrade rather than crash: the
+  // ArchSpec knows the address size for every target LLDB can attach to,
+  // and 8 is right for every platform this fork ships on.
+  if (!impl->targetInfo) {
+    if (uint32_t bytes = impl->archSpec.GetAddressByteSize())
+      return bytes;
+    return 8;
+  }
   return impl->targetInfo.getDataLayout().getPointerSize();
 }
 

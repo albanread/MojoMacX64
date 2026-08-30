@@ -161,13 +161,23 @@ MetadataConverter::convertAttrImpl(DILocalVariableAttr attr) {
       convertType(attr.getType()), (LLVM::DIFlags)attr.getFlags());
 }
 
+/// Append one keyed Mojo debug annotation. Every piece of Mojo semantics that
+/// DWARF cannot express travels this way; see the contract in DebugInfoAttrs.h.
+static void addMojoAnnotation(MLIRContext *ctx,
+                              SmallVectorImpl<LLVM::DINodeAttr> &into,
+                              StringRef key, StringAttr value) {
+  into.push_back(mlir::LLVM::DIAnnotationAttr::get(
+      ctx, StringAttr::get(ctx, key), value));
+}
+
 LLVM::DISubprogramAttr
 MetadataConverter::convertAttrImpl(DISubprogramAttr attr) {
+  MLIRContext *ctx = attr.getContext();
   SmallVector<LLVM::DINodeAttr> annotations;
-  auto annotation = mlir::LLVM::DIAnnotationAttr::get(
-      attr.getContext(), StringAttr::get(attr.getContext(), "mojo_source_name"),
-      attr.getSourceName().encode());
-  annotations.push_back(annotation);
+  addMojoAnnotation(ctx, annotations, kMojoDebugSchema,
+                    StringAttr::get(ctx, kMojoDebugSchemaString));
+  addMojoAnnotation(ctx, annotations, kMojoSourceName,
+                    attr.getSourceName().encode());
 
   return LLVM::DISubprogramAttr::get(
       attr.getContext(),

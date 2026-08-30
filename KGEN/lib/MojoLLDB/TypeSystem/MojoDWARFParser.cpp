@@ -625,8 +625,8 @@ bool MojoDWARFParser::CompleteTypeFromDWARF(const DWARFDIE &die,
   return false;
 }
 
-DebugInfo::SourceNameAttr
-MojoDWARFParser::extractSourceName(const DWARFDIE &die) {
+llvm::StringRef
+MojoDWARFParser::extractMojoAnnotation(const DWARFDIE &die, StringRef key) {
   for (auto child : die.children()) {
     if (child.Tag() == DW_TAG_LLVM_annotation) {
       StringRef tagName, tagValue;
@@ -647,15 +647,35 @@ MojoDWARFParser::extractSourceName(const DWARFDIE &die) {
           }
         }
       }
-      if (tagName == "mojo_source_name") {
-        ErrorOr<DebugInfo::SourceNameAttr> attrOr =
-            DebugInfo::SourceNameAttr::decode(typeSystem.getMLIRContext(),
-                                              tagValue);
-        if (succeeded(attrOr))
-          return *attrOr;
-      }
+      if (tagName == key)
+        return tagValue;
     }
   }
+  return {};
+}
+
+/// The Mojo debug metadata a DIE carries is a set of keyed annotations, not a
+/// single name: identity, the schema that describes it, and a human-readable
+/// form are separate keys so they can be added and versioned independently.
+/// A reader that finds no schema is looking at a binary from before the
+/// contract existed; that is a fallback, not an error.
+unsigned MojoDWARFParser::extractMojoSchema(const DWARFDIE &die) {
+  StringRef value = extractMojoAnnotation(die, DebugInfo::kMojoDebugSchema);
+  unsigned schema = 0;
+  if (value.getAsInteger(10, schema))
+    return 0;
+  return schema;
+}
+
+DebugInfo::SourceNameAttr
+MojoDWARFParser::extractSourceName(const DWARFDIE &die) {
+  StringRef encoded = extractMojoAnnotation(die, DebugInfo::kMojoSourceName);
+  if (encoded.empty())
+    return DebugInfo::SourceNameAttr();
+  ErrorOr<DebugInfo::SourceNameAttr> attrOr =
+      DebugInfo::SourceNameAttr::decode(typeSystem.getMLIRContext(), encoded);
+  if (succeeded(attrOr))
+    return *attrOr;
   return DebugInfo::SourceNameAttr();
 }
 
