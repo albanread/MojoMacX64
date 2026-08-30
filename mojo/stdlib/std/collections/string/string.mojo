@@ -2307,7 +2307,24 @@ struct String(
         # Get these fields before we change _capacity_or_data
         var byte_len = self.byte_length()
         var old_ptr = self.unsafe_ptr()
-        var new_capacity = (max(capacity, self.capacity_bytes() * 2) + 7) >> 3
+        var want = max(capacity, self.capacity_bytes() * 2)
+        # Never ask for zero. An empty inline String has `capacity_bytes() ==
+        # 0`, so growing one by nothing lands here with `want == 0`, `(0 + 7)
+        # >> 3 == 0`, and `alloc` rejects a zero-sized layout -- a trap
+        # reading `alloc: \`Layout.count()\` must be > 0`, which names the
+        # allocator rather than the String that asked it for nothing. One
+        # unit is the smallest thing worth owning.
+        var new_capacity = max(1, (want + 7) >> 3)
+        # The buffer about to be allocated must hold what is about to be
+        # copied into it. If it cannot, `capacity` was not a size -- and
+        # clamping a bad size would allocate something small and then memcpy
+        # `byte_len` bytes into it, turning a trap into silent heap
+        # corruption. A caller passing nonsense has to hear about it.
+        if (new_capacity << 3) < byte_len:
+            abort(
+                "String._realloc_mutable: asked for a buffer smaller than the"
+                " live length; the caller passed a capacity that is not a size"
+            )
         var new_ptr = self._alloc(new_capacity << 3)
         unsafe_memcpy(dest=new_ptr, src=old_ptr, count=byte_len)
         # If mutable buffer drop the ref count
