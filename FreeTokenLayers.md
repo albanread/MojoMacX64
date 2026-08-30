@@ -171,6 +171,46 @@ on-device: one GPU kernel deduplicates the routed experts, classifies them
 against the residency table and derives the fetch count, all inside a captured
 graph. Metal on this card gives us no equivalent.
 
+### 4.3 Measured: routing is strongly skewed, and the skew is stable
+
+**`MEASURED`** — `llama-moe-histogram` (in our fork, `examples/moe-histogram`) over
+16,384 tokens of wikitext on Qwen3-30B-A3B, 48 layers x 128 experts = 6144 slots.
+
+Mean per-layer normalised entropy **0.85** against 1.0 for a uniform router, and
+**9.1% of slots were never routed to at all**. Capacity against coverage, where
+"train-chosen" ranks slots by a profile taken on `wiki.train` and scores them on
+`wiki.test` — the honest number, since ranking and scoring on the same text is
+fitting to the test set:
+
+| slots resident | train-chosen | same-corpus oracle | uniform |
+|---:|---:|---:|---:|
+| 10% | 38.6% | 41.6% | 10% |
+| 25% | 64.9% | 70.1% | 25% |
+| **37.5%** | **80.8%** | 85.3% | 37.5% |
+| 50% | 90.8% | 94.6% | 50% |
+| 75% | 99.1% | 99.8% | 75% |
+
+Three conclusions.
+
+**Routers are not load-balanced at inference.** They are balanced during
+*training*; on real text a tenth of the slots are dead and 37.5% of them carry
+four-fifths of the work.
+
+**The distribution belongs to the model, not the corpus.** Profiles from
+`wiki.train` and `wiki.test` agree closely — entropy 0.840 vs 0.852, dead slots
+567 vs 562 — and cross-validation costs only 4.5 points at the capacity we care
+about. An offline profile therefore transfers.
+
+**Static placement captures most of what a dynamic cache would.** Our honest
+static figure is 80.8% at 37.5% capacity; FreeToken's *online LRU* reports ~84%
+hit at 37% on Qwen3.6. Static gets roughly 96% of dynamic, which makes Phase 1
+the high-value phase and Phase 3 possibly unnecessary — and Phase 3 is precisely
+the part that needs residency management we cannot easily build on Metal.
+
+**Caveat:** both corpora here are wikitext. Stability across *domains* (code,
+chat, tool-calling) is untested and is the obvious next measurement, because a
+static placement that only holds within one domain is much less useful.
+
 ### 4.2 The opening
 
 We do not have to pay that cost, because of an accident of llama.cpp's design:
@@ -199,13 +239,7 @@ Neither can be read off a spec sheet. Both are load-bearing for everything below
    CPU kernels — not a synthetic STREAM figure.
 2. **`B_P` by host→device transfer.** A Metal blit benchmark, or inferred from
    staged upload timings in `ggml_metal_buffer_set_tensor`.
-3. **The expert-usage histogram.** Instrument `ffn_moe_topk` to log selections
-   over a corpus, and plot the frequency distribution per layer.
-
-**Point 3 decides the whole shape of the project.** MoE routers are load-balanced
-during training. If usage is near-uniform, static pinning is worthless and only
-Phase 3 pays. If it is skewed within a domain or conversation, Phase 1 captures
-most of the benefit for almost no work.
+3. ~~**The expert-usage histogram.**~~ **DONE — see §4.3.**
 
 ### Phase 1 — static hot/cold placement (small)
 
@@ -248,17 +282,17 @@ For gpt-oss-120b `Q4_K_M` (62.8 GB, ~5.1B active, downloading now):
 |---|---:|---|
 | active bytes/token | ~2.7 GB | 5.1B params at ~4.25 bpw |
 | VRAM cache capacity | ~50% | 32 GiB against ~63 GB of experts |
-| miss rate | ~12% | interpolating their 37%→16%, 11%→39% |
-| missed bytes/token | ~0.32 GB | |
-| PCIe branch (13%) | ~3.5 ms | 0.042 GB at 12 GB/s |
-| CPU branch (87%) | ~3.1 ms | 0.28 GB at 90 GB/s |
-| **exposed** | **~3.5 ms** | branches concurrent, slower one shows |
+| miss rate | **~13%** | **`MEASURED`** curve §4.3, interpolated to ~45% capacity |
+| missed bytes/token | ~0.35 GB | |
+| PCIe branch (15%) | ~4.4 ms | 0.053 GB at 12 GB/s |
+| CPU branch (85%) | ~3.3 ms | 0.30 GB at 90 GB/s |
+| **exposed** | **~4.4 ms** | branches concurrent, slower one shows |
 | fully-resident baseline | ~23 ms/token | scaled from gpt-oss-20b's measured 62 t/s |
-| **projected** | **~38 t/s** | |
+| **projected** | **~36 t/s** | |
 
 Each of these kills it:
 
-- **Routing is uniform, not skewed.** Phase 1 collapses; only Phase 3 helps.
+- ~~Routing is uniform, not skewed.~~ **Ruled out** — §4.3.
 - **`B_H` comes in near 40 GB/s rather than 90.** The CPU branch doubles and
   becomes the exposed cost. Phase 0 settles this and it is the single most
   important measurement.
@@ -269,8 +303,9 @@ Each of these kills it:
   honoured between concurrent dispatches on AMD/macOS). Blit-versus-compute
   overlap is a *different* mechanism and probably fine — but it is an assumption,
   not a finding, and it must be proved before Phase 3.
-- **The miss rate interpolation is wrong.** Two points from two models is a thin
-  basis for a curve.
+- **The skew does not survive a change of domain.** Only wikitext has been
+  tested. Code or chat routing could look entirely different, and a placement
+  that holds for one domain only is much less useful.
 
 ---
 
