@@ -290,6 +290,9 @@ reproduces them.
 
 ---
 
+The variables to sweep, and the controls that keep the answers honest, are in
+**[MoE_TestMatrix.md](MoE_TestMatrix.md)**.
+
 ## 5. Staged plan
 
 Ordered so that each phase is useful alone and the cheap ones come first.
