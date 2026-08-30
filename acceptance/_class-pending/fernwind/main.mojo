@@ -124,7 +124,7 @@ struct MTLRegion(Copyable, Movable):
 
 @fieldwise_init
 struct Affine(ImplicitlyCopyable, Movable):
-    """x' = a x + b y + e,  y' = c x + d y + f, chosen with probability p."""
+    """Affine map: x' = a x + b y + e,  y' = c x + d y + f, taken with probability p."""
 
     var a: Float64
     var b: Float64
@@ -145,7 +145,7 @@ def barnsley() -> List[Affine]:
 
 
 struct Rng(Movable):
-    """xorshift64* on the host, deterministic: the same meadow, every run."""
+    """Random numbers: xorshift64* on the host, deterministic -- the same meadow, every run."""
 
     var state: UInt64
 
@@ -286,10 +286,10 @@ def chaos_kernel(
         if px < 0 or px >= W or py < 0 or py >= H:
             continue
         let pat = py * W + px
-        _ = Atomic.fetch_add(nacc + pat, UInt32(1))
-        _ = Atomic.fetch_add(racc + pat, cr)
-        _ = Atomic.fetch_add(gacc + pat, cg)
-        _ = Atomic.fetch_add(bacc + pat, cb)
+        _ = Atomic.fetch_add(nacc.unsafe_offset(pat), UInt32(1))
+        _ = Atomic.fetch_add(racc.unsafe_offset(pat), cr)
+        _ = Atomic.fetch_add(gacc.unsafe_offset(pat), cg)
+        _ = Atomic.fetch_add(bacc.unsafe_offset(pat), cb)
 
 
 def shade_kernel(

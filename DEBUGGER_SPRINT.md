@@ -274,6 +274,53 @@ serialiser, which already does the staleness discipline) and the trap to avoid
 (a `DIBasicType` carrying the source name, which `MojoDWARFParser.cpp:397` reads
 as a builtin scalar and yields no type at all).
 
+## Step 6 — read ahead, because they are in our past
+
+Working forward through the spike doc was re-deriving questions they had already
+closed. Surveying every non-IDE file they had touched since our base found six we
+had never looked at, and two more arrived while doing it. Parity base is now
+`284c834c`.
+
+**The debugger produced two stdlib bugs, both in `String._realloc_mutable`, and
+both are ours as much as theirs.** Neither is architecture-specific:
+
+* asking the allocator for zero — an empty inline String grown by nothing
+  computes `(0 + 7) >> 3 == 0`, and `alloc` refuses, naming itself rather than
+  the String that asked it for nothing.
+* doubling on COPY, not just on growth — the same function makes a shared
+  string unique, called with the capacity the string already has. Applying an
+  append heuristic there walks a 5 KB string through 9 MB, 18 MB, 37 MB … 600 MB
+  and dies on a null pointer, with process memory flat the whole way because
+  each step frees the one before it. Their debugger hit it because **every
+  locals fetch shares strings out of a list and mutates them** — inspecting a
+  variable should not mean copying it.
+
+That second one is worth remembering as a shape: a debugger stresses the stdlib
+in a way ordinary programs do not, so the debugger arc will keep producing
+stdlib fixes, and they belong upstream in `docs/stdlib_patches.md` rather than
+here.
+
+**Their IDE-side debugger fixes (284c834c) are lessons for our IDE arc**, and
+one applies already. The code is in `ide/` and is not ported, but:
+
+* `target.max-children-count 64` and `target.max-string-summary-length 512` in
+  initCommands are **not tuning**. Without them lldb formats every element of
+  every container at every stop — a `List` of 691,200 `UInt32` rendered in full
+  to fill one line — and memory across a stepping run climbs from 132 MB to
+  12.8 GB. `spikes/dap-probe.py` now sets both.
+* A local that is declared but not yet live reads as
+  `<error: variable not available>`. That is lldb's ordinary phrase for an
+  ordinary state at a breakpoint; treating it as an error sends people hunting
+  a fault that is not there.
+* An uninitialised local renders as whatever bytes were at that address, and
+  arbitrary bytes are not text — invalid UTF-8 reaching a grapheme iterator
+  aborts. Display paths must repair to U+FFFD rather than hold back, which is
+  the opposite of the streaming case.
+
+**The acceptance corpus was stale and is re-synced.** It is a mirror of their
+`examples/` — its own README says so — and it had sat at `ce53b96e` while they
+fixed four of the six. Now at `284c834c`, and all six still build.
+
 ## Next
 
 * **Coordinate the sidecar with them before either fork writes it.** Everything

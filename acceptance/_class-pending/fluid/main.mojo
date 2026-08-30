@@ -707,8 +707,12 @@ def main() raises:
         var loop_start = perf_counter_ns()
 
         while running:
-            # ── events ──────────────────────────────────────────────────────
-            while True:
+            # ── events ────────────────────────────────────────────────────
+            # `while running`, not `while True`: after CMD_QUIT sets the
+            # flag there is no reason to keep draining this frame's events,
+            # and the compiler rightly noticed the assignment was dead --
+            # the pump never let the outer loop read it.
+            while running:
                 var past = msg_send[
                     ObjCObject, "NSDate", "distantPast", is_class=True
                 ](NSDate.as_object())
@@ -814,7 +818,8 @@ def main() raises:
                     shot_wanted = True
 
             if not msg_send[Bool, "NSWindow", "isVisible"](win):
-                running = False
+                # `break` leaves the outer loop directly; a flag nobody will
+                # read again is not worth writing.
                 break
 
             # ── one fluid step ──────────────────────────────────────────────

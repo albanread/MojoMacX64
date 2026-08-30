@@ -58,8 +58,15 @@ def wait_for(pred, timeout=90):
 send("initialize", adapterID="lldb-dap", linesStartAt1=True, columnsStartAt1=True,
      pathFormat="path", supportsConfigurationDoneRequest=True)
 wait_for(lambda m: m.get("type")=="response" and m.get("command")=="initialize")
+# The two limits are theirs (MojoCocoa 284c834c) and they are not tuning.
+# Without them lldb renders every element of every container at every stop:
+# a List of 691,200 UInt32 was formatted in full to fill a line nobody reads
+# past, and memory across a stepping run climbed from 132 MB to 12.8 GB. With
+# them it stays flat. Not doing the work rather than doing it faster.
 send("launch", program=os.path.abspath(prog), stopOnEntry=False,
-     initCommands=[f"plugin load {plugin}"])
+     initCommands=[f"plugin load {plugin}",
+                   "settings set target.max-children-count 64",
+                   "settings set target.max-string-summary-length 512"])
 wait_for(lambda m: m.get("type")=="event" and m.get("event")=="initialized", timeout=60)
 s = send("setBreakpoints", source={"path": os.path.abspath(src), "name": os.path.basename(src)},
          breakpoints=[{"line": int(line)}], lines=[int(line)])

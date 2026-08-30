@@ -2307,7 +2307,23 @@ struct String(
         # Get these fields before we change _capacity_or_data
         var byte_len = self.byte_length()
         var old_ptr = self.unsafe_ptr()
-        var want = max(capacity, self.capacity_bytes() * 2)
+        # Double only when GROWING. `capacity_bytes() * 2` is an append
+        # heuristic -- it buys amortised O(1) growth for a string being
+        # built up. It is not a copy heuristic, and this function is also
+        # how a shared string is made unique: `_unsafe_mutable_ptr` calls
+        # it with the capacity the string ALREADY has whenever
+        # `_is_unique()` is false.
+        #
+        # Applying the heuristic there doubles a buffer that did not need
+        # to grow, on every copy-on-write. A string of 5 KB that is shared
+        # and mutated repeatedly walks 9 MB, 18 MB, 37 MB ... 600 MB and
+        # then dies on `alloc failed: returned a null pointer` -- with the
+        # process's memory flat the whole way, because each step frees the
+        # buffer before it. Roast hit exactly this stepping the debugger:
+        # every locals fetch shares strings out of a list and mutates them.
+        var want = capacity
+        if capacity > self.capacity_bytes():
+            want = max(capacity, self.capacity_bytes() * 2)
         # Never ask for zero. An empty inline String has `capacity_bytes() ==
         # 0`, so growing one by nothing lands here with `want == 0`, `(0 + 7)
         # >> 3 == 0`, and `alloc` rejects a zero-sized layout -- a trap

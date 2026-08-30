@@ -19,6 +19,49 @@ throws the change away.
 
 ---
 
+## 2026-08-30 — `String._realloc_mutable` doubled on every copy-on-write
+
+**File:** `std/collections/string/string.mojo`
+
+**Symptom.** Roast died stepping the debugger:
+
+    ABORT: std/memory/alloc.mojo: alloc failed: returned a null pointer
+
+with the process's memory **flat** the whole way — 118 MB, never climbing.
+
+**Cause.** `_realloc_mutable` grew with `max(capacity, capacity_bytes() * 2)`.
+Doubling is an *append* heuristic: it buys amortised O(1) growth for a
+string being built up. But this function is also how a **shared** string is
+made unique — `_unsafe_mutable_ptr` calls it with the capacity the string
+already has whenever `_is_unique()` is false:
+
+```mojo
+var new_cap = max(self.capacity_bytes(), capacity)
+elif not self._is_unique() or new_cap > self.capacity_bytes():
+    self._realloc_mutable(new_cap)
+```
+
+So every copy-on-write doubled a buffer that did not need to grow. The
+diagnostic, with the content length beside it:
+
+    want= 18874368   capacity= 9437184    cap_bytes= 9437184    byte_len= 4288
+    want= 37748736   capacity= 18874368   cap_bytes= 18874368   byte_len= 4998
+    want= 75497472   capacity= 37748736   cap_bytes= 37748736   byte_len= 5025
+    want= 603979776  capacity= 301989888  cap_bytes= 301989888  byte_len= 6457
+
+Five kilobytes of content, a capacity walking to 600 MB. Memory stayed flat
+because each step frees the buffer before it, which is why this looked like
+one absurd request rather than a runaway — it was the last doubling in a
+chain.
+
+**Patch.** Double only when the request actually exceeds the current
+capacity. Otherwise honour it as given: a copy needs the size it has.
+
+**Carry forward:** yes, and check upstream first — if this is fixed there,
+take theirs.
+
+---
+
 ## 2026-08-30 — `String._realloc_mutable` asked the allocator for zero bytes
 
 **File:** `std/collections/string/string.mojo`

@@ -422,23 +422,22 @@ def handle_key(event: P):
 
 
 def update_title():
-    if True:
-        var state = "running" if g_running()[] != 0 else "paused"
-        var title = (
-            String("Life — gen ")
-            + String(g_gen()[])
-            + "  ·  pop "
-            + String(population())
-            + "  ·  "
-            + state
-            + "  ·  speed "
-            + String(31 - g_speed()[])
-            + "   [space] pause  [drag] draw  [⇧drag] erase  [.] step  [r]"
-            + " random  [c] clear  [ [ ] ] speed"
-        )
-        _ = msg_send[ObjCObject, "NSWindow", "setTitle:"](
-            ObjCObject(g_window()[]), nsstring(title).ptr()
-        )
+    var state = "running" if g_running()[] != 0 else "paused"
+    var title = (
+        String("Life — gen ")
+        + String(g_gen()[])
+        + "  ·  pop "
+        + String(population())
+        + "  ·  "
+        + state
+        + "  ·  speed "
+        + String(31 - g_speed()[])
+        + "   [space] pause  [drag] draw  [⇧drag] erase  [.] step  [r]"
+        + " random  [c] clear  [ [ ] ] speed"
+    )
+    _ = msg_send[ObjCObject, "NSWindow", "setTitle:"](
+        ObjCObject(g_window()[]), nsstring(title).ptr()
+    )
 
 
 def present():

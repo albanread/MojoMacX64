@@ -101,7 +101,7 @@ struct MTLRegion(Copyable, Movable):
 
 @fieldwise_init
 struct Affine(ImplicitlyCopyable, Movable):
-    """x' = a x + b y + e,  y' = c x + d y + f, chosen with probability p."""
+    """Affine map: x' = a x + b y + e,  y' = c x + d y + f, taken with probability p."""
 
     var a: Float64
     var b: Float64
@@ -122,7 +122,7 @@ def barnsley() -> List[Affine]:
 
 
 struct Rng(Movable):
-    """xorshift64*, deterministic: the same landscape grows on every run,
+    """Random numbers from xorshift64*, deterministic: the same landscape grows on every run,
     which is what lets a harness assert anything about the picture."""
 
     var state: UInt64

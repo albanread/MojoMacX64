@@ -1,6 +1,6 @@
 # Acceptance corpus — the sister fork's examples, run here
 
-Imported from MojoCocoa at `ce53b96e` as the acceptance criteria for the parity
+Imported from MojoCocoa at `284c834c` as the acceptance criteria for the parity
 plan. Not maintained here; send changes there.
 
 ## Plain Mojo — buildable today
