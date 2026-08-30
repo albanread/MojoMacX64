@@ -17,6 +17,16 @@ export DYLD_LIBRARY_PATH="$ROOT/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 # When building executables, link VegaRT (the AsyncRT device runtime).
 if [ "${1:-}" = "build" ]; then
   shift
+  # This fork targets exactly one accelerator, and --target-accelerator has no
+  # auto-detection: it is stored verbatim (PORT_DESIGN.md) and validated by the
+  # stdlib's _all_targets constraint. Omitting it does not build for the CPU --
+  # it makes accelerator_arch empty, and any GPU example then fails deep inside
+  # GPUInfo.from_name with "Unknown GPU architecture", naming every arch except
+  # the one in this machine. Supply it, unless the caller already did.
+  case " $* " in
+    *" --target-accelerator"*) ;;
+    *) set -- --target-accelerator=metal-vega2 "$@" ;;
+  esac
   exec "$ROOT/bin/mojo-driver" build \
     -Xlinker "-L$ROOT/lib" -Xlinker -lVegaRT -Xlinker "-rpath" -Xlinker "$ROOT/lib" \
     -Xlinker -lobjc -Xlinker -lz -Xlinker -framework -Xlinker Foundation \

@@ -233,29 +233,67 @@ const char *runBlitOp(VRMetalCtx *ctx, const BlitOp &op) {
   return nullptr;
 }
 
-// Sorted device list: Metal3-family first, then higher working-set. Keeps the
-// Vega II at id 0 and the 580X at id 1 on this machine.
-std::vector<id> &allDevices() {
-  static std::vector<id> devices = [] {
-    std::vector<id> result;
+// Why a GPU present in this machine is not offered, or null if it is fine.
+//
+// A Mac Pro has two AMD GPUs and only one of them is the target. The AIR this
+// fork emits is a metal-vega2 profile -- LLVM-17 bitcode, wave64, Metal 3
+// family -- and the Radeon Pro 580X is Polaris on Metal 2. There is no profile
+// for it and there is not going to be one, so a context on it can allocate
+// buffers and copy memory and then fail on the first kernel, deep in the
+// driver, with a complaint about bitcode rather than about the device.
+const char *unsupportedReason(const std::string &name) {
+  if (name.find("Vega II") != std::string::npos)
+    return nullptr;
+  if (name.find("580X") != std::string::npos)
+    return "Radeon Pro 580X is Polaris on Metal 2; this fork emits a "
+           "metal-vega2 AIR profile and has none for it";
+  return "no AIR profile for this GPU in this fork";
+}
+
+// Usable devices, and what was excluded and why.
+//
+// Ranking used to be the whole of this: Metal3 first, then working set, which
+// put the Vega II at id 0 and the 580X at id 1. That is right for whoever takes
+// the default and wrong for everyone else, because it left the 580X REACHABLE
+// -- device 1, or any loop over deviceCount, handed back a context that cannot
+// run a kernel. Excluding it makes the count honest: one device here can do
+// this work. The ranking is kept for the usable set, which costs nothing and
+// stays correct if a second supported GPU is ever installed.
+struct DeviceTable {
+  std::vector<id> usable;
+  std::vector<std::pair<std::string, std::string>> rejected;
+};
+
+DeviceTable &deviceTable() {
+  static DeviceTable table = [] {
+    DeviceTable t;
     id array = MTLCopyAllDevices();
     unsigned long count = msg<unsigned long>(array, "count");
-    for (unsigned long i = 0; i < count; i++)
-      result.push_back(msg<id>(array, "objectAtIndex:", i));
+    for (unsigned long i = 0; i < count; i++) {
+      id dev = msg<id>(array, "objectAtIndex:", i);
+      std::string name = nsstringToStd(msg<id>(dev, "name"));
+      if (const char *why = unsupportedReason(name)) {
+        t.rejected.push_back({name, why});
+        continue;
+      }
+      t.usable.push_back(dev);
+    }
     auto rank = [](id dev) {
       bool metal3 = msg<bool>(dev, "supportsFamily:", (long)5001);
       unsigned long long ws =
           msg<unsigned long long>(dev, "recommendedMaxWorkingSetSize");
       return (metal3 ? (1ull << 62) : 0) + ws;
     };
-    for (size_t i = 0; i < result.size(); i++)
-      for (size_t j = i + 1; j < result.size(); j++)
-        if (rank(result[j]) > rank(result[i]))
-          std::swap(result[i], result[j]);
-    return result;
+    for (size_t i = 0; i < t.usable.size(); i++)
+      for (size_t j = i + 1; j < t.usable.size(); j++)
+        if (rank(t.usable[j]) > rank(t.usable[i]))
+          std::swap(t.usable[i], t.usable[j]);
+    return t;
   }();
-  return devices;
+  return table;
 }
+
+std::vector<id> &allDevices() { return deviceTable().usable; }
 
 std::string archForName(const std::string &name) {
   // Arch strings must classify as APPLE_GPU in the stdlib's
@@ -284,10 +322,18 @@ const char *VegaRTMetal_createContext(VRMetalCtx **out, int id_,
                                       char *nameOut, size_t nameCap,
                                       char *archOut, size_t archCap) {
   auto &devices = allDevices();
-  if (id_ < 0 || static_cast<size_t>(id_) >= devices.size())
-    return vrmErrorf("VegaRT[metal]: device id %d out of range (%zu Metal "
-                     "devices present)",
-                     id_, devices.size());
+  if (id_ < 0 || static_cast<size_t>(id_) >= devices.size()) {
+    // Name what was excluded. Without it this reads as "your Mac has one GPU"
+    // on a machine whose About This Mac plainly says two, and the next hour
+    // goes into the wrong question.
+    std::string excluded;
+    for (auto &r : deviceTable().rejected)
+      excluded += "; excluded: " + r.first + " -- " + r.second;
+    return vrmErrorf("VegaRT[metal]: device id %d out of range (%zu usable "
+                     "Metal device%s)%s",
+                     id_, devices.size(), devices.size() == 1 ? "" : "s",
+                     excluded.c_str());
+  }
   auto *ctx = new VRMetalCtx();
   ctx->device = devices[static_cast<size_t>(id_)];
   ctx->queue = msg<id>(ctx->device, "newCommandQueue");
