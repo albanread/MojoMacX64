@@ -10,6 +10,7 @@ from std.ffi import external_call, c_char, _get_global_or_null
 from std.memory import OpaquePointer
 from std.reflection import reflect
 from std.sys.info import TrivialRegisterPassable
+from .typed import Obj
 from std.collections.string.string_span import _get_kgen_string
 from std.sys._cocoakb import (
     cocoakb_msgsend_variant,
@@ -94,6 +95,14 @@ struct ObjCObject(TrivialRegisterPassable):
     handle the dispatch layer traffics in."""
 
     var _addr: Int
+
+    @implicit
+    def __init__[c: StringLiteral](out self, o: Obj[c]):
+        """A typed reference IS an id, so it can be used as one without
+        saying so. That is what lets a call site be ported one at a time:
+        `view.window()` answers an Obj["NSWindow"] and every function still
+        expecting an ObjCObject keeps working."""
+        self._addr = o.id
 
     def is_nil(self) -> Bool:
         return self._addr == 0

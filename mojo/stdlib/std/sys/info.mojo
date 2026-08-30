@@ -206,6 +206,15 @@ struct CompilationTarget[value: _TargetType = _current_target()](
 
     # Features
 
+    # The x86 feature probes are gated on the ARCHITECTURE first, the same
+    # way the RISC-V extension check below gates on is_riscv(): asking LLVM
+    # about "sse4.1" on an arm64 target does not answer False quietly, it
+    # warns ("not a recognized target feature name") on every compile that
+    # reaches it -- with no source location, so it reads as toolchain noise.
+    # The answer is unchanged (False either way). `comptime if`, not `and`:
+    # elaboration evaluates both operands of `and`, so the query still
+    # reached LLVM behind a gate that was morally short-circuit and
+    # practically not.
     @staticmethod
     def has_sse4() -> Bool:
         """Checks if the target supports SSE4 instructions.
@@ -213,7 +222,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the target supports SSE4, False otherwise.
         """
-        return Self._has_feature["sse4.1"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["sse4.1"]()
 
     @staticmethod
     def has_avx() -> Bool:
@@ -222,7 +234,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the host system has AVX, otherwise returns False.
         """
-        return Self._has_feature["avx"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["avx"]()
 
     @staticmethod
     def has_avx2() -> Bool:
@@ -231,7 +246,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the host system has AVX2, otherwise returns False.
         """
-        return Self._has_feature["avx2"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["avx2"]()
 
     @staticmethod
     def has_avx512f() -> Bool:
@@ -240,7 +258,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the host system has AVX512, otherwise returns False.
         """
-        return Self._has_feature["avx512f"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["avx512f"]()
 
     @staticmethod
     def has_intel_amx() -> Bool:
@@ -250,7 +271,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the host system has Intel AMX and False otherwise.
         """
-        return Self._has_feature["amx-tile"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["amx-tile"]()
 
     @staticmethod
     def has_fma() -> Bool:
@@ -260,7 +284,10 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the target has FMA support, otherwise returns False.
         """
-        return Self._has_feature["fma"]()
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return Self._has_feature["fma"]()
 
     @staticmethod
     def has_vnni() -> Bool:
@@ -269,9 +296,13 @@ struct CompilationTarget[value: _TargetType = _current_target()](
         Returns:
             True if the target has avx512_vnni, otherwise returns False.
         """
-        return (
-            Self._has_feature["avx512vnni"]() or Self._has_feature["avxvnni"]()
-        )
+        comptime if not Self.is_x86():
+            return False
+        else:
+            return (
+                Self._has_feature["avx512vnni"]()
+                or Self._has_feature["avxvnni"]()
+            )
 
     @staticmethod
     def has_neon() -> Bool:

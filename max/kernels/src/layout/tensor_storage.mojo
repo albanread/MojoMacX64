@@ -134,7 +134,7 @@ trait TensorStorage:
         //,
     ](
         storage: Self.StorageType[dtype, origin, address_space],
-    ) raises -> UnsafePointer[
+    ) raises -> Pointer[
         Scalar[dtype], origin, address_space=address_space
     ]:
         """Returns a raw scalar pointer to the borrowed storage.
@@ -1994,7 +1994,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
         dtype: DType,
         origin: Origin[mut=mut],
         address_space: AddressSpace,
-    ]: TrivialRegisterPassable = UnsafePointer[
+    ]: TrivialRegisterPassable = Pointer[
         SIMD[dtype, Self.element_width], origin, address_space=address_space
     ]
     """A raw `Pointer` to `Scalar[dtype]` borrowing the storage.
@@ -2026,7 +2026,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
         //,
     ](
         storage: Self.StorageType[dtype, origin, address_space],
-    ) raises -> UnsafePointer[
+    ) raises -> Pointer[
         Scalar[dtype], origin, address_space=address_space
     ]:
         """Returns a raw scalar pointer to the borrowed storage.
@@ -2044,11 +2044,11 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
             A `Pointer` to `Scalar[dtype]` referring to the base of the
             borrowed storage.
         """
-        # `storage` is an `UnsafePointer[SIMD[dtype, element_width]]`. Bitcast
+        # `storage` is an `Pointer[SIMD[dtype, element_width]]`. Bitcast
         # it to the scalar base pointer. For non-vectorized storage
         # (`element_width == 1`) this is the identity; for a vectorized view it
         # yields the scalar base address of the underlying storage.
-        return storage.bitcast[Scalar[dtype]]()
+        return storage.unsafe_bitcast[Scalar[dtype]]()
 
     @staticmethod
     @always_inline
@@ -2112,7 +2112,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
         Returns:
             The loaded `SIMD` value.
         """
-        return storage.bitcast[Scalar[dtype]]().load[
+        return storage.unsafe_bitcast[Scalar[dtype]]().unsafe_load[
             width=width,
             alignment=alignment,
             invariant=invariant,
@@ -2150,7 +2150,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
         Returns:
             The loaded `SIMD` value.
         """
-        return storage.bitcast[Scalar[dtype]]().load[
+        return storage.unsafe_bitcast[Scalar[dtype]]().unsafe_load[
             width=width,
             alignment=alignment,
             invariant=invariant,
@@ -2177,7 +2177,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
             storage: The storage to store into.
             value: The `SIMD` value to store.
         """
-        storage.bitcast[Scalar[dtype]]().store[
+        storage.unsafe_bitcast[Scalar[dtype]]().unsafe_store[
             alignment=alignment, non_temporal=non_temporal
         ](value)
 
@@ -2206,7 +2206,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
             offset: The scalar-element offset to store at.
             value: The `SIMD` value to store.
         """
-        storage.bitcast[Scalar[dtype]]().store[
+        storage.unsafe_bitcast[Scalar[dtype]]().unsafe_store[
             alignment=alignment, non_temporal=non_temporal
         ](offset, value)
 
@@ -2265,13 +2265,15 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
             A handle of the same type starting the given number of scalar
             elements into the referenced storage.
         """
-        # `storage` is an `UnsafePointer[SIMD[dtype, element_width]]`. Reinterpret
+        # `storage` is an `Pointer[SIMD[dtype, element_width]]`. Reinterpret
         # it as a scalar pointer so `+ offset` advances in scalar (not SIMD)
         # units, then `rebind` back to the original handle type.
         comptime assert offset_coord.flat_rank == 1
         return (
-            storage.bitcast[Scalar[offset_dtype]]() + offset_coord[0].value()
-        ).bitcast[SIMD[offset_dtype, Self.element_width]]()
+            storage.unsafe_bitcast[Scalar[offset_dtype]]().unsafe_offset(
+                offset_coord[0].value()
+            )
+        ).unsafe_bitcast[SIMD[offset_dtype, Self.element_width]]()
 
     @staticmethod
     def distance[
@@ -2766,10 +2768,10 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
 
         comptime for i in range(type_of(layout).static_product):
             var idx = layout(Idx[i])
-            storage.bitcast[Scalar[dtype]]().store(
+            storage.unsafe_bitcast[Scalar[dtype]]().unsafe_store(
                 idx,
                 func(
-                    storage.bitcast[Scalar[dtype]]().load[
+                    storage.unsafe_bitcast[Scalar[dtype]]().unsafe_load[
                         width=Self.element_width
                     ](idx)
                 ),
@@ -2880,10 +2882,10 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
         # during elaboration when passed as a function value.
         comptime for i in range(type_of(layout).static_product):
             var idx = layout(Idx[i])
-            storage.bitcast[Scalar[dtype]]().store(
+            storage.unsafe_bitcast[Scalar[dtype]]().unsafe_store(
                 idx,
                 exp(
-                    storage.bitcast[Scalar[dtype]]().load[
+                    storage.unsafe_bitcast[Scalar[dtype]]().unsafe_load[
                         width=Self.element_width
                     ](idx)
                     * scale.cast[dtype]()
@@ -3609,7 +3611,7 @@ struct PointerStorage[*, element_width: Int = 1](TensorOps):
 @always_inline
 def _device_leaf_ptr[
     dtype: DType, //
-](storage: DevicePointer[dtype, _]) -> UnsafePointer[
+](storage: DevicePointer[dtype, _]) -> Pointer[
     Scalar[dtype], MutAnyOrigin, address_space=AddressSpace.GLOBAL
 ]:
     """Returns the encoded device-leaf pointer held in `storage`'s first bytes.
@@ -3645,8 +3647,8 @@ def _device_leaf_ptr[
         # Reinterpret the handle's first bytes as the encoded device address.
         # The leaf must be `GLOBAL` (device), not `GENERIC` — see the docstring:
         # a `GENERIC` leaf silently misses device memory on Metal.
-        return UnsafePointer(to=storage).bitcast[
-            UnsafePointer[
+        return Pointer(to=storage).unsafe_bitcast[
+            Pointer[
                 Scalar[dtype], MutAnyOrigin, address_space=AddressSpace.GLOBAL
             ]
         ]()[]
@@ -3731,7 +3733,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         //,
     ](
         storage: Self.StorageType[dtype, origin, address_space],
-    ) -> UnsafePointer[Scalar[dtype], origin, address_space=address_space]:
+    ) -> Pointer[Scalar[dtype], origin, address_space=address_space]:
         """Returns a raw scalar pointer to the base of the borrowed storage.
 
         On device the owning `DeviceBuffer` is unavailable, so this reinterprets
@@ -3752,7 +3754,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         Returns:
             A bare `Pointer` to the first scalar element of the storage.
         """
-        comptime ResultPtr = UnsafePointer[
+        comptime ResultPtr = Pointer[
             Scalar[dtype], origin, address_space=address_space
         ]
         # `_device_leaf_ptr` returns a `GLOBAL` (device) leaf because Metal has
@@ -3766,11 +3768,11 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         # space, so Metal is out of scope for this stopgap (see GPUA-6).
         comptime if is_gpu():
             return rebind[ResultPtr](
-                _device_leaf_ptr(storage).address_space_cast[address_space]()
+                _device_leaf_ptr(storage).unsafe_address_space_cast[address_space]()
             )
         else:
             return rebind[ResultPtr](
-                storage.unsafe_ptr().address_space_cast[address_space]()
+                storage.unsafe_ptr().unsafe_address_space_cast[address_space]()
             )
 
     @staticmethod
@@ -3807,7 +3809,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
             A handle referring to the same storage, viewed with the new type
             parameters.
         """
-        result = UnsafePointer(to=storage).bitcast[type_of(result)]()[]
+        result = Pointer(to=storage).unsafe_bitcast[type_of(result)]()[]
 
     @staticmethod
     @always_inline
@@ -3839,7 +3841,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         Returns:
             The loaded `SIMD` value.
         """
-        return _device_leaf_ptr(storage).load[
+        return _device_leaf_ptr(storage).unsafe_load[
             width=width,
             alignment=alignment,
             invariant=invariant,
@@ -3880,7 +3882,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         Returns:
             The loaded `SIMD` value.
         """
-        return _device_leaf_ptr(storage).load[
+        return _device_leaf_ptr(storage).unsafe_load[
             width=width,
             alignment=alignment,
             invariant=invariant,
@@ -3910,7 +3912,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
             storage: The storage to store into.
             value: The `SIMD` value to store.
         """
-        _device_leaf_ptr(storage).store[
+        _device_leaf_ptr(storage).unsafe_store[
             alignment=alignment, non_temporal=non_temporal
         ](value)
 
@@ -3942,7 +3944,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
             offset: The scalar-element offset to store at.
             value: The `SIMD` value to store.
         """
-        _device_leaf_ptr(storage).store[
+        _device_leaf_ptr(storage).unsafe_store[
             alignment=alignment, non_temporal=non_temporal
         ](offset, value)
 
@@ -4001,10 +4003,10 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         comptime assert offset_coord.flat_rank == 1
         comptime if is_gpu():
             var result = storage
-            var leaf = UnsafePointer(to=result).bitcast[
-                UnsafePointer[Scalar[type_of(storage).dtype], MutAnyOrigin]
+            var leaf = Pointer(to=result).unsafe_bitcast[
+                Pointer[Scalar[type_of(storage).dtype], MutAnyOrigin]
             ]()
-            leaf[] = leaf[] + offset_coord[0].value()
+            leaf[] = leaf[].unsafe_offset(offset_coord[0].value())
             return result
         else:
             # Keep this non-raising (matching the pointer-backed policy and
@@ -4522,10 +4524,10 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
 
         comptime for i in range(type_of(layout).static_product):
             var idx = layout(Idx[i])
-            _device_leaf_ptr(storage).store(
+            _device_leaf_ptr(storage).unsafe_store(
                 idx,
                 func(
-                    _device_leaf_ptr(storage).load[width=Self.element_width](
+                    _device_leaf_ptr(storage).unsafe_load[width=Self.element_width](
                         idx
                     )
                 ),
@@ -4641,10 +4643,10 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
         # during elaboration when passed as a function value.
         comptime for i in range(type_of(layout).static_product):
             var idx = layout(Idx[i])
-            _device_leaf_ptr(storage).store(
+            _device_leaf_ptr(storage).unsafe_store(
                 idx,
                 exp(
-                    _device_leaf_ptr(storage).load[width=Self.element_width](
+                    _device_leaf_ptr(storage).unsafe_load[width=Self.element_width](
                         idx
                     )
                     * scale.cast[dtype]()
@@ -5362,7 +5364,7 @@ struct DevicePointerStorage[*, element_width: Int = 1](TensorOps):
             # Store through the device leaf pointer, matching `iexp`. Calling
             # `Self.store` here fails to infer `address_space` from the
             # tuple-projected destination handle.
-            _device_leaf_ptr(dst_storage).store(
+            _device_leaf_ptr(dst_storage).unsafe_store(
                 dst_idx,
                 exp(
                     SrcStorage.load[width=width, alignment=alignment](
@@ -5405,7 +5407,7 @@ struct StaticOffsetStorage[*, static_offset: Int, element_width: Int = 1](
         dtype: DType,
         origin: Origin[mut=mut],
         address_space: AddressSpace,
-    ]: TrivialRegisterPassable = UnsafePointer[
+    ]: TrivialRegisterPassable = Pointer[
         SIMD[dtype, Self.element_width], origin, address_space=address_space
     ]
     """A raw `Pointer` borrowing the storage, `static_offset` scalar
@@ -5429,7 +5431,7 @@ struct StaticOffsetStorage[*, static_offset: Int, element_width: Int = 1](
         //,
     ](
         storage: Self.StorageType[dtype, origin, address_space],
-    ) raises -> UnsafePointer[
+    ) raises -> Pointer[
         Scalar[dtype], origin, address_space=address_space
     ]:
         """Returns a raw scalar pointer to the start of the viewed region.

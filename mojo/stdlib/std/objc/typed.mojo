@@ -46,6 +46,7 @@ from std.sys._cocoakb import (
     cocoakb_p_ret_class_for,
     cocoakb_p_ret_class_for_str,
 )
+from std.memory import OpaquePointer
 from .runtime import ObjCObject, ObjCClass, msg_send
 from .geometry import CGRect, CGPoint, CGSize, NSRange
 
@@ -118,7 +119,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
     def __call__(self) -> _Result[Self.cls, Self.name, "0", "0"]:
         comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "0"]
         comptime assert _Kind[Self.cls, Self.name, "0", "0"] != _NOSUCH, (
-            "no such method on this class with this many arguments: the"
+            "no such method on this class taking this many arguments: the"
             " selector it would send is not one the SDK records. Check the"
             " spelling, the argument count, and that underscores line up with"
             " the selector's colons"
@@ -128,7 +129,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
             " with msg_send and a register-passable result type"
         )
         return msg_send[
-            _Result[Self.cls, Self.name, "0", "0"], Self.cls, sel
+            _Result[Self.cls, Self.name, "0", "0"], Self.cls, sel,
         ](ObjCObject(self.id))
 
     def __call__[
@@ -136,7 +137,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
     ](self, a0: T0) -> _Result[Self.cls, Self.name, "0", "1"]:
         comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "1"]
         comptime assert _Kind[Self.cls, Self.name, "0", "1"] != _NOSUCH, (
-            "no such method on this class with this many arguments: the"
+            "no such method on this class taking this many arguments: the"
             " selector it would send is not one the SDK records. Check the"
             " spelling, the argument count, and that underscores line up with"
             " the selector's colons"
@@ -146,7 +147,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
             " with msg_send and a register-passable result type"
         )
         return msg_send[
-            _Result[Self.cls, Self.name, "0", "1"], Self.cls, sel
+            _Result[Self.cls, Self.name, "0", "1"], Self.cls, sel,
         ](ObjCObject(self.id), a0)
 
     def __call__[
@@ -154,7 +155,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
     ](self, a0: T0, a1: T1) -> _Result[Self.cls, Self.name, "0", "2"]:
         comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "2"]
         comptime assert _Kind[Self.cls, Self.name, "0", "2"] != _NOSUCH, (
-            "no such method on this class with this many arguments: the"
+            "no such method on this class taking this many arguments: the"
             " selector it would send is not one the SDK records. Check the"
             " spelling, the argument count, and that underscores line up with"
             " the selector's colons"
@@ -164,7 +165,7 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
             " with msg_send and a register-passable result type"
         )
         return msg_send[
-            _Result[Self.cls, Self.name, "0", "2"], Self.cls, sel
+            _Result[Self.cls, Self.name, "0", "2"], Self.cls, sel,
         ](ObjCObject(self.id), a0, a1)
 
     def __call__[
@@ -172,14 +173,233 @@ struct Bound[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
     ](self, a0: T0, a1: T1, a2: T2) -> _Result[Self.cls, Self.name, "0", "3"]:
         comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "3"]
         comptime assert _Kind[Self.cls, Self.name, "0", "3"] != _NOSUCH, (
-            "no such method on this class with this many arguments: the"
+            "no such method on this class taking this many arguments: the"
             " selector it would send is not one the SDK records. Check the"
             " spelling, the argument count, and that underscores line up with"
             " the selector's colons"
         )
+        comptime assert _Kind[Self.cls, Self.name, "0", "3"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
         return msg_send[
-            _Result[Self.cls, Self.name, "0", "3"], Self.cls, sel
+            _Result[Self.cls, Self.name, "0", "3"], Self.cls, sel,
         ](ObjCObject(self.id), a0, a1, a2)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3) -> _Result[Self.cls, Self.name, "0", "4"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "4"]
+        comptime assert _Kind[Self.cls, Self.name, "0", "4"] != _NOSUCH, (
+            "no such method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "0", "4"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "0", "4"], Self.cls, sel,
+        ](ObjCObject(self.id), a0, a1, a2, a3)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType, T4: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3, a4: T4) -> _Result[Self.cls, Self.name, "0", "5"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "5"]
+        comptime assert _Kind[Self.cls, Self.name, "0", "5"] != _NOSUCH, (
+            "no such method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "0", "5"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "0", "5"], Self.cls, sel,
+        ](ObjCObject(self.id), a0, a1, a2, a3, a4)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType, T4: AnyType, T5: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3, a4: T4, a5: T5) -> _Result[Self.cls, Self.name, "0", "6"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "0", "6"]
+        comptime assert _Kind[Self.cls, Self.name, "0", "6"] != _NOSUCH, (
+            "no such method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "0", "6"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "0", "6"], Self.cls, sel,
+        ](ObjCObject(self.id), a0, a1, a2, a3, a4, a5)
+
+
+@fieldwise_init
+struct BoundClass[cls: StringLiteral, name: StringLiteral](Copyable, Movable):
+    """`Cls["NSString"].stringWithUTF8String(p)` -- the `+` side.
+
+    Separate from `Bound` rather than a parameter on it because `is_class`
+    reaches the database as a literal "0" or "1", and a parameter would have
+    to be turned into one at comptime -- which is string surgery, which does
+    not fold. Two types is the cheaper answer.
+    """
+
+    var cls_id: Int
+
+    def __call__(self) -> _Result[Self.cls, Self.name, "1", "0"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "0"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "0"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "0"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "0"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id))
+
+    def __call__[
+        T0: AnyType
+    ](self, a0: T0) -> _Result[Self.cls, Self.name, "1", "1"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "1"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "1"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "1"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "1"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0)
+
+    def __call__[
+        T0: AnyType, T1: AnyType
+    ](self, a0: T0, a1: T1) -> _Result[Self.cls, Self.name, "1", "2"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "2"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "2"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "2"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "2"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0, a1)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType
+    ](self, a0: T0, a1: T1, a2: T2) -> _Result[Self.cls, Self.name, "1", "3"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "3"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "3"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "3"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "3"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0, a1, a2)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3) -> _Result[Self.cls, Self.name, "1", "4"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "4"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "4"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "4"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "4"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0, a1, a2, a3)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType, T4: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3, a4: T4) -> _Result[Self.cls, Self.name, "1", "5"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "5"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "5"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "5"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "5"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0, a1, a2, a3, a4)
+
+    def __call__[
+        T0: AnyType, T1: AnyType, T2: AnyType, T3: AnyType, T4: AnyType, T5: AnyType
+    ](self, a0: T0, a1: T1, a2: T2, a3: T3, a4: T4, a5: T5) -> _Result[Self.cls, Self.name, "1", "6"]:
+        comptime sel = cocoakb_p_selector_for[Self.cls, Self.name, "1", "6"]
+        comptime assert _Kind[Self.cls, Self.name, "1", "6"] != _NOSUCH, (
+            "no such CLASS method on this class taking this many arguments: the"
+            " selector it would send is not one the SDK records. Check the"
+            " spelling, the argument count, and that underscores line up with"
+            " the selector's colons"
+        )
+        comptime assert _Kind[Self.cls, Self.name, "1", "6"] != _STRUCT, (
+            "this selector returns a struct std.objc does not name; send it"
+            " with msg_send and a register-passable result type"
+        )
+        return msg_send[
+            _Result[Self.cls, Self.name, "1", "6"], Self.cls, sel, is_class=True,
+        ](ObjCObject(self.cls_id), a0, a1, a2, a3, a4, a5)
+
+
+struct Cls[cls: StringLiteral](Copyable, Movable):
+    """The class object itself, for `+` methods: `Cls["NSColor"].blackColor()`.
+
+    Constructed by looking the class up, which is why it takes no argument --
+    a class is one thing in the process, not a value anyone holds.
+    """
+
+    var cls_id: Int
+
+    def __init__(out self):
+        self.cls_id = ObjCClass.lookup[StaticString(Self.cls.value)]().as_object().addr()
+
+    def __getattr_param__[
+        name: StringLiteral
+    ](self) -> BoundClass[Self.cls, name]:
+        return BoundClass[Self.cls, name](self.cls_id)
+
+    def object(self) -> ObjCObject:
+        return ObjCObject(self.cls_id)
+
+    def is_nil(self) -> Bool:
+        return self.cls_id == 0
 
 
 @fieldwise_init
@@ -210,5 +430,14 @@ struct Obj[cls: StringLiteral](Copyable, Movable):
         """The bare `id`, for the paths that still want one."""
         return ObjCObject(self.id)
 
+    # ObjCObject's whole surface, so a typed result drops into code written
+    # for an untyped one without that code changing. This is what makes
+    # porting a call at a time possible instead of all at once.
     def is_nil(self) -> Bool:
         return self.id == 0
+
+    def addr(self) -> Int:
+        return self.id
+
+    def ptr(self) -> OpaquePointer[MutUntrackedOrigin]:
+        return ObjCObject(self.id).ptr()
