@@ -224,8 +224,60 @@ three pieces.
 It widens on its own when the semantic type contract lands. Nothing in it needs
 revisiting to let structs through; they will simply stop being kinds.
 
+## Step 5 — re-measuring the erasure, which turned out to be NARROWER than recorded
+
+Before building anything toward the semantic sidecar, their two-erasures
+analysis was re-measured here, because it was taken on arm64 and the sidecar's
+whole priority rests on how much it actually costs. It holds — with a sharper
+predicate, and the difference is worth sending upstream.
+
+Their record (`spikes/MOJOLLDB-SPIKE.md`) shows a one-field `Meters` with no DIE
+of its own, sharing `Int`'s:
+
+    total  0x230  '!kgen.scalar<index>'
+    dist   0x230  '!kgen.scalar<index>'   <- Meters
+
+Measured here, by `DW_AT_type` reference rather than by name, as their doc
+rightly insists:
+
+    struct A(Copyable, Movable)        one Int field    -> own DIE, named A
+    struct C(Copyable, Movable)        one Int field    -> own DIE, named C
+    struct One(TrivialRegisterPassable) one Int field   -> shares Int's DIE
+    struct OneF(TrivialRegisterPassable) one F64 field  -> shares Float64's DIE
+    struct Two(TrivialRegisterPassable) two fields      -> own DIE, named Two
+
+**The trigger is single-element AND register-passable, not single-element
+alone.** An ordinary user struct — `Copyable, Movable`, memory-only — keeps its
+source identity even with exactly one field. Only a register-passable
+single-field wrapper collapses into the storage type it lowers to, and it does
+so for floats as well as integers, which rules out anything integer-specific.
+
+This narrows a claim the design leans on. Their doc says "`Int` occurs in very
+nearly every Mojo type, so there is almost nothing that is wholly level 2
+today". The half about MEMBERS stands unchanged — `p.x` is an `Int` and is
+erased, and that is still most of the reach. But the half about user types does
+not: the structs a person writes and wants to inspect are, today, mostly level 2
+already. What is erased is `Int` and `Float64` themselves, and newtype wrappers
+over them.
+
+For the IDE that is the difference between "almost nothing is inspectable" and
+"your own types are inspectable, the scalars inside them are not", which is a
+much better position than the doc implies — and it argues for the sidecar being
+scoped at scalars and newtypes first rather than at the whole type graph.
+
+**Not acted on beyond measuring.** The next step in their order is the semantic
+sidecar, which is a large piece they have specified in detail and not built. It
+is deliberately NOT started here: two independent implementations of a
+serialisation contract is precisely the divergence this fork exists to avoid.
+Their spec already names the shortcut (`MojoPrecompiledFile.cpp`, the `.mojoc`
+serialiser, which already does the staleness discipline) and the trap to avoid
+(a `DIBasicType` carrying the source name, which `MojoDWARFParser.cpp:397` reads
+as a builtin scalar and yields no type at all).
+
 ## Next
 
+* **Coordinate the sidecar with them before either fork writes it.** Everything
+  up to here was adoption or measurement; that one is a shared format.
 * **A fixture matching their description** (nested shadowing, sibling scopes
   reusing a name, generics at several types, a closure shadowing its capture, an
   `@always_inline` helper called twice), so our collision numbers can be compared
