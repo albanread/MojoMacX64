@@ -62,8 +62,9 @@ for f in check.mojo objc_smoke.mojo foundation_demo.mojo typecheck_test.mojo \
          weakref_test.mojo nserror_test.mojo fn_test.mojo dispatch_test.mojo let_test.mojo \
          registrar_test.mojo class_test.mojo struct_arg_test.mojo \
          struct_ret_test.mojo box_test.mojo class_field_test.mojo \
-         objc_decorator_test.mojo dealloc_test.mojo field_init_test.mojo inherit_test.mojo class_method_test.mojo box_ref_test.mojo typed_result_test.mojo \
-         typed_test.mojo; do run_ok "$f"; done
+         objc_decorator_test.mojo dealloc_test.mojo field_init_test.mojo \
+         inherit_test.mojo class_method_test.mojo box_ref_test.mojo \
+         call_direction_test.mojo typed_result_test.mojo typed_call_test.mojo; do run_ok "$f"; done
 
 # The one test with clang on the other end. Everything above has Mojo at both
 # ends and so proves only self-consistency; this links a dylib built by the

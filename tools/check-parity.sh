@@ -37,6 +37,7 @@ files = ["mojo/stdlib/std/objc/classes.mojo", "mojo/stdlib/std/objc/runtime.mojo
          "mojo/stdlib/std/objc/error.mojo", "mojo/stdlib/std/objc/ownership.mojo",
          "mojo/stdlib/std/objc/foundation.mojo", "mojo/stdlib/std/objc/geometry.mojo",
          "mojo/stdlib/std/objc/dispatch.mojo", "mojo/stdlib/std/objc/__init__.mojo",
+         "mojo/stdlib/std/objc/typed.mojo",
          "KGEN/lib/MojoParser/Signatures.cpp", "KGEN/lib/MojoParser/ParserExprs.cpp",
          "KGEN/lib/MojoParser/ParserStmts.cpp"]
 allow = [l.strip().split("|") for l in open("tools/parity-allowlist.txt")
@@ -132,6 +133,44 @@ for path, sigs in targets.items():
                 print(f"  allowed  {name}")
 sys.exit(1 if bad else 0)
 PY
+
+# --- The spike suite, compared as a DIRECTORY ----------------------------
+# The acceptance tests are the signal that the port works, so they drift like
+# any other file -- and worse, silently, because a stale test still passes.
+#
+# Compared as a directory rather than a list, because a list only catches the
+# third of the three ways this actually went wrong in one morning:
+#   drifted   -- class_test.mojo and registrar_test.mojo sat at an older
+#                revision for the whole sprint while passing every run
+#   unported  -- typed_call_test.mojo, the test for the feature being ported
+#   invented  -- typed_test.mojo, a name upstream never had, empty, and the
+#                only reason it was noticed is that an empty file cannot run
+python3 - "$BASE" <<'SPIKES' || fails=$((fails+1))
+import subprocess, sys, pathlib
+base = sys.argv[1]
+D = "spikes/s5-cocoakb"
+allow = [l.strip().split("|") for l in open("tools/parity-allowlist.txt")
+         if l.strip() and not l.startswith("#")]
+def ok(path):
+    return any(p == path for p, _s, _h, _r in allow)
+theirs = set(subprocess.run(["git", "ls-tree", "-r", "--name-only", base, "--", D],
+                            capture_output=True, text=True).stdout.split())
+ours = {D + "/" + p.name for p in pathlib.Path(D).iterdir() if p.is_file()}
+bad = 0
+for f in sorted(theirs - ours):
+    if ok(f): print("  allowed (absent)  " + f); continue
+    print("  NOT PORTED        " + f); bad += 1
+for f in sorted(ours - theirs):
+    if ok(f): print("  allowed (extra)   " + f); continue
+    print("  INVENTED          " + f + "  (upstream has no such file)"); bad += 1
+for f in sorted(theirs & ours):
+    t = subprocess.run(["git", "show", base + ":" + f],
+                       capture_output=True, text=True).stdout
+    if t == pathlib.Path(f).read_text(): continue
+    if ok(f): print("  allowed (whole)   " + f); continue
+    print("  DRIFT             " + f + "  (differs from upstream)"); bad += 1
+sys.exit(1 if bad else 0)
+SPIKES
 
 # --- Property checks: invariants a diff cannot express -------------------
 # Every ABI query must read an x86-64 table. This is the divergence that is

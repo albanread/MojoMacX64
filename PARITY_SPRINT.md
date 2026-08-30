@@ -78,13 +78,13 @@ diffed against their tree at that commit, one commit pushed.
 6. ~~**`@objc`**~~ — their `8723fbd9`. **DONE** (a back-fill: it sits before
    the dealloc commit already ported, so it was a skipped predecessor rather
    than forward progress).
-7. **Fields constructed into the box** — their `fd49242c`.
-8. **Field initializers** — their `2db74630`.
-9. **`class B(A)` inheritance** — their `ac1b2de2`.
-10. **`@staticmethod`** — their `cb5c155d`.
-11. **`box_ref`** — their `05604113` then `a63f1bec`.
-12. **Returned-class trio** — their `feb4d5d6`, `3358ba19`, `6faa3a82`.
-13. **`std.objc.typed`** — their `ea19518e`.
+7. ~~**Fields constructed into the box**~~ — their `fd49242c`. **DONE.**
+8. ~~**Field initializers**~~ — their `2db74630`. **DONE.**
+9. ~~**`class B(A)` inheritance**~~ — their `ac1b2de2`. **DONE.**
+10. ~~**`@staticmethod`**~~ — their `cb5c155d`. **DONE.**
+11. ~~**`box_ref`**~~ — their `05604113` then `a63f1bec`. **DONE.**
+12. ~~**Returned-class trio**~~ — their `feb4d5d6`, `3358ba19`, `6faa3a82`. **DONE.**
+13. ~~**`std.objc.typed`**~~ — their `ea19518e`. **DONE.**
 14. **Stdlib convergence** — adopt `std/objc/*` whole from their HEAD; every
     surviving diff is either on the allowlist or eliminated.
 15. **Acceptance** — the six examples in `acceptance/_class-pending/`
@@ -121,65 +121,59 @@ diffed against their tree at that commit, one commit pushed.
 
 ---
 
-## STOP POINT — 2026-08-30, mid step 12/13
+## ARC CLOSED — 2026-08-30
 
-**The working tree has UNCOMMITTED, UNVERIFIED changes.** Steps 11-13 were in
-progress when work stopped. Read this before touching anything.
+The Objective-C `class` work is at parity. `./tools/check-parity.sh` is green
+against `d3ce7c8a`, `./spikes/run-cocoa-checks.sh` is **33 passed, 0 failed, 0
+not ported**, and all six `acceptance/_class-pending/` examples build and run —
+mandelbrot renders a `class`-declared AppKit window from a Vega II kernel at
+vsync, ~350x the CPU path.
 
-### Committed and pushed (all green when committed)
+### What the morning actually turned up
 
-Steps 1-10 plus the zlib fix, through `74b396b7`. At that point:
-`./spikes/run-cocoa-checks.sh` was 29 passed / 0 failed, GPU regression clean,
-and **all six class-based acceptance examples built unmodified** — which was
-the arc's definition of done.
+The three failures left at the stop point were the selector-keyed send variant,
+exactly as predicted, and cleared with the rebuild. The rest was drift the
+checker could not see, because it was only ever looking at source:
 
-### Uncommitted, and NOT verified
+* **`typed_call_test.mojo` was never ported** — the test for the feature being
+  ported in step 13. The stdlib half (`_cocoakb.mojo`) was byte-identical to
+  theirs; only the test was missing.
+* **`typed_test.mojo` was invented** — a name upstream never had, committed
+  empty. An empty file cannot run, which is the only reason it surfaced.
+* **`class_test.mojo` and `registrar_test.mojo` sat at an older revision** for
+  the whole sprint, passing every run. Theirs had gained a `hits` counter that
+  proves the runtime dispatched INTO our method; ours proved only that a call
+  returned something. A stale test is worse than a missing one: it reports
+  success for a weaker claim than the one you think you are making.
 
-box_ref (step 11), the returned-class trio and `std.objc.typed` (steps 12-13),
-adopted from their tree. Last known suite state was **29 passed, 3 failed** —
-`struct_ret_test`, `typed_test`, `abi_oracle_test`. Do not assume these are
-fixed; the last build+test cycle never ran.
+`check-parity.sh` now compares `spikes/s5-cocoakb` **as a directory**, so all
+three failure modes — drifted, unported, invented — fail the check. Each is
+covered by a negative control.
 
-### The live issue, and it is the important one
+### The allowlist is now six entries, in three groups
 
-Upstream **hard-codes the send variant** as `'objc_msgSend'`, with the comment
-"arm64 has exactly one send". On x86-64 there are three, and the SDK needs them:
+The SysV eightbyte classifier; the two send-variant queries; and the three
+spike divergences (`check.mojo`, `stret_test.mojo`, and the ABI oracle's split
+path). Every one of them is the same fact wearing different clothes: **x86-64
+has to choose a send entry point and arm64 never does.** That is the whole
+divergence surface of this arc.
 
-    objc_msgSend        418681
-    objc_msgSend_stret    3670
-    objc_msgSend_fpret       2
+### Two things fixed that were not drift
 
-Answering the constant fetches a struct return from a register that was never
-written. It appears in **two** queries and both must read `m.msgsend`:
+* `--target-accelerator` has no auto-detection — it is stored verbatim and
+  validated by the stdlib's `_all_targets` constraint. Omitting it does not
+  build for the CPU; it makes `accelerator_arch` empty and any GPU example dies
+  deep inside `GPUInfo.from_name` listing every architecture except this
+  machine's. `vega-sdk/bin/mojo` now supplies `metal-vega2` unless the caller
+  named one.
+* **The 580X is blacklisted.** A Mac Pro has two AMD GPUs and only one can run
+  this fork's kernels. Ranking put the Vega II at id 0 but left the 580X
+  reachable at id 1, where it would allocate buffers happily and fail on the
+  first kernel, in the driver, complaining about bitcode rather than about the
+  device. `AsyncRT_DeviceContext_numberOfDevices("metal")` now answers 1, and
+  asking for device 1 names the excluded GPU and why.
 
-  * `kMsgSendVariantSQL`   — FIXED in the tree, compiler rebuilt, verified:
-    `NSView.frame -> objc_msgSend_stret` again.
-  * `kSelectorVariantSQL`  — FIXED in the tree but **NOT rebuilt or tested**.
-    This is the selector-keyed path, which is what `send[...]` and the ABI
-    oracle use, and is the likely cause of the three failures above.
+### Next
 
-### Next steps, in order
-
-1. `./bazelw build //KGEN/tools/mojo:mojo` and rebuild the 16 `.mojoc`
-   packages, then `./spikes/run-cocoa-checks.sh`. Expect the three failures to
-   clear; if they do not, the selector-keyed path is the place to look.
-2. Add the allowlist row for `kSelectorVariantSQL` (the kMsgSendVariantSQL row
-   is already there) — these are now **three** allowed divergences: the SysV
-   eightbyte classifier and the two send-variant queries.
-3. Add a property check to `check-parity.sh`: **no `'objc_msgSend'` string
-   literal may survive in CocoaKBDatabase.cpp.** A diff cannot express this,
-   the file is whole-file allowlisted, and it has now bitten twice in one
-   sitting. This is the highest-value item here.
-4. Bump `parity-base.txt` to `d3ce7c8a` only once the suite is green, and
-   commit steps 11-13 together.
-5. Then re-run the acceptance six, and the cocoa arc is finished.
-
-### Also true, and easy to trip over
-
-**They force-pushed a rewritten history** (see Rule 0). Every SHA in earlier
-commit messages is orphaned — resolvable locally because we fetched it, absent
-from their `main`. Content was verified identical across the rewrite. The
-current base is `d3ce7c8a`.
-
-Remaining upstream work after this arc is **IDE, debugger and installer** —
-116 new commits — which is explicitly the next project, not this one.
+The IDE, debugger and installer work from MojoCocoa — 116 commits, a separate
+project. Nothing in the cocoa arc is outstanding.
