@@ -313,6 +313,34 @@ Against the §4.4 curve, 42% capacity still gives roughly 95% hit rate. **Contex
 and expert residency are not really competing**, which matters because code
 assistance needs long context and the naive arithmetic made that look expensive.
 
+## 4.6 Measured: the fixed cost of a crossing, and a reversal
+
+**`MEASURED`** — `t_layer = a + b·bytes` fitted over three `-ncmoe` sweeps:
+
+| model | format | GB/layer | ms/layer | residual |
+|---|---|---:|---:|---:|
+| gpt-oss-120b | MXFP4 | 0.0538 | 1.78 | −0.01 |
+| Qwen3-30B-A3B | Q4_K_M | 0.0230 | 1.16 | −0.03 |
+| Qwen3-30B-A3B | Q6_K | 0.0311 | 1.38 | +0.03 |
+
+**`a` = 0.737 ms fixed per crossing, `b` = 51.3 GB/s marginal, R² = 0.990.**
+
+Sending *any* of a layer's work to the CPU splits the graph and costs 0.737 ms
+before a byte moves. A PCIe fetch keeps compute on the GPU and pays none of it.
+For one missed expert of gpt-oss-120b (0.0135 GB): CPU costs 0.737 + 0.26 = **1.0
+ms**, a fetch costs **1.1 ms** and can be hidden behind the previous layer.
+
+**This reverses §4.4.** With the term added, `all_pcie` beats `all_cpu` by 2x and
+the adaptive balancer converges to fetching 98% over PCIe unaided. Twice this note
+argued the transfer path was pointless here — once from a host bandwidth assumed
+at 3x its measured value, once from an algebraic neutrality that was correct but
+omitted the dominant cost. **FreeToken's transfer-centric design is right**, for a
+reason neither the paper nor we had isolated.
+
+What survives unchanged: LRU residency is the main win, and admitting
+CPU-computed experts still helps. What does not: "run every miss on the CPU and
+treat PCIe as a last resort" was wrong.
+
 ## 5. Staged plan
 
 Ordered so that each phase is useful alone and the cheap ones come first.
