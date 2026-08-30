@@ -2796,3 +2796,64 @@ simply do not have.
   (fd49242c) → field initializers (2db74630) → class B(A) (ac1b2de2) →
   @staticmethod (cb5c155d) → box_ref pair → returned-class trio → std.objc.typed
   → then the acceptance six.
+
+## 2026-08-24 (later) — expert paging, and knowing when to stop
+
+Spent the afternoon building MoE expert paging into the fork — keep the weights in
+the 192 GiB of host RAM, treat VRAM as an LRU cache over `(layer, expert)` slots,
+page the routed experts in. It works, it is correct, and it is now reverted.
+
+**The number that ended it:** gpt-oss-120b at **0.68 t/s** against **20.6** for
+`-ncmoe 18`, a one-line flag that already existed. Full write-up in
+[FreeTokenLayers.md](FreeTokenLayers.md).
+
+**Why it loses is structural.** The cost of giving a layer's work to the CPU is a
+fixed ~0.96 ms, paid once and amortised across all four of that layer's routed
+experts. Paging pays PCIe *per expert* with nothing to amortise against. And host
+RAM measures ~109 GB/s against maybe 12 through the Mac Pro's switched Gen3 bus,
+so moving weights to the card to compute them is slower than computing them where
+they already are. Alban's read of the hardware was right: the bus is the machine's
+weakest axis, and this technique loads it deliberately.
+
+Finer granularity does not rescue it either. Per-expert placement looks appealing
+given the routing skew we measured, but with 4 experts routed per layer the chance
+all four are hot is 0.7^4 ≈ 24% — three layers in four cross regardless.
+
+**The process error is the lesson, and it is mine.** I built three kernels, a slot
+pool, a simulator and a policy engine before ever measuring `-ncmoe` on the target
+model. Two measurements would have answered the whole question. Everything after
+that was elaborate confirmation of an answer available on the first afternoon.
+
+Four measurement errors along the way, every one producing a result that was *too
+clean*: a perfectly uniform router (a strided view read contiguously), a flat
+distribution (pooling by expert index across layers), a 97% hit rate (a trace
+replayed in the wrong order), and an adaptive controller billing itself at its own
+estimated bandwidths. Plus five hours of benchmarks taken while a stuck
+`PerfPowerServices` daemon ate two cores — the tell was a 27-64% spread where clean
+runs give under 1%.
+
+**One platform trap worth carrying forward.** `ggml_metal_buffer_init(shared=true)`
+silently returns a *private* buffer when the device lacks shared-buffer support,
+and its `all_data` is a synthetic address that faults on first write. Same family
+as the wrong-target `mcpu` that disassembles to garbage and the stale embedded
+shader library: this stack substitutes silently rather than erroring.
+
+**What actually matters for using this machine**, which is where we should have
+started:
+
+| model | fits 32 GiB? | speed | machine usable |
+|---|---|---:|---|
+| gpt-oss-20b MXFP4 | yes | **62 t/s** | yes |
+| Gemma-4-26B QAT | yes | 49 | yes |
+| Qwen3-30B-A3B Q6_K | yes | 47 | yes |
+| gpt-oss-120b | no | 20.6 | no — saturates the memory bus |
+
+Anything that fits beats anything that does not, by 2-3x, and leaves the keyboard
+responsive. 192 GiB of RAM makes a 117B model *exist*; it does not make it fast,
+because generation speed is bandwidth over bytes-per-token and every path to that
+RAM is narrower than the card's own memory.
+
+The wave64 work, the register-tiled GEMM, the load-width fixes and the mat-vec
+tuning all stand — that is what made the card useful. This was the one that did
+not pay, and it is recorded so the next stunt on six-year-old hardware starts with
+the baseline instead of the kernels.
