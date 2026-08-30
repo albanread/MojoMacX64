@@ -11,6 +11,12 @@ LLVM_SHA = "7636ff70c60a2933a91362932127478b7b24a610ef1f01afa58fc2a4ecb125ed"
 
 PATCHES = [
     "//bazel/public-patches:llvm-lldb-exports.patch",
+    # liblldb exports its embedded LLVM by upstream design (the drivers import
+    # from it); beside a shared libLLVM.dylib that is two exported LLVMs in one
+    # process, dyld coalesces their weak registry symbols, and the duplicate
+    # registration aborts the debugger at plugin load. Keep liblldb's copy
+    # private; the drivers already link their own llvm statically.
+    "//bazel/public-patches:llvm-liblldb-private-llvm.patch",
     # https://github.com/llvm/llvm-project/pull/153352
     # https://linear.app/modularml/issue/MOCO-2322/llvm-upstream-change-conflicting-with-internal-code-that-addresses
     "//bazel/public-patches:llvm-machinefunction-sti-ref-to-ptr.patch",

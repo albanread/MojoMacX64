@@ -4,6 +4,13 @@ package(default_visibility = ["//KGEN:consumers"])
 
 modular_cc_binary(
     name = "mojo-lsp-server",
+    # The same sharing as the compiler, for the same reason -- and one more:
+    # the IDE runs this server WHILE the compiler builds, so with both linking
+    # libLLVM.dylib the OS maps those pages once across the two processes.
+    dynamic_deps = [
+        "//bazel/llvm-shared:LLVM",
+        "//bazel/mlir-shared:MLIR",
+    ],
     srcs = glob([
         "*.cpp",
         "*.h",
@@ -18,6 +25,8 @@ modular_cc_binary(
         "//conditions:default": [],
     }),
     deps = [
+        # COCOA: completion candidates from cocoa.sqlite.
+        "//KGEN:CocoaCompletion",
         "//AsyncRT:Runtime",
         "//AsyncRT:RuntimeGlobals",
         "//Config",

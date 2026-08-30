@@ -1,0 +1,35 @@
+Keep liblldb's embedded LLVM private to liblldb.
+
+liblldb-private.exports exports _ZN4llvm* from liblldb, which is upstream's
+design: liblldb is the one LLVM provider for the lldb tool family, and the
+drivers import llvm symbols from it. That design and a shared libLLVM.dylib
+cannot share a process. Both images export the same weak vague-linkage
+symbols -- template instantiations, class-static registry members -- and dyld
+coalesces them, so the two copies' registries unify while each copy's static
+initializers still run: the second registration of 'basic' (RegAllocBasic)
+aborts the debugger at plugin load, inside dyld, before any breakpoint.
+
+    LLVM ERROR: Option 'basic' already exists!
+
+Dropping the llvm patterns demotes every llvm symbol in liblldb to private
+extern at link (-exported_symbols_list demotes what it does not match, weak
+included), so there is no exported twin to coalesce with and each copy keeps
+its own registries. The overlay's drivers are unaffected: lldb, lldb-dap and
+lldb-argdumper each already link //llvm:Option and //llvm:Support statically,
+which is where their llvm references resolve.
+
+lldb:: and lldb_private:: stay exported exactly as before.
+
+diff --git a/lldb/source/API/liblldb-private.exports b/lldb/source/API/liblldb-private.exports
+--- a/lldb/source/API/liblldb-private.exports
++++ b/lldb/source/API/liblldb-private.exports
+@@ -3,9 +3,6 @@ _ZNK4lldb*
+ _ZN12lldb_private*
+ _ZNK12lldb_private*
+ _ZTVN12lldb_private*
+-_ZN4llvm*
+-_ZNK4llvm*
+-_ZTVN4llvm*
+ init_lld*
+ PyInit__lldb*
+ luaopen_lldb*

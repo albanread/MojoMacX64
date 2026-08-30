@@ -1524,6 +1524,29 @@ alias(
     actual = "@llvm-project//lldb",
 )
 
+# COCOA: everything that reads cocoa.sqlite. Two readers, on purpose --
+# CocoaKBDatabase answers point questions (this selector's encoding, this
+# class's framework) for the compiler, CocoaCompletion answers prefix questions
+# for the language server. They share the file and the configured path, not
+# their indexes.
+modular_cc_library(
+    name = "CocoaCompletion",
+    srcs = [
+        "lib/CocoaKB/CocoaCompletion.cpp",
+        "lib/CocoaKB/CocoaKBDatabase.cpp",
+    ],
+    hdrs = [
+        "include/KGEN/CocoaKB/CocoaCompletion.h",
+        "include/KGEN/CocoaKB/CocoaKBDatabase.h",
+    ],
+    # The macOS SDK ships sqlite3.h and libsqlite3.tbd, so no vendored copy.
+    linkopts = ["-lsqlite3"],
+    deps = [
+        ":Support",
+        "@llvm-project//llvm:Support",
+    ],
+)
+
 modular_cc_library(
     name = "MojoLLDBPublicHeaders",
     hdrs = glob(["include/KGEN/MojoLLDB/*.h"]),
@@ -1541,14 +1564,21 @@ modular_cc_library(
     ],
 )
 
-modular_shared_library(
-    name = "MojoLLDB",
+# The plugin's code, as an ordinary library; the shared library below owns the
+# linking. Split because modular_shared_library links its own dylib and cannot
+# express dynamic_deps -- and dynamic_deps is the whole point here.
+modular_cc_library(
+    name = "MojoLLDBLib",
     srcs = glob(
         ["lib/MojoLLDB/**/*.cpp"],
         exclude = ["lib/MojoLLDB/Language/Formatters/MojoVariantTypeNameParser.cpp"],
     ),
     hdrs = glob(["lib/MojoLLDB/**/*.h"]),
     includes = [],
+    # What modular_shared_library defined for its compile; the plugin's
+    # MODULAR_EXPORT entry points expand to default visibility under it.
+    local_defines = ["MODULAR_BUILDING_LIBRARY"],
+    alwayslink = True,
     internal_deps = select({
         # Under --config=hal-device-context we don't link the full DeviceContext,
         # but we need CompilationDevice and the HAL-only CompilerDeviceArch.
@@ -1577,6 +1607,40 @@ modular_shared_library(
         "@llvm-project//llvm:ExecutionEngine",
         "@llvm-project//llvm:MCJIT",
     ],
+)
+
+# The debugger plugin, sharing LLVM and MLIR instead of embedding them.
+#
+# It used to carry a full static LLVM -- 123 MB, and the process it loads into
+# (lldb) carries another inside liblldb. Under hidden visibility the two copies
+# coexisted behind macOS's two-level namespace; under the default visibility
+# the shared libraries require, the plugin's embedded initializers registered
+# into liblldb's now-visible registries and the first duplicate aborted the
+# debugger:
+#
+#     LLVM ERROR: Option 'greedy' already exists!
+#     libMojoLLDB.dylib  _GLOBAL__sub_I_RegAllocGreedy.cpp
+#
+# With LLVM and MLIR as dynamic_deps the plugin has no embedded copy and no
+# initializers of its own to collide: it uses libLLVM.dylib -- the same one the
+# compiler and libMojoCompiler use. liblldb still embeds its own LLVM; that is
+# the llvm-project overlay's packaging (a cc_binary dylib, so it cannot be a
+# dynamic_dep), and the two remaining copies keep to their own registries
+# because nothing registers across the boundary any more.
+cc_shared_library(
+    name = "MojoLLDB",
+    shared_lib_name = "libMojoLLDB.dylib",
+    dynamic_deps = [
+        "//bazel/llvm-shared:LLVM",
+        "//bazel/mlir-shared:MLIR",
+    ],
+    exports_filter = [
+        "//KGEN:__subpackages__",
+        "//Support:__subpackages__",
+        "//Init:__subpackages__",
+        "//AsyncRT:__subpackages__",
+    ],
+    deps = [":MojoLLDBLib"],
 )
 
 genrule(

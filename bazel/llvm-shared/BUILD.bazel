@@ -129,8 +129,16 @@ cc_shared_library(
         "@llvm-project//llvm:Scalar",
         "@llvm-project//llvm:Support",
         "@llvm-project//llvm:Symbolize",
-        "@llvm-project//llvm:TableGen",
-        "@llvm-project//llvm:TableGenGlobalISel",
+        # NOT @llvm-project//llvm:TableGen or :TableGenGlobalISel. Those are
+        # build-time tool libraries, and TableGen's Main.cpp registers global
+        # cl options -- "I", "o", "d" -- from a static initializer. In a
+        # runtime dylib those register at LOAD, and the first program that
+        # declares its own -I dies in cl::Option::addArgument with
+        #   CommandLine Error: Option 'I' registered more than once!
+        # The LSP server declares exactly that option, and crashed at startup
+        # the moment it linked this library instead of carrying its own LLVM.
+        # Nothing at run time generates tables; nothing at run time may link
+        # the generator.
         "@llvm-project//llvm:Target",
         "@llvm-project//llvm:TargetParser",
         "@llvm-project//llvm:TextAPI",

@@ -12,6 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "MojoServer.h"
+
+#include "KGEN/CocoaKB/CocoaCompletion.h"
 #include "DocumentDebouncer.h"
 #include "KGEN/ToolCommon/InitAllDialects.h"
 #include "KGEN/tools/mojo-lsp-server/LSPTelemetryContext.h"
@@ -1199,7 +1201,205 @@ static ItemAccessKind getItemAccessKind(const lsp::CompletionItem &item) {
   return ItemAccessKind::kOther;
 }
 
+//===----------------------------------------------------------------------===//
+// COCOA: completion inside Objective-C string literals
+//===----------------------------------------------------------------------===//
+//
+// Cocoa reaches Mojo through strings -- ObjCClass.lookup["NSWindow"], and
+// msg_send[ObjCObject, "NSWindow", "setTitle:"]. To the Mojo elaborator those
+// are string literals and there is nothing to complete inside them, which is
+// correct and unhelpful: the compiler knows every one of those names, because
+// it answers cocoakb_query from the same database at compile time.
+//
+// So when the cursor is inside a string literal in one of those positions,
+// completion comes from cocoa.sqlite instead: 28,814 classes and 522,170
+// selectors, with the receiver's superclass chain walked so that alloc and init
+// appear on NSWindow where a person expects them.
+//
+// This is deliberately textual. Elaborating a half-typed msg_send to find the
+// receiver would be the principled approach and would also mean the completion
+// list depends on the file compiling, which while typing it usually does not.
+
+/// The enclosing '[' or '(' before `text`, ignoring bracket characters that sit
+/// inside string literals. Returns npos if the cursor is not inside a call or
+/// subscript.
+static size_t findEnclosingOpen(StringRef text) {
+  // Mark which offsets are inside a string, so brackets there do not count.
+  SmallVector<bool> inString(text.size(), false);
+  bool open = false;
+  for (size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
+    if (open && c == '\\') {
+      inString[i] = true;
+      if (i + 1 < text.size())
+        inString[++i] = true;
+      continue;
+    }
+    if (c == '"')
+      open = !open;
+    else if (c == '\n')
+      open = false; // an unterminated literal does not run past its line
+    inString[i] = open;
+  }
+
+  int depth = 0;
+  for (size_t i = text.size(); i-- > 0;) {
+    if (inString[i])
+      continue;
+    char c = text[i];
+    if (c == ']' || c == ')') {
+      ++depth;
+    } else if (c == '[' || c == '(') {
+      if (depth == 0)
+        return i;
+      --depth;
+    }
+  }
+  return StringRef::npos;
+}
+
+/// The identifier immediately before `pos`, dots included, so that
+/// `ObjCClass.lookup[` yields "ObjCClass.lookup".
+static StringRef identifierBefore(StringRef text, size_t pos) {
+  size_t end = pos;
+  while (end > 0 && llvm::isSpace(text[end - 1]))
+    --end;
+  size_t start = end;
+  while (start > 0) {
+    char c = text[start - 1];
+    if (!llvm::isAlnum(c) && c != '_' && c != '.')
+      break;
+    --start;
+  }
+  return text.slice(start, end);
+}
+
+/// Every complete string literal in `text`, in order.
+static SmallVector<StringRef> stringLiteralsIn(StringRef text) {
+  SmallVector<StringRef> literals;
+  for (size_t i = 0; i < text.size(); ++i) {
+    if (text[i] != '"')
+      continue;
+    size_t start = ++i;
+    while (i < text.size() && text[i] != '"' && text[i] != '\n') {
+      if (text[i] == '\\')
+        ++i;
+      ++i;
+    }
+    if (i < text.size() && text[i] == '"')
+      literals.push_back(text.slice(start, i));
+  }
+  return literals;
+}
+
+/// Cocoa completions for a cursor inside a string literal, or nothing if this
+/// is not such a position.
+static std::optional<lsp::CompletionList>
+tryCocoaCompletion(llvm::SourceMgr &sourceMgr, SMLoc completeLoc) {
+  unsigned bufID = sourceMgr.FindBufferContainingLoc(completeLoc);
+  if (!bufID)
+    return std::nullopt;
+  StringRef buffer = sourceMgr.getMemoryBuffer(bufID)->getBuffer();
+  const char *base = buffer.data();
+  const char *cursor = completeLoc.getPointer();
+  if (cursor < base || cursor > base + buffer.size())
+    return std::nullopt;
+
+  StringRef before(base, cursor - base);
+  StringRef after = buffer.substr(cursor - base);
+
+  // Is the cursor inside a string literal on this line, and where did it open?
+  size_t lineStart = before.rfind('\n');
+  lineStart = lineStart == StringRef::npos ? 0 : lineStart + 1;
+  StringRef line = before.substr(lineStart);
+  bool inString = false;
+  size_t openQuote = StringRef::npos;
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (inString && line[i] == '\\') {
+      ++i;
+      continue;
+    }
+    if (line[i] == '"') {
+      inString = !inString;
+      openQuote = inString ? i : StringRef::npos;
+    }
+  }
+  if (!inString || openQuote == StringRef::npos)
+    return std::nullopt;
+
+  StringRef typed = line.substr(openQuote + 1);
+  // Everything up to the opening quote, across lines: msg_send argument lists
+  // wrap, and the receiver is often on a different line from the selector.
+  StringRef head = before.substr(0, lineStart + openQuote);
+
+  size_t open = findEnclosingOpen(head);
+  if (open == StringRef::npos)
+    return std::nullopt;
+  StringRef callee = identifierBefore(head, open);
+  StringRef args = head.substr(open + 1);
+
+  // Only inside the calls where a string really is a Cocoa name. Anywhere else
+  // a string is a string, and offering 28,814 class names would be vandalism.
+  bool isMsgSend = callee.ends_with("msg_send");
+  bool isLookup = callee.ends_with("lookup") || callee.ends_with("getClass");
+  if (!isMsgSend && !isLookup)
+    return std::nullopt;
+
+  lsp::CompletionList list;
+  auto push = [&](const M::KGEN::CocoaKB::CompletionItem &item,
+                  lsp::CompletionItemKind kind, unsigned rank) {
+    lsp::CompletionItem out;
+    out.label = item.name;
+    out.kind = kind;
+    out.detail = item.detail;
+    if (!item.documentation.empty())
+      out.documentation = {lsp::MarkupKind::Markdown, item.documentation};
+    // Preserve the database's ordering: it ranks by inheritance depth and
+    // length, which is far better than alphabetical for selectors.
+    out.sortText = llvm::formatv("{0,0+6}", rank);
+    list.items.push_back(std::move(out));
+  };
+
+  SmallVector<StringRef> priorStrings = stringLiteralsIn(args);
+
+  // msg_send[ReturnType, "NSWindow", "selector"] -- the receiver class is the
+  // first string, the selector the second. With no prior string we are on the
+  // class; with one, on the selector.
+  if (isMsgSend && !priorStrings.empty()) {
+    StringRef cls = priorStrings.front();
+    // is_class=True selects the metaclass, and it is written after the
+    // selector, so look forward as well as back -- but only to the end of this
+    // subscript. A fixed-size lookahead reads the *next* statement's arguments:
+    // completing an instance selector on one line silently became a class-method
+    // lookup because the line below it happened to pass is_class=True.
+    StringRef window = after.take_until([](char c) { return c == '\n'; });
+    window = window.substr(0, window.find(']'));
+    bool classMethod = args.contains("is_class=True") ||
+                       args.contains("is_class = True") ||
+                       window.contains("is_class=True") ||
+                       window.contains("is_class = True");
+    unsigned rank = 0;
+    for (const auto &item :
+         M::KGEN::CocoaKB::completeSelectors(cls, typed, classMethod))
+      push(item, lsp::CompletionItemKind::Method, rank++);
+    return list;
+  }
+
+  unsigned rank = 0;
+  for (const auto &item : M::KGEN::CocoaKB::completeClasses(typed))
+    push(item, lsp::CompletionItemKind::Class, rank++);
+  return list;
+}
+
 lsp::CompletionList MojoDocument::onCodeCompletionSync(SMLoc completeLoc) {
+  // COCOA: a cursor inside an Objective-C name string is answered from
+  // cocoa.sqlite. Checked before the Mojo path because the two never both
+  // apply -- inside a string literal there is nothing for the elaborator to
+  // complete -- and because it does not need a successfully elaborated file.
+  if (std::optional<lsp::CompletionList> cocoa =
+          tryCocoaCompletion(sourceMgr, completeLoc))
+    return std::move(*cocoa);
+
   if (!context)
     return lsp::CompletionList();
 

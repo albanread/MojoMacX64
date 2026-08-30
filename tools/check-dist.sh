@@ -82,7 +82,9 @@ if [ -x dist/MojoMacX64/bin/mojo-lsp-server ]; then
     # for a while like a broken feature rather than an unset variable.
     MODULAR_MOJO_MAX_COCOAKB_PATH="$PWD/dist/MojoMacX64/share/cocoa.sqlite" \
     tools/lsp-probe/complete.py dist/MojoMacX64/bin/mojo-lsp-server \
-      tools/lsp-probe/cocoa_completion.mojo "$1" "$2" 2>/dev/null \
+      tools/lsp-probe/cocoa_completion.mojo "$1" "$2" \
+      -I dist/MojoMacX64/lib/mojo/stdlib -I dist/MojoMacX64/lib/mojo/max \
+      -I dist/MojoMacX64/lib/mojo/kernels 2>/dev/null \
       | awk -F'\t' -v want="$3" '$1 == want { print; exit }'
     # Exact field match, not grep: a selector label ends in ':', and a regex
     # word boundary after ':' never matches, which silently reported every
@@ -108,13 +110,17 @@ if clang++ -std=c++17 -fno-rtti tools/ide-probe/ide_probe.cpp \
      -Wl,-rpath,"$PWD/dist/MojoMacX64/lib" -o "$TMP/ide_probe" \
      >"$TMP/ide_probe.log" 2>&1; then
   targets=$(env -i "$TMP/ide_probe" 2>&1 | grep '^registered targets:' | cut -d: -f2-)
+  # The staleness signal has to be arch-relative: stale generated headers on
+  # arm64 showed up as x86 backends appearing, and on x86-64 the same check
+  # inverted into rejecting a correct list. The invariant that holds on both:
+  # the machine's own backend is registered.
+  host_tgt=$(uname -m | sed 's/arm64/aarch64/; s/x86_64/x86-64/')
   if [ -z "$targets" ]; then
     bad "llvm consumer" "built but produced no target list"
-  elif echo "$targets" | grep -qi 'x86\|riscv'; then
-    # Headers and dylib disagree about which LLVM this is.
-    bad "llvm consumer" "generated Targets.def is stale:$targets"
+  elif echo "$targets" | grep -qw "$host_tgt"; then
+    ok "llvm consumer" "compiles and runs against dist; host backend $host_tgt registered"
   else
-    ok "llvm consumer" "compiles and runs against dist;$targets"
+    bad "llvm consumer" "host backend $host_tgt missing from:$targets"
   fi
 else
   bad "llvm consumer" "$(grep -m1 -E 'error|fatal' "$TMP/ide_probe.log" || echo 'build failed')"

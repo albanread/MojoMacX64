@@ -284,7 +284,12 @@ cc_shared_library(
         "@llvm-project//mlir:MemorySlotInterfacesIncGen",
         "@llvm-project//mlir:MemorySlotUtils",
         "@llvm-project//mlir:MlirLspServerSupportLib",
-        "@llvm-project//mlir:MlirTableGenMain",
+        # NOT @llvm-project//mlir:MlirTableGenMain -- mlir-tblgen's own main
+        # library, which drags llvm:TableGen and its load-time cl options
+        # ("I", "o", "d") into a runtime dylib. Same eviction, same reason, as
+        # llvm-shared dropping llvm:TableGen: the first program to declare its
+        # own -I dies with "Option 'I' registered more than once". Nothing at
+        # run time generates tables.
         "@llvm-project//mlir:NVGPUDialect",
         "@llvm-project//mlir:NVGPUIncGen",
         "@llvm-project//mlir:NVGPUOpsIncGen",
@@ -402,7 +407,8 @@ cc_shared_library(
         "@llvm-project//mlir:SubsetOpInterfaceIncGen",
         "@llvm-project//mlir:Support",
         "@llvm-project//mlir:SymbolInterfacesIncGen",
-        "@llvm-project//mlir:TableGen",
+        # NOT @llvm-project//mlir:TableGen either -- the tblgen-record
+        # half of the same tool surface.
         "@llvm-project//mlir:TargetLLVM",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TensorEncodingIncGen",
