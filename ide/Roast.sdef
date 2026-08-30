@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!-- The terminology, not the transport. Events reach the handler by their
+     raw codes with or without this file; what the sdef adds is the words:
+     Script Editor compiles `do command "status"` instead of
+     «event Rostcmnd». One command on purpose - the whole surface is the
+     command language, and `do command "help"` lists it. -->
+<dictionary title="Roast Terminology">
+  <suite name="Roast Suite" code="Rost"
+         description="Drive the Roast IDE. One verb; the argument is the
+                      command language - send &quot;help&quot; for the list.">
+    <command name="do command" code="Rostcmnd"
+             description="Run one Roast agent command and return its reply.">
+      <direct-parameter type="text"
+                        description="the command, e.g. status, open /path,
+                                     goto 12, menu Debug &gt; Step Over,
+                                     screenshot /tmp/r.png"/>
+      <result type="text" description="one line of reply"/>
+    </command>
+  </suite>
+</dictionary>

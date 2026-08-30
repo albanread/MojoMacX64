@@ -122,3 +122,38 @@ This table was seeded from `git log -- mojo/stdlib` and is an index, not an
 audit: nobody has gone back through those commits to separate a fix to
 Modular's code from an addition of our own. If you touch one of them, write
 it a proper entry above and delete its row here.
+
+## `std/os/_macos.mojo` — the stat family binds the wrong symbol on x86-64
+
+**What was wrong.** `_stat` and `_lstat` call `external_call["stat", ...]` and
+`external_call["lstat", ...]`. On arm64 that is correct. On x86-64 macOS it
+binds the wrong entry point, and everything stat-backed silently misreads.
+
+macOS carries two generations of the stat family. The original has a 32-bit
+`ino_t` and a correspondingly different `struct stat`; the 64-bit-inode
+generation is exported under a `$INODE64` suffix, and `<sys/stat.h>` renames the
+call at compile time with an `__asm` label, so C code that writes `stat` links
+against `_stat$INODE64` without ever naming it. Compiling
+
+    int probe(const char *p, struct stat *s) { return stat(p, s); }
+
+for x86-64 emits exactly one undefined symbol: `_stat$INODE64`. arm64 has no
+legacy generation — there `stat` IS the 64-bit-inode call and no renaming
+happens.
+
+`external_call` does no renaming anywhere, so it named the old entry point and
+filled a modern `_c_stat` from a layout that does not match it. `st_mode` is at
+offset 4 in the modern struct (sizeof 144); in the old one it is elsewhere.
+
+**Why it survived.** The damage is quiet. `mkdir` succeeds, `exists` agrees, and
+`isdir` on the directory just created answers False — so
+`makedirs(p, exist_ok=True)` raises "path not created" for a path it did in fact
+create. `isdir`, `isfile`, `islink`, `getsize` and `stat` are all affected, and
+ordinary Mojo programs do not stat.
+
+**The fix.** Name `stat$INODE64` / `lstat$INODE64` under
+`comptime if CompilationTarget.is_x86()`, keeping the plain symbols everywhere
+else. arm64 behaviour is unchanged.
+
+**Found by** porting the IDE — its session store creates its own directory, and
+that is the first code in either fork to depend on `isdir` being right.

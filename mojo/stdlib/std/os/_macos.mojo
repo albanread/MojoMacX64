@@ -13,6 +13,7 @@
 
 from std.collections import Array
 from std.ffi import external_call
+from std.sys.info import CompilationTarget
 from std.time.time import _CTimeSpec
 
 from .fstat import stat_result
@@ -131,12 +132,44 @@ struct _c_stat(Copyable, Defaultable, Writable):
         )
 
 
+# `stat` is NOT the symbol clang calls on x86-64 macOS.
+#
+# macOS carries two generations of the stat family. The original one has a
+# 32-bit `ino_t` and a correspondingly different `struct stat`; the 64-bit-inode
+# one is exported under a `$INODE64` suffix, and `<sys/stat.h>` renames the call
+# at compile time with an __asm label, so C code calling `stat` links against
+# `_stat$INODE64` without ever naming it. Compiling
+#
+#     int probe(const char *p, struct stat *s) { return stat(p, s); }
+#
+# for x86-64 on this machine emits exactly one undefined symbol: `_stat$INODE64`.
+#
+# arm64 has no legacy generation -- there `stat` IS the 64-bit-inode call, no
+# renaming happens, and naming the plain symbol is correct. So an
+# `external_call["stat"]`, which does no renaming anywhere, is right on arm64
+# and wrong here: it binds the OLD entry point and fills a modern `_c_stat`
+# from a layout that does not match it. `st_mode` is at offset 4 in the modern
+# struct (sizeof 144) and somewhere else entirely in the old one.
+#
+# The visible damage is quiet, which is why this survived: `mkdir` succeeds and
+# `exists` agrees, while `isdir` on the directory just created answers False --
+# so `makedirs(p, exist_ok=True)` raises "path not created" for a path it did
+# in fact create. Everything stat-backed is affected: isdir, isfile, islink,
+# getsize, stat.
+#
+# Found by porting the IDE, whose session store creates its own directory.
 @always_inline
 def _stat(var path: String) raises -> _c_stat:
     var stat = _c_stat()
-    var err = external_call["stat", Int32](
-        path.as_c_string_slice(), Pointer(to=stat)
-    )
+    var err: Int32
+    comptime if CompilationTarget.is_x86():
+        err = external_call["stat$INODE64", Int32](
+            path.as_c_string_slice(), Pointer(to=stat)
+        )
+    else:
+        err = external_call["stat", Int32](
+            path.as_c_string_slice(), Pointer(to=stat)
+        )
     if err == -1:
         raise Error("unable to stat '", path, "'")
     return stat^
@@ -145,9 +178,15 @@ def _stat(var path: String) raises -> _c_stat:
 @always_inline
 def _lstat(var path: String) raises -> _c_stat:
     var stat = _c_stat()
-    var err = external_call["lstat", Int32](
-        path.as_c_string_slice(), Pointer(to=stat)
-    )
+    var err: Int32
+    comptime if CompilationTarget.is_x86():
+        err = external_call["lstat$INODE64", Int32](
+            path.as_c_string_slice(), Pointer(to=stat)
+        )
+    else:
+        err = external_call["lstat", Int32](
+            path.as_c_string_slice(), Pointer(to=stat)
+        )
     if err == -1:
         raise Error("unable to lstat '", path, "'")
     return stat^
