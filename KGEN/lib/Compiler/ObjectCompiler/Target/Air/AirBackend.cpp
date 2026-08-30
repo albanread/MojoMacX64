@@ -1064,6 +1064,76 @@ llvm::Error legalizeModule(llvm::Module &m) {
       arg.removeAttr(llvm::Attribute::Writable);
     }
     fn.removeRetAttr(llvm::Attribute::Range);
+
+    // And the same attributes where they actually appear: on the CALL, not on
+    // the declaration. Stripping only the declaration leaves
+    //
+    //     %161 = tail call range(i64 0, 65) i64 @llvm.ctpop.i64(i64 %x)
+    //
+    // untouched, and this machine's AIR reader -- Apple metal 32023.101, a
+    // clang-17 era front end -- rejects the whole module for it with
+    //
+    //     LLVM ERROR: Invalid bitcode file!
+    //
+    // which names no attribute, no function and no line. `range` is an
+    // LLVM-19 attribute that our llvm-22 optimiser infers on ctpop and the
+    // saturating-arithmetic intrinsics; it is pure range INFORMATION, so
+    // dropping it costs nothing the reader could have used.
+    //
+    // Only othello reaches it in the example corpus, because it is the only
+    // one doing bit-board popcounts, which is why this survived a full sweep
+    // of the others. The sister fork does not see it either: its Metal
+    // toolchain is 32023.830 and accepts the attribute.
+    for (llvm::BasicBlock &bb : fn) {
+      for (llvm::Instruction &inst : bb) {
+        auto *call = llvm::dyn_cast<llvm::CallBase>(&inst);
+        if (!call)
+          continue;
+        call->removeRetAttr(llvm::Attribute::Range);
+        for (unsigned i = 0, e = call->arg_size(); i != e; ++i) {
+          call->removeParamAttr(i, llvm::Attribute::Range);
+          call->removeParamAttr(i, llvm::Attribute::Captures);
+          call->removeParamAttr(i, llvm::Attribute::Initializes);
+          call->removeParamAttr(i, llvm::Attribute::DeadOnUnwind);
+          call->removeParamAttr(i, llvm::Attribute::Writable);
+        }
+      }
+    }
+
+    // Instruction FLAGS newer than the reader, for the same reason and with
+    // the same cost: none. These are optimiser assertions, not semantics --
+    // dropping them loses information the AIR reader never had a way to use.
+    //
+    //   trunc nuw / nsw   LLVM 19
+    //   zext nneg         LLVM 18
+    //   or disjoint       LLVM 18
+    //
+    // Apple's `metal -x ir` names this one where the bitcode reader does not.
+    // Fed the same module as TEXT it says
+    //
+    //     error: expected type
+    //       %28 = trunc nuw nsw i64 %18 to i32
+    //
+    // while the bitcode path says only "Unexpected bitcode file!" -- a
+    // different error from the `range` attribute's "Invalid bitcode file!",
+    // which is the one hint that they were two defects and not one. Passing a
+    // rejected module back through `metal -x ir` is the cheapest way to make
+    // this class of failure name itself.
+    for (llvm::BasicBlock &bb : fn) {
+      for (llvm::Instruction &inst : bb) {
+        if (auto *tr = llvm::dyn_cast<llvm::TruncInst>(&inst)) {
+          tr->setHasNoUnsignedWrap(false);
+          tr->setHasNoSignedWrap(false);
+          continue;
+        }
+        if (auto *nn = llvm::dyn_cast<llvm::PossiblyNonNegInst>(&inst)) {
+          nn->setNonNeg(false);
+          continue;
+        }
+        if (auto *dj = llvm::dyn_cast<llvm::PossiblyDisjointInst>(&inst))
+          dj->setIsDisjoint(false);
+      }
+    }
   };
   for (llvm::Function &fn : m)
     scrub(fn);
