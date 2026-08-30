@@ -32,6 +32,7 @@ from std.ffi import external_call
 from std.objc import ns_to_string, SEL
 from gridview import (
     set_lncol_field,
+    take_dropped,
     g_caret,
     selected_text,
     g_grid,
@@ -69,6 +70,8 @@ import dap
 import python_env
 from json import JSON, parse
 from gridview import set_shown_path, push_undo, replace_selection
+from gridview import theme_names, current_theme, theme_is_dark, rebuild_theme
+from gridview import theme_color, ROLE_SIDEBAR_BG, ROLE_SIDEBAR_TEXT
 
 comptime P = OpaquePointer[MutUntrackedOrigin]
 
@@ -2468,6 +2471,20 @@ class RoastActions:
         except:
             pass
 
+    def roastTheme_(self, sender: ObjCObject):
+        """Switch theme. The name rides on the menu item."""
+        try:
+            let name = ns_to_string(
+                Obj["NSMenuItem"](sender.addr()).representedObject()
+            )
+            if name == "":
+                return
+            session.set_setting(String("view.theme"), name)
+            apply_theme()
+            set_status(String("Theme: ") + name)
+        except:
+            pass
+
     def roastZoomIn_(self, sender: ObjCObject):
         try:
             zoom_font(1.0)
@@ -2547,6 +2564,35 @@ class RoastActions:
         # reads without blocking: a language server thinking hard must not be an
         # editor that has stopped responding.
         try:
+            # Anything dropped on the editor since the last tick. Opened
+            # here rather than in the view's drop handler: a folder open
+            # tears down the language server and rebuilds the tab strip,
+            # which is not work to do from inside AppKit's drag machinery.
+            # The theme the session remembers, put on screen once. The
+            # attributes are built at startup, before the session document
+            # is loaded, so a saved theme is not in them -- and nothing else
+            # would apply it until someone opened the menu and chose again.
+            if g_theme_menu_done()[] == 0:
+                install_theme_menu()
+                if current_theme() != "System":
+                    apply_theme()
+            
+
+            let dropped = take_dropped()
+            if len(dropped) > 0:
+                var opened = 0
+                for path in dropped:
+                    if open_path(path):
+                        opened += 1
+                if opened > 0:
+                    let what = String(opened) + String(
+                        " item" if opened == 1 else " items"
+                    )
+                    set_status(String("Opened ") + what + String(" from a drop"))
+                    refresh_grid()
+                else:
+                    set_status(String("Nothing there Roast can open"))
+
             if lsp.is_running():
                 # A handshake that just completed means a server that knows
                 # nothing yet -- startup, or the fresh process a project
@@ -4630,6 +4676,147 @@ def add_submenu(
     return sub
 
 
+comptime g_side_scroll = named_global["roast.side.scroll", Int]
+
+
+def apply_sidebar_theme():
+    """Colour the file list to match the page.
+
+    A source-list table draws its own vibrant background and ignores a
+    colour you set on it, which is why the sidebar stayed white while the
+    editor went to paper. Under a theme it becomes a plain table, which
+    honours one; under `System` it goes back to being a source list, which
+    is what it should look like when the app is not imposing a palette.
+    """
+    if g_outline()[] == 0:
+        return
+    with autoreleasepool():
+        let outline = ObjCObject(g_outline()[])
+        let system = current_theme() == "System"
+        # 1 is the source-list style, 0 the plain one.
+        Obj["NSTableView"](outline.addr()).setStyle(Int(1) if system else Int(0))
+        if not system:
+            Obj["NSTableView"](outline.addr()).setBackgroundColor(
+                theme_color(ROLE_SIDEBAR_BG).ptr()
+            )
+        if g_side_scroll()[] != 0:
+            let scroll = ObjCObject(g_side_scroll()[])
+            Obj["NSScrollView"](scroll.addr()).setDrawsBackground(not system)
+            if not system:
+                Obj["NSScrollView"](scroll.addr()).setBackgroundColor(
+                    theme_color(ROLE_SIDEBAR_BG).ptr()
+                )
+        Obj["NSView"](outline.addr()).setNeedsDisplay(True)
+        Obj["NSOutlineView"](outline.addr()).reloadData()
+
+
+def apply_theme():
+    """Put the chosen theme on screen: the editor, the window, the menu.
+
+    The window's appearance is set explicitly rather than left to follow the
+    system. A dark editor page inside light chrome is worse than either --
+    the scrollers, the toolbar and the tab strip are all system-drawn, and
+    they have to be told.
+    """
+    rebuild_theme()
+    apply_sidebar_theme()
+    let dark = theme_is_dark(current_theme())
+    with autoreleasepool():
+        if g_window()[] != 0:
+            let win = ObjCObject(g_window()[])
+            # A `System` theme takes no appearance at all, which is how it
+            # goes back to following the machine.
+            if current_theme() == "System":
+                Obj["NSWindow"](win.addr()).setAppearance(ObjCObject(0).ptr())
+            else:
+                let name = String("NSAppearanceNameDarkAqua") if dark else String(
+                    "NSAppearanceNameAqua"
+                )
+                let appearance = Cls["NSAppearance"]().appearanceNamed(
+                    nsstring(name).ptr()
+                )
+                Obj["NSWindow"](win.addr()).setAppearance(appearance.ptr())
+            Obj["NSView"](
+                Obj["NSWindow"](win.addr()).contentView().addr()
+            ).setNeedsDisplay(True)
+        _sync_theme_menu()
+    refresh_tabs()
+    refresh_grid()
+
+
+def _sync_theme_menu():
+    """The checkmark follows the setting, not the click: a theme restored
+    from the session has to show as the chosen one too."""
+    with autoreleasepool():
+        let bar = _main_menu()
+        if bar == 0:
+            return
+        let view_menu = _menu_named(bar, String("View"))
+        if view_menu == 0:
+            return
+        let themes = _menu_named(view_menu, String("Theme"))
+        if themes == 0:
+            return
+        let chosen = current_theme()
+        let n = Obj["NSMenu"](themes).numberOfItems()
+        for i in range(n):
+            let item = Obj["NSMenu"](themes).itemAtIndex(i)
+            let name = ns_to_string(
+                Obj["NSMenuItem"](item.addr()).title()
+            )
+            Obj["NSMenuItem"](item.addr()).setState(
+                Int(1) if name == chosen else Int(0)
+            )
+
+
+comptime g_theme_menu_done = named_global["roast.theme.menu", Int]
+
+
+def install_theme_menu():
+    """Put Theme under View, once, after AppKit has finished with that menu.
+
+    macOS treats a menu called "View" as its own: it merges Show Tab Bar,
+    Show All Tabs and Enter Full Screen into it when the window appears, and
+    in doing so it rebuilds the menu -- anything added at build time is gone
+    by the time the window is on screen. So this runs on the first tick
+    instead, when AppKit has already had its turn.
+    """
+    if g_theme_menu_done()[] != 0:
+        return
+    with autoreleasepool():
+        let bar = _main_menu()
+        if bar == 0:
+            return
+        let view_menu = _menu_named(bar, String("View"))
+        if view_menu == 0:
+            return
+        g_theme_menu_done()[] = 1
+        let actions = g_actions()[]
+        Obj["NSMenu"](view_menu).addItem(
+            Cls["NSMenuItem"]().separatorItem().ptr()
+        )
+        let theme_menu = add_submenu(ObjCObject(view_menu), String("Theme"))
+        # add_submenu titles the SUBMENU; the item carrying it keeps an
+        # empty title, which leaves it anonymous to anything reading titles.
+        let holder = Obj["NSMenu"](view_menu).itemAtIndex(
+            Obj["NSMenu"](view_menu).numberOfItems() - 1
+        )
+        Obj["NSMenuItem"](holder.addr()).setTitle(
+            nsstring(String("Theme")).ptr()
+        )
+        let chosen = current_theme()
+        for name in theme_names():
+            let item = add_item(
+                theme_menu, name, String("roastTheme:"), String(""), actions
+            )
+            Obj["NSMenuItem"](item.addr()).setRepresentedObject(
+                nsstring(name).ptr()
+            )
+            Obj["NSMenuItem"](item.addr()).setState(
+                Int(1) if name == chosen else Int(0)
+            )
+
+
 def build_menu_bar(app: ObjCObject, actions: Int):
     """The menu bar. AppKit fills in Window and Services if we point it there."""
     let NSMenu = ObjCClass.lookup["NSMenu"]()
@@ -4834,7 +5021,6 @@ def build_menu_bar(app: ObjCObject, actions: Int):
     _ = add_item(
         view_menu, String("Zoom Out"), String("roastZoomOut:"), String("-"), actions
     )
-
     # Build.
     let build_menu = add_submenu(bar, String("Build"))
     _ = add_item(build_menu, String("Build"), String("roastBuild:"), String("b"), actions)
@@ -5991,7 +6177,9 @@ def main() raises:
         Obj["NSOutlineView"](outline.addr()).setDelegate(actions.ptr())
         Obj["NSTableView"](outline.addr()).setRowHeight(Float64(20.0))
         g_outline()[] = outline.addr()
+        g_side_scroll()[] = side_scroll.addr()
         Obj["NSScrollView"](side_scroll.addr()).setDocumentView(outline.ptr())
+        apply_sidebar_theme()
         Obj["NSSplitView"](split.addr()).addSubview(side_scroll.ptr())
 
         # Editor area: an empty scroll view where GridView lands in milestone 1.

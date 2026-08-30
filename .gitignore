@@ -183,3 +183,9 @@ spikes/**/*.o
 # VEGA-FORK: the SDK's Python venv (rebuild it from
 # vega-sdk/python-requirements.txt; see the README's Python section).
 /vega-sdk/pyenv/
+# The stdlib/max/kernels symlinks under lib/mojo point at absolute paths in
+# this checkout. They are how the debugger's expression parser and the IDE
+# find SOURCES (the .mojoc packages in pkg/ are for compilation, not reading),
+# and bin/cocoamojo documents them -- but an absolute symlink is a fact about
+# this machine, not about the tree.
+vega-sdk/lib/mojo/

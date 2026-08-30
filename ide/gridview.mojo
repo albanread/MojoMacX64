@@ -14,6 +14,7 @@
 # composite on every keystroke, plus a JS heap and its collector. This pays a
 # rope edit (measured: 2.4 us) and one line redrawn.
 from rope import Rope
+import session
 from dap import (
     breakpoint_at as dap_breakpoint_at,
     verified_line as dap_verified_line,
@@ -359,7 +360,7 @@ class RoastGridView(NSView, NSTextInputClient):
 
                 # Background.
                 let NSColor = ObjCClass.lookup["NSColor"]()
-                let bg = Cls["NSColor"]().textBackgroundColor()
+                let bg = theme_color(ROLE_BG)
                 Obj["NSColor"](bg.addr()).setFill()
                 _ = external_call["NSRectFill", NoneType](vis)
 
@@ -368,13 +369,13 @@ class RoastGridView(NSView, NSTextInputClient):
                 # only when the damage reaches it.
                 if vis.origin.x < GUTTER_W:
                     let full = Obj["NSView"](view.addr()).bounds()
-                    let margin = Cls["NSColor"]().windowBackgroundColor()
+                    let margin = theme_color(ROLE_GUTTER_BG)
                     Obj["NSColor"](margin.addr()).setFill()
                     _ = external_call["NSRectFill", NoneType](
                         rect(0.0, vis.origin.y, GUTTER_W - 8.0,
                              vis.size.height)
                     )
-                    let hair = Cls["NSColor"]().separatorColor()
+                    let hair = theme_color(ROLE_HAIRLINE)
                     Obj["NSColor"](hair.addr()).setFill()
                     _ = external_call["NSRectFill", NoneType](
                         rect(GUTTER_W - 8.0, vis.origin.y, 1.0,
@@ -431,7 +432,7 @@ class RoastGridView(NSView, NSTextInputClient):
                 let sel_b = sel_end()
                 if sel_a != sel_b:
                     let NSColor2 = ObjCClass.lookup["NSColor"]()
-                    let hl = Cls["NSColor"]().selectedTextBackgroundColor()
+                    let hl = theme_color(ROLE_SELECTION)
                     Obj["NSColor"](hl.addr()).setFill()
                     let l0 = buf[][0].line_of_offset(sel_a)
                     let l1 = buf[][0].line_of_offset(sel_b)
@@ -625,7 +626,9 @@ class RoastGridView(NSView, NSTextInputClient):
                 # artefact rather than a cursor.
                 if g_focused()[] != 0 and g_blink_on()[] != 0 and sel_a == sel_b:
                     let NSColor3 = ObjCClass.lookup["NSColor"]()
-                    let ink = Cls["NSColor"]().textColor()
+                    # The caret is text, not chrome: on a dark theme a
+                    # system-coloured one is invisible against the page.
+                    let ink = theme_color(ROLE_TEXT)
                     Obj["NSColor"](ink.addr()).setFill()
                     let pos = caret_position(g_caret()[])
                     _ = external_call["NSRectFill", NoneType](
@@ -754,6 +757,31 @@ class RoastGridView(NSView, NSTextInputClient):
                 return menu
         except:
             return ObjCObject(0)
+
+    # ── Dropping files ──────────────────────────────────────────────
+    # A folder becomes the project, a file becomes a tab -- the same rule
+    # the Finder's open already follows, so a drag and a double-click land
+    # in the same place.
+
+    def draggingEntered_(self, sender: ObjCObject) -> Int:
+        # NSDragOperationCopy. Answered for anything carrying file URLs;
+        # what they point at is judged when they land, because refusing a
+        # folder here would just make the cursor lie.
+        return 1 if _dragged_paths().__len__() > 0 else 0
+
+    def draggingUpdated_(self, sender: ObjCObject) -> Int:
+        return 1 if _dragged_paths().__len__() > 0 else 0
+
+    def prepareForDragOperation_(self, sender: ObjCObject) -> Bool:
+        return _dragged_paths().__len__() > 0
+
+    def performDragOperation_(self, sender: ObjCObject) -> Bool:
+        let paths = _dragged_paths()
+        if len(paths) == 0:
+            return False
+        for path in paths:
+            g_dropped()[].append(path)
+        return True
 
     def mouseDragged_(self, event: ObjCObject):
         try:
@@ -1158,7 +1186,7 @@ def build_type():
             font.ptr(), extern_object["NSFontAttributeName"]().ptr()
         )
         let NSColor = ObjCClass.lookup["NSColor"]()
-        let fg = Cls["NSColor"]().textColor()
+        let fg = theme_color(ROLE_TEXT)
         Obj["NSMutableDictionary"](attrs.addr()).setObject_forKey(
             fg.ptr(), extern_object["NSForegroundColorAttributeName"]().ptr()
         )
@@ -1171,7 +1199,7 @@ def build_type():
         Obj["NSMutableDictionary"](gattrs.addr()).setObject_forKey(
             font.ptr(), extern_object["NSFontAttributeName"]().ptr()
         )
-        let dim = Cls["NSColor"]().tertiaryLabelColor()
+        let dim = theme_color(ROLE_GUTTER_TEXT)
         Obj["NSMutableDictionary"](gattrs.addr()).setObject_forKey(
             dim.ptr(), extern_object["NSForegroundColorAttributeName"]().ptr()
         )
@@ -1186,18 +1214,18 @@ def build_type():
         # that shouts turns the whole window that colour. The named colours
         # carry meaning where it is rare enough to read: keywords, strings,
         # numbers.
-        let comment_c = Cls["NSColor"]().secondaryLabelColor()
-        let string_c = Cls["NSColor"]().systemRedColor()
-        let keyword_c = Cls["NSColor"]().systemPurpleColor()
-        let number_c = Cls["NSColor"]().systemBlueColor()
+        let comment_c = theme_color(ROLE_COMMENT)
+        let string_c = theme_color(ROLE_STRING)
+        let keyword_c = theme_color(ROLE_KEYWORD)
+        let number_c = theme_color(ROLE_NUMBER)
         _drop_retained(g_attr_comment()[])
         _drop_retained(g_attr_string()[])
         _drop_retained(g_attr_keyword()[])
         _drop_retained(g_attr_number()[])
-        g_attr_comment()[] = _make_attrs(comment_c.object())
-        g_attr_string()[] = _make_attrs(string_c.object())
-        g_attr_keyword()[] = _make_attrs(keyword_c.object())
-        g_attr_number()[] = _make_attrs(number_c.object())
+        g_attr_comment()[] = _make_attrs(comment_c)
+        g_attr_string()[] = _make_attrs(string_c)
+        g_attr_keyword()[] = _make_attrs(keyword_c)
+        g_attr_number()[] = _make_attrs(number_c)
 
         # Advance: the width of one character in a face where they are all
         # the same width. Measured, not assumed.
@@ -1215,6 +1243,41 @@ def build_type():
         g_line_h_x1000()[] = Int((ascender - descender + leading + 2.0) * 1000.0)
 
 
+def _dragged_paths() -> List[String]:
+    """The file paths a drag is carrying, or empty.
+
+    Read as NSURLs rather than the legacy filenames property list: the
+    modern type is what a Finder drag actually puts on the pasteboard, and
+    asking for URLs means a security-scoped one arrives intact.
+    """
+    var out = List[String]()
+    with autoreleasepool():
+        # The drag pasteboard by name, not through the sender. NSDraggingInfo
+        # is a protocol rather than a class, so it is not in the SDK database
+        # the compiler resolves selectors against -- and the drag pasteboard
+        # is a documented named one, which is the same object the sender
+        # would have handed back.
+        let pb = Cls["NSPasteboard"]().pasteboardWithName(
+            nsstring(String("Apple CFPasteboard drag")).ptr()
+        )
+        if pb.addr() == 0:
+            return out^
+        let url_class = ObjCClass.lookup["NSURL"]().as_object()
+        let classes = Cls["NSArray"]().arrayWithObject(url_class.ptr())
+        let urls = Obj["NSPasteboard"](pb.addr()).readObjectsForClasses_options(
+            classes.ptr(), ObjCObject(0).ptr()
+        )
+        if urls.addr() == 0:
+            return out^
+        let n = Obj["NSArray"](urls.addr()).count()
+        for i in range(n):
+            let url = Obj["NSArray"](urls.addr()).objectAtIndex(i)
+            let path = ns_to_string(Obj["NSURL"](url.addr()).path())
+            if path != "":
+                out.append(path)
+    return out^
+
+
 def make_grid_view(frame: CGRect) -> ObjCObject:
     """Register the view class, measure the font, and return an instance."""
     build_type()
@@ -1227,6 +1290,15 @@ def make_grid_view(frame: CGRect) -> ObjCObject:
     # to find their box, so any gap between making the view and recording it
     # is a window where the view's own state goes somewhere else.
     g_grid()[] = view.addr()
+
+    # Accept file drags. Registered here rather than in the window so the
+    # drop lands on the text, which is where a person aims it.
+    with autoreleasepool():
+        let types = Cls["NSMutableArray"]().array()
+        Obj["NSMutableArray"](types.addr()).addObject(
+            nsstring(String("public.file-url")).ptr()
+        )
+        Obj["NSView"](view.addr()).registerForDraggedTypes(types.ptr())
     var proto = external_call["objc_getProtocol", P](
         "NSTextInputClient".ptr()
     )
@@ -1861,6 +1933,22 @@ def sel_start() -> Int:
 
 def sel_end() -> Int:
     return max(g_caret()[], g_anchor()[])
+
+
+# Paths dropped on the editor, waiting for the timer to open them. A queue
+# and not a direct call: this module is imported BY roast, so it cannot
+# reach open_path, and a drop must not run a project open from inside
+# AppKit's drag machinery anyway.
+comptime g_dropped = named_global["roast.dropped", List[String]]
+
+
+def take_dropped() -> List[String]:
+    """Everything dropped since the last call, and clears the queue."""
+    var out = List[String]()
+    for path in g_dropped()[]:
+        out.append(path)
+    g_dropped()[] = List[String]()
+    return out^
 
 
 comptime g_lncol_field = named_global["roast.lncol.field", Int]
@@ -2512,3 +2600,161 @@ def _refresh(view_ptr: P):
         pass
 
 
+
+
+# ── Themes ──────────────────────────────────────────────────────────────────
+# Every colour in the editor came from the system palette, which is correct
+# and, on a machine set to light, relentless. A theme is a small table of
+# roles, and `System` keeps the old behaviour: it follows whatever the rest
+# of the machine is doing.
+#
+# The colours are sRGB triples rather than named system colours because that
+# is the point -- a theme that defers to the system is not a theme.
+
+comptime ROLE_BG = 0
+comptime ROLE_TEXT = 1
+comptime ROLE_GUTTER_BG = 2
+comptime ROLE_GUTTER_TEXT = 3
+comptime ROLE_SELECTION = 4
+comptime ROLE_KEYWORD = 5
+comptime ROLE_STRING = 6
+comptime ROLE_NUMBER = 7
+comptime ROLE_COMMENT = 8
+comptime ROLE_HAIRLINE = 9
+comptime ROLE_SIDEBAR_BG = 10
+comptime ROLE_SIDEBAR_TEXT = 11
+
+
+def theme_names() -> List[String]:
+    """The themes on offer, in menu order."""
+    var out = List[String]()
+    out.append(String("System"))
+    out.append(String("Ink"))
+    out.append(String("Dusk"))
+    out.append(String("Paper"))
+    out.append(String("Contrast"))
+    return out^
+
+
+def current_theme() -> String:
+    let chosen = session.setting(String("view.theme"))
+    return String("System") if chosen == "" else chosen^
+
+
+def theme_is_dark(name: String) -> Bool:
+    return name == "Ink" or name == "Dusk" or name == "Contrast"
+
+
+def _rgb(r: Int, g: Int, b: Int) -> ObjCObject:
+    """A colour from 0-255 components, which is how they are written down."""
+    return Cls["NSColor"]().colorWithSRGBRed_green_blue_alpha(
+        Float64(r) / 255.0, Float64(g) / 255.0, Float64(b) / 255.0, 1.0
+    )
+
+
+def _system_color(role: Int) -> ObjCObject:
+    """What the editor used before there were themes."""
+    if role == ROLE_BG:
+        return Cls["NSColor"]().textBackgroundColor()
+    if role == ROLE_TEXT:
+        return Cls["NSColor"]().textColor()
+    if role == ROLE_GUTTER_BG:
+        return Cls["NSColor"]().windowBackgroundColor()
+    if role == ROLE_GUTTER_TEXT:
+        return Cls["NSColor"]().tertiaryLabelColor()
+    if role == ROLE_SELECTION:
+        return Cls["NSColor"]().selectedTextBackgroundColor()
+    if role == ROLE_KEYWORD:
+        return Cls["NSColor"]().systemPurpleColor()
+    if role == ROLE_STRING:
+        return Cls["NSColor"]().systemRedColor()
+    if role == ROLE_NUMBER:
+        return Cls["NSColor"]().systemBlueColor()
+    if role == ROLE_COMMENT:
+        return Cls["NSColor"]().secondaryLabelColor()
+    if role == ROLE_SIDEBAR_BG:
+        return Cls["NSColor"]().controlBackgroundColor()
+    if role == ROLE_SIDEBAR_TEXT:
+        return Cls["NSColor"]().labelColor()
+    return Cls["NSColor"]().separatorColor()
+
+
+def theme_color(role: Int) -> ObjCObject:
+    """The colour for one role under the current theme."""
+    let name = current_theme()
+
+    if name == "Ink":
+        # Near-black, warm ink. The background is not pure black: a page
+        # that dark makes every glyph glare.
+        if role == ROLE_BG: return _rgb(20, 22, 26)
+        if role == ROLE_TEXT: return _rgb(230, 225, 216)
+        if role == ROLE_GUTTER_BG: return _rgb(26, 29, 34)
+        if role == ROLE_GUTTER_TEXT: return _rgb(95, 103, 115)
+        if role == ROLE_SELECTION: return _rgb(52, 62, 78)
+        if role == ROLE_KEYWORD: return _rgb(199, 146, 234)
+        if role == ROLE_STRING: return _rgb(224, 148, 116)
+        if role == ROLE_NUMBER: return _rgb(130, 170, 255)
+        if role == ROLE_COMMENT: return _rgb(107, 114, 128)
+        if role == ROLE_SIDEBAR_BG: return _rgb(15, 17, 20)
+        if role == ROLE_SIDEBAR_TEXT: return _rgb(198, 194, 186)
+        return _rgb(44, 48, 56)
+
+    if name == "Dusk":
+        # Slate blue, lower contrast than Ink, for long sittings.
+        if role == ROLE_BG: return _rgb(27, 32, 40)
+        if role == ROLE_TEXT: return _rgb(215, 220, 227)
+        if role == ROLE_GUTTER_BG: return _rgb(33, 39, 48)
+        if role == ROLE_GUTTER_TEXT: return _rgb(93, 107, 125)
+        if role == ROLE_SELECTION: return _rgb(56, 70, 90)
+        if role == ROLE_KEYWORD: return _rgb(154, 184, 255)
+        if role == ROLE_STRING: return _rgb(240, 168, 104)
+        if role == ROLE_NUMBER: return _rgb(127, 209, 185)
+        if role == ROLE_COMMENT: return _rgb(103, 118, 138)
+        if role == ROLE_SIDEBAR_BG: return _rgb(22, 26, 33)
+        if role == ROLE_SIDEBAR_TEXT: return _rgb(190, 198, 208)
+        return _rgb(48, 57, 70)
+
+    if name == "Paper":
+        # Warm light: the antidote to a white page, without leaving daylight.
+        if role == ROLE_BG: return _rgb(246, 241, 231)
+        if role == ROLE_TEXT: return _rgb(46, 42, 37)
+        if role == ROLE_GUTTER_BG: return _rgb(238, 232, 219)
+        if role == ROLE_GUTTER_TEXT: return _rgb(150, 142, 128)
+        if role == ROLE_SELECTION: return _rgb(219, 208, 184)
+        if role == ROLE_KEYWORD: return _rgb(122, 62, 157)
+        if role == ROLE_STRING: return _rgb(163, 59, 32)
+        if role == ROLE_NUMBER: return _rgb(31, 111, 178)
+        if role == ROLE_COMMENT: return _rgb(138, 131, 120)
+        if role == ROLE_SIDEBAR_BG: return _rgb(233, 226, 211)
+        if role == ROLE_SIDEBAR_TEXT: return _rgb(62, 56, 48)
+        return _rgb(220, 212, 197)
+
+    if name == "Contrast":
+        # For a bright room or eyes that have had enough of subtlety.
+        if role == ROLE_BG: return _rgb(0, 0, 0)
+        if role == ROLE_TEXT: return _rgb(255, 255, 255)
+        if role == ROLE_GUTTER_BG: return _rgb(16, 16, 16)
+        if role == ROLE_GUTTER_TEXT: return _rgb(160, 160, 160)
+        if role == ROLE_SELECTION: return _rgb(0, 90, 160)
+        if role == ROLE_KEYWORD: return _rgb(255, 212, 0)
+        if role == ROLE_STRING: return _rgb(124, 255, 124)
+        if role == ROLE_NUMBER: return _rgb(124, 215, 255)
+        if role == ROLE_COMMENT: return _rgb(160, 160, 160)
+        if role == ROLE_SIDEBAR_BG: return _rgb(12, 12, 12)
+        if role == ROLE_SIDEBAR_TEXT: return _rgb(235, 235, 235)
+        return _rgb(64, 64, 64)
+
+    return _system_color(role)
+
+
+def rebuild_theme():
+    """Re-derive every cached colour after the theme changes.
+
+    The attributes are built once at startup and cached, which is why the
+    editor does not pay for them per line. A theme change is the one moment
+    that cache is wrong, so it is thrown away and built again -- the same
+    path startup uses, rather than a second one that could drift from it.
+    """
+    build_type()
+    if g_grid()[] != 0:
+        Obj["NSView"](ObjCObject(g_grid()[]).addr()).setNeedsDisplay(True)

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# cocoamojo -- the driver interface Roast expects, backed by this fork.
+#
+#   cocoamojo --run   hello.mojo          compile and run
+#   cocoamojo --build hello.mojo          -> ./hello
+#   cocoamojo --build hello.mojo -o app   -> ./app
+#   cocoamojo --version
+#
+# WHY THIS EXISTS. ide/roast.mojo looks for `<COCOAMOJO_ROOT>/bin/cocoamojo`
+# and shells out to it as `cocoamojo --build <entry>`. The sister fork's
+# distribution ships exactly that; ours ships `bin/mojo`, with a different
+# layout and a different accelerator. Rather than teach their IDE a second
+# name -- a source divergence in a 6,400-line file we want to keep
+# byte-identical -- the adapter lives here, on our side of the line, where
+# every other launcher difference already lives.
+#
+# Modelled on their tools/cocoamojo. What differs is only what has to:
+# the compiler's name, the package layout (precompiled .mojoc here, sources
+# there), the accelerator, and the GPU runtime's name.
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPILER="$HERE/bin/mojo-driver"
+LIB="$HERE/lib"
+
+[ -x "$COMPILER" ] || { echo "cocoamojo: no compiler at $COMPILER" >&2; exit 1; }
+
+export MODULAR_MOJO_MAX_COCOAKB_PATH="${MODULAR_MOJO_MAX_COCOAKB_PATH:-/Volumes/S/CocoaBaseMCP/cocoa.sqlite}"
+export MODULAR_MOJO_MAX_COMPILERRT_PATH="${MODULAR_MOJO_MAX_COMPILERRT_PATH:-$LIB/libKGENCompilerRTShared.dylib}"
+export MODULAR_CRASH_REPORTING_ENABLED="${MODULAR_CRASH_REPORTING_ENABLED:-false}"
+export DYLD_LIBRARY_PATH="$LIB:${DYLD_LIBRARY_PATH:-}"
+# A program launched from here can find the toolchain that built it, and so
+# can the debugger plugin, which resolves the stdlib relative to this root.
+export COCOAMOJO_ROOT="$HERE"
+
+# Packages, precompiled. Theirs passes -I at three source trees; ours are
+# built .mojoc and reached through the import path, which is faster and is
+# what bin/mojo already does. lib/mojo/{stdlib,max,kernels} exists beside
+# them as SOURCES, because the expression parser in the debugger needs to
+# read the real thing.
+export MODULAR_MOJO_MAX_IMPORT_PATH="$HERE/pkg${MODULAR_MOJO_MAX_IMPORT_PATH:+,$MODULAR_MOJO_MAX_IMPORT_PATH}"
+
+ACCEL=metal-vega2
+
+# Cocoa is the platform here, not a library to opt into, so every build gets
+# libobjc, the frameworks and the device runtime. libz because a graphical
+# program eventually writes a PNG and a project has no way to ask for a flag.
+LINK=(
+  -Xlinker -L"$LIB" -Xlinker -lVegaRT
+  -Xlinker -rpath -Xlinker "$LIB"
+  -Xlinker -lobjc
+  -Xlinker -lz
+  -Xlinker -framework -Xlinker Foundation
+  -Xlinker -framework -Xlinker AppKit
+  -Xlinker -framework -Xlinker Metal
+  -Xlinker -framework -Xlinker QuartzCore
+)
+
+usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  --build|build)
+    src="${1:?cocoamojo: --build needs a .mojo file}"; shift
+    case " $* " in *" -o "*) unset out ;; *) out=(-o "./$(basename "${src%.mojo}")") ;; esac
+    exec "$COMPILER" build --target-accelerator "$ACCEL" \
+         "${LINK[@]}" ${out+"${out[@]}"} "$src" "$@"
+    ;;
+  --run|run)
+    src="${1:?cocoamojo: --run needs a .mojo file}"; shift
+    # Only -L, -l, -rpath and absolute dylib paths reach the JIT; frameworks
+    # are dlopen'd at run time, so their absence from this line is fine.
+    exec "$COMPILER" run --target-accelerator "$ACCEL" \
+         -Xlinker -L"$LIB" -Xlinker -lVegaRT "$src" "$@"
+    ;;
+  --version|version)
+    echo "MojoMacX64 -- Mojo for Cocoa, Intel Mac + Radeon Pro Vega II"
+    "$COMPILER" --version 2>/dev/null | head -2
+    ;;
+  --help|-h|help|"") usage ;;
+  *) exec "$COMPILER" "$cmd" "$@" ;;
+esac
