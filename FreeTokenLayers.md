@@ -293,6 +293,26 @@ reproduces them.
 The variables to sweep, and the controls that keep the answers honest, are in
 **[MoE_TestMatrix.md](MoE_TestMatrix.md)**.
 
+## 4.5 Measured: long context is nearly free here
+
+**`MEASURED`** — gpt-oss reports `n_swa = 128` with `is_swa_any = 1`, and the layer
+assignments come out **half sliding-window, half full attention** (12 and 12 on the
+24-layer 20B; 18 and 18 expected on the 36-layer 120B).
+
+Sliding-window layers hold a 128-token window *whatever the context length*, so
+only half the layers scale with it. For gpt-oss-120b that is 36 KiB/token rather
+than the 72 the naive figure implies:
+
+| context | KV cache | expert capacity left in 32 GiB |
+|---:|---:|---:|
+| 4K | 0.14 GiB | ~48% |
+| 32K | 1.13 GiB | ~48% |
+| 128K | 4.50 GiB | ~42% |
+
+Against the §4.4 curve, 42% capacity still gives roughly 95% hit rate. **Context
+and expert residency are not really competing**, which matters because code
+assistance needs long context and the naive arithmetic made that look expensive.
+
 ## 5. Staged plan
 
 Ordered so that each phase is useful alone and the cheap ones come first.
@@ -355,7 +375,7 @@ For gpt-oss-120b `Q4_K_M` (62.8 GB, ~5.1B active, downloading now):
 |---|---:|---|
 | active bytes/token | ~2.7 GB | 5.1B params at ~4.25 bpw |
 | VRAM cache capacity | ~50% | 32 GiB against ~63 GB of experts |
-| miss rate | **~13%** | **`MEASURED`** curve §4.3, interpolated to ~45% capacity |
+| miss rate | **~5%** | **`MEASURED`** §4.4 curve at the ~45% capacity §4.5 derives |
 | missed bytes/token | ~0.35 GB | |
 | PCIe branch (15%) | ~4.4 ms | 0.053 GB at 12 GB/s |
 | CPU branch (85%) | ~3.3 ms | 0.30 GB at 90 GB/s |
