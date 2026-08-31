@@ -189,3 +189,4 @@ spikes/**/*.o
 # and bin/cocoamojo documents them -- but an absolute symlink is a fact about
 # this machine, not about the tree.
 vega-sdk/lib/mojo/
+.components/

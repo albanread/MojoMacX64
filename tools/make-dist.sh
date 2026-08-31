@@ -30,6 +30,11 @@ B="$(readlink bazel-bin || echo bazel-bin)"
 D="${DIST_DIR:-$ROOT/dist/MojoMacX64}"
 KB="${COCOAKB:-/Volumes/S/CocoaBaseMCP/cocoa.sqlite}"
 
+# Our own cache of built components, so a release does not depend on bazel
+# having kept its scratch tree. See tools/components.sh.
+. "$ROOT/tools/components.sh"
+HEAD_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+
 [ -x "$B/KGEN/tools/mojo/mojo" ] || { echo "build the compiler first:"; \
   echo "  ./bazelw build --config=build-mojo //KGEN:mojo"; exit 1; }
 
@@ -41,11 +46,21 @@ cp -f "$ROOT/tools/cocoamojo" "$D/bin/cocoamojo"; chmod +x "$D/bin/cocoamojo"
 
 # The language server, for editors. It speaks LSP on stdin/stdout and shares
 # libLLVM.dylib with the compiler rather than carrying a second copy.
-if [ -f "$B/KGEN/tools/mojo-lsp-server/mojo-lsp-server" ]; then
-  cp -f "$B/KGEN/tools/mojo-lsp-server/mojo-lsp-server" "$D/bin/"
+LSP_B="$B/KGEN/tools/mojo-lsp-server/mojo-lsp-server"
+if [ -f "$LSP_B" ]; then
+  cp -f "$LSP_B" "$D/bin/"
+  components_store lsp "$HEAD_COMMIT" "$LSP_B:bin" \
+    || echo "   (could not write the component cache)"
   echo "   mojo-lsp-server"
+elif components_have lsp && ! components_stale lsp KGEN; then
+  components_restore lsp "$D" \
+    && echo "   mojo-lsp-server (cached, built $(components_built lsp))" \
+    || echo "   no mojo-lsp-server (cache unreadable)"
+elif components_have lsp; then
+  echo "   no mojo-lsp-server: the cached one is from $(components_commit lsp)"
+  echo "   and KGEN has changed since -- ./tools/mojo-build.sh lsp"
 else
-  echo "   no mojo-lsp-server (build //KGEN/tools/mojo-lsp-server:mojo-lsp-server)"
+  echo "   no mojo-lsp-server (./tools/mojo-build.sh lsp)"
 fi
 
 # The debugger: our lldb-dap with the MojoLLDB plugin beside it, which is
@@ -69,17 +84,37 @@ if [ "${NO_DEBUGGER:-0}" = 1 ]; then
   rm -f "$D/bin/lldb" "$D/bin/lldb-dap" "$D/lib/libMojoLLDB.dylib" \
         "$D/lib/liblldb24.0.0git.dylib" "$D/lib/lldb-argdumper"
 else
+  have_all=1
   for f in "$LLDB_B/lldb-dap" "$LLDB_B/lldb" "$LLDB_B/liblldb24.0.0git.dylib" \
            "$LLDB_B/lldb-argdumper" "$B/KGEN/libMojoLLDB.dylib"; do
-    [ -f "$f" ] || { echo "   MISSING: $f"; \
-      echo "   build //KGEN:MojoLLDB @llvm-project//lldb:{lldb,lldb-dap,lldb-argdumper}"; \
-      echo "   (refusing to leave a stale debugger in $D; NO_DEBUGGER=1 to skip)"; \
-      exit 1; }
+    [ -f "$f" ] || have_all=0
   done
-  cp -f "$LLDB_B/lldb-dap" "$LLDB_B/lldb" "$D/bin/"
-  cp -f "$LLDB_B/liblldb24.0.0git.dylib" "$D/lib/"
-  cp -f "$LLDB_B/lldb-argdumper" "$D/lib/"
-  cp -f "$B/KGEN/libMojoLLDB.dylib" "$D/lib/"
+  if [ "$have_all" = 1 ]; then
+    cp -f "$LLDB_B/lldb-dap" "$LLDB_B/lldb" "$D/bin/"
+    cp -f "$LLDB_B/liblldb24.0.0git.dylib" "$D/lib/"
+    cp -f "$LLDB_B/lldb-argdumper" "$D/lib/"
+    cp -f "$B/KGEN/libMojoLLDB.dylib" "$D/lib/"
+    components_store debugger "$HEAD_COMMIT" \
+      "$LLDB_B/lldb-dap:bin" "$LLDB_B/lldb:bin" \
+      "$LLDB_B/liblldb24.0.0git.dylib:lib" "$LLDB_B/lldb-argdumper:lib" \
+      "$B/KGEN/libMojoLLDB.dylib:lib" \
+      || echo "   (could not write the component cache)"
+  elif components_have debugger && ! components_stale debugger KGEN bazel; then
+    # The set restores together or not at all: the plugin and the libraries it
+    # loads must come from one build, or it will not bind.
+    components_restore debugger "$D" \
+      || { echo "   component cache unreadable"; exit 1; }
+    echo "   from the component cache, built $(components_built debugger)"
+    echo "   at $(components_commit debugger); KGEN and bazel/ unchanged since"
+  else
+    if components_have debugger; then
+      echo "   the cached debugger is from $(components_commit debugger), and"
+      echo "   KGEN or bazel/ has changed since -- it would be a stale plugin"
+    fi
+    echo "   MISSING debugger components; ./tools/mojo-build.sh debugger"
+    echo "   (refusing to leave a stale debugger in $D; NO_DEBUGGER=1 to skip)"
+    exit 1
+  fi
   # Prove what landed, so a stale-artifact claim can be checked, not asserted.
   for f in "$D/bin/lldb-dap" "$D/bin/lldb" "$D/lib/libMojoLLDB.dylib"; do
     printf "   %s  %s\n" "$(shasum -a 256 "$f" | cut -c1-12)" "$(basename "$f")"
@@ -104,19 +139,35 @@ MLIRLIB="$(find "$B" -name 'libMLIR.dylib' -type f 2>/dev/null | head -1)"
 # output base, not inside it, and the +llvm_configure+ prefix is bzlmod's and can
 # change -- so cut the path at /execroot/ and glob for the repo.
 LLVMSRC="$(echo "${B%%/execroot/*}"/external/*llvm_configure*llvm-project)"
-[ -n "$LLVMLIB" ] || { echo "   no libLLVM.dylib -- build //bazel/llvm-shared:LLVM"; exit 1; }
-cp -f "$LLVMLIB" "$D/lib/"
+if [ -n "$LLVMLIB" ]; then
+  cp -f "$LLVMLIB" "$D/lib/"
+  components_store llvm "$HEAD_COMMIT" "$LLVMLIB:lib" \
+    || echo "   (could not write the component cache)"
+elif components_have llvm && ! components_stale llvm bazel; then
+  components_restore llvm "$D" || { echo "   component cache unreadable"; exit 1; }
+  echo "   from the component cache ($(components_source llvm), $(components_built llvm))"
+else
+  echo "   no libLLVM.dylib -- ./tools/mojo-build.sh libs"; exit 1
+fi
 nexp=$(nm -gU "$D/lib/libLLVM.dylib" | grep -c '4llvm') || true
 # Under the toolchain's default -fvisibility=hidden this lands near 200 rather
 # than tens of thousands, and the dylib is useless to anything outside. That is
-# a silent failure, so it is checked rather than assumed.
+# a silent failure, so it is checked rather than assumed -- fresh OR cached.
 [ "$nexp" -gt 10000 ] || { echo "   libLLVM.dylib exports only $nexp llvm:: symbols -- visibility regression"; exit 1; }
 echo "   $(du -h "$D/lib/libLLVM.dylib" | cut -f1), $nexp llvm:: symbols exported"
 
 # MLIR, on top of LLVM. The compiler links both; an in-process consumer that
 # wants to build IR rather than shell out needs this one too.
-[ -n "$MLIRLIB" ] || { echo "   no libMLIR.dylib -- build //bazel/mlir-shared:MLIR"; exit 1; }
-cp -f "$MLIRLIB" "$D/lib/"
+if [ -n "$MLIRLIB" ]; then
+  cp -f "$MLIRLIB" "$D/lib/"
+  components_store mlir "$HEAD_COMMIT" "$MLIRLIB:lib" \
+    || echo "   (could not write the component cache)"
+elif components_have mlir && ! components_stale mlir bazel; then
+  components_restore mlir "$D" || { echo "   component cache unreadable"; exit 1; }
+  echo "   from the component cache ($(components_source mlir), $(components_built mlir))"
+else
+  echo "   no libMLIR.dylib -- ./tools/mojo-build.sh libs"; exit 1
+fi
 mexp=$(nm -gU "$D/lib/libMLIR.dylib" | grep -c '4mlir') || true
 [ "$mexp" -gt 10000 ] || { echo "   libMLIR.dylib exports only $mexp mlir:: symbols -- visibility regression"; exit 1; }
 echo "   $(du -h "$D/lib/libMLIR.dylib" | cut -f1), $mexp mlir:: symbols exported"
@@ -126,8 +177,16 @@ echo "   $(du -h "$D/lib/libMLIR.dylib" | cut -f1), $mexp mlir:: symbols exporte
 # out-of-tree could call it.
 echo "== Mojo front end =="
 FE="$B/KGEN/libMojoCompiler.dylib"
-[ -f "$FE" ] || { echo "   no libMojoCompiler.dylib -- build //KGEN:MojoCompilerShared"; exit 1; }
-cp -f "$FE" "$D/lib/"
+if [ -f "$FE" ]; then
+  cp -f "$FE" "$D/lib/"
+  components_store frontend "$HEAD_COMMIT" "$FE:lib" \
+    || echo "   (could not write the component cache)"
+elif components_have frontend && ! components_stale frontend KGEN Support bazel; then
+  components_restore frontend "$D" || { echo "   component cache unreadable"; exit 1; }
+  echo "   from the component cache ($(components_source frontend), $(components_built frontend))"
+else
+  echo "   no libMojoCompiler.dylib -- ./tools/mojo-build.sh libs"; exit 1
+fi
 fexp=$(nm -gU "$D/lib/libMojoCompiler.dylib" | grep -c 'MojoParserContext') || true
 [ "$fexp" -gt 10 ] || { echo "   exports only $fexp MojoParserContext symbols -- visibility regression"; exit 1; }
 echo "   $(du -h "$D/lib/libMojoCompiler.dylib" | cut -f1), parser API exported"
