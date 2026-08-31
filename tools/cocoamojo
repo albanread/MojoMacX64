@@ -71,6 +71,11 @@ LINK=(
   -Xlinker -framework -Xlinker AppKit
   -Xlinker -framework -Xlinker Metal
   -Xlinker -framework -Xlinker QuartzCore
+  # AudioToolbox, for the same reason as the rest: a program that wants sound
+  # should not have to discover a link flag, and one that does not pays a load
+  # command. The render callback in examples/chip is a plain Mojo `fn` handed
+  # straight to AudioUnitSetProperty; only this is needed to make audio work.
+  -Xlinker -framework -Xlinker AudioToolbox
 )
 
 usage() { sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }

@@ -35,10 +35,13 @@ def scatter_nd_gpu[
     indices_data_ptr: UnsafePointer[Scalar[indices_type], MutAnyOrigin],
     element_counts_and_input_dims_ptr: UnsafePointer[Int64, MutAnyOrigin],
     updates_data_ptr: UnsafePointer[Scalar[dtype], MutAnyOrigin],
-    num_indices: Int,
-    last_index_dimension: Int,
-    num_updates_elements: Int,
+    num_indices_dev: Int32,
+    last_index_dimension_dev: Int32,
+    num_updates_elements_dev: Int32,
 ):
+    var num_indices = Int(num_indices_dev)
+    var last_index_dimension = Int(last_index_dimension_dev)
+    var num_updates_elements = Int(num_updates_elements_dev)
     var id: Int = global_idx.x
     if id >= num_indices:
         return
@@ -98,10 +101,21 @@ def scatter_nd[
     indices_rank: Int,
     updates_rank: Int,
 ](
-    data: TileTensor[dtype=dtype, ...],
-    indices: TileTensor[dtype=indices_type, ...],
-    updates: TileTensor[dtype=dtype, ...],
-    output: TileTensor[mut=True, dtype=dtype, ...],
+    data: TileTensor[
+        dtype=dtype, address_space=AddressSpace.GENERIC, ...
+    ],
+    indices: TileTensor[
+        dtype=indices_type, address_space=AddressSpace.GENERIC, ...
+    ],
+    updates: TileTensor[
+        dtype=dtype, address_space=AddressSpace.GENERIC, ...
+    ],
+    output: TileTensor[
+        mut=True,
+        dtype=dtype,
+        address_space=AddressSpace.GENERIC,
+        ...,
+    ],
     ctx: DeviceContext,
 ) raises:
     """
@@ -198,14 +212,14 @@ def scatter_nd[
     #       input_strides --> [3*4*5, 4*5, 5, 1]
     var input_strides = Array[Int64, data_rank](uninitialized=True)
     for i in range(data_rank):
-        var total_stride = 1
+        var total_stride = Int64(1)
         for j in range(i + 1, data_rank):
-            total_stride *= data_shape[j]
+            total_stride *= Int64(data_shape[j])
         input_strides[i] = total_stride
 
     for i in range(last_shape_of_indices):
         ptr[i] = input_strides[i]
-        ptr[i + last_shape_of_indices] = data_shape[i]
+        ptr[i + last_shape_of_indices] = Int64(data_shape[i])
 
     # Allocate and copy output data, elements_counts_and_input_dims, updates,
     # indices to GPU.
@@ -237,9 +251,9 @@ def scatter_nd[
         indices_device,
         element_counts_and_input_dims_device,
         updates_device,
-        num_indices,
-        last_shape_of_indices,
-        num_updates_elements,
+        Int32(num_indices),
+        Int32(last_shape_of_indices),
+        Int32(num_updates_elements),
         grid_dim=(ceildiv(num_indices, MAX_THREADS_PER_BLOCK)),
         block_dim=(MAX_THREADS_PER_BLOCK),
     )
@@ -306,8 +320,8 @@ def test_case[
             assert_false(True)
 
 
-def main():
-    def test_scatternd_gpu():
+def main() raises:
+    def test_scatternd_gpu() raises:
         print("== test_scatternd_gpu")
         var data: List[Float32] = [
             # fmt: off
@@ -366,7 +380,7 @@ def main():
             # fmt: on
         ]
 
-        _ = test_case[
+        test_case[
             DType.float32,
             d0=4,
             d1=4,
@@ -376,12 +390,12 @@ def main():
             ud0=2,
             ud1=4,
             ud2=4,
-        ]
-        (
+        ](
             data,
             indices,
             updates,
             output_ref,
         )
+        print("scatterND complete")
 
     test_scatternd_gpu()

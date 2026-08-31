@@ -14,7 +14,7 @@
 from std.collections import Optional
 from std.math import ceildiv
 from std.math.uutils import udivmod, umod
-from std.sys import has_amd_gpu_accelerator
+from std.sys import has_amd_gpu_accelerator, has_apple_gpu_accelerator
 
 from max.benchmark import bencher_iter_custom
 from std.benchmark import (
@@ -323,7 +323,11 @@ def bench_matmuls(mut m: Bench, ctx: DeviceContext) raises:
     comptime K10_NUM_THREADS = 256 if has_amd_gpu_accelerator() else 128
     comptime K10_BN = 128
     comptime K10_BM = 256 if has_amd_gpu_accelerator() else 128
-    comptime K10_BK = 16
+    # The 16-deep A/B tiles use 33,280 bytes after AIR/Metal accounts for the
+    # two static threadgroup allocations, just over Apple silicon's 32 KiB
+    # limit. A shallower K tile preserves the warp/output geometry while
+    # bringing static storage below the hardware ceiling.
+    comptime K10_BK = 8 if has_apple_gpu_accelerator() else 16
     comptime K10_WN = 64
     comptime K10_WM = 128 if has_amd_gpu_accelerator() else 64
     comptime K10_WNITER = 4

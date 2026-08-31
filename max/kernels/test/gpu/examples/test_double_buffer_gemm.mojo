@@ -14,7 +14,7 @@
 from std.math import ceildiv, isclose
 from std.math.uutils import udivmod
 from std.sys import argv, simd_width_of
-from std.sys.info import has_nvidia_gpu_accelerator, is_nvidia_gpu
+from std.sys.info import has_apple_gpu_accelerator
 
 from std.gpu import WARP_SIZE, block_idx, thread_idx
 from max.gpu.sync import barrier
@@ -216,7 +216,7 @@ def sgemm_double_buffer[
     # 17 19 21 23 25 27 29 31
     comptime thread_layout = Layout(
         IntTuple(IntTuple(2, 2), 8), IntTuple(IntTuple(1, 16), 2)
-    ) if is_nvidia_gpu() else Layout(
+    ) if WARP_SIZE == 32 else Layout(
         IntTuple(IntTuple(2, 2), 16), IntTuple(IntTuple(1, 32), 2)
     )
 
@@ -309,15 +309,22 @@ def sgemm_double_buffer[
 
 
 def test(ctx: DeviceContext) raises:
-    comptime NUM_THREADS = 256
+    comptime NUM_THREADS = 128 if has_apple_gpu_accelerator() else 256
     comptime M = 8192
     comptime N = 8192
     comptime K = 128
-    comptime BM = 128
+    comptime BM = 64 if has_apple_gpu_accelerator() else 128
     comptime BN = 128
-    comptime BK = 16
+    # The original 128x128x16 double-buffered tile needs 33,280 bytes, just
+    # beyond Apple silicon's 32 KiB limit. A 64x128x8 tile uses four wave32
+    # groups and is reported as 25,088 bytes, while preserving useful K-stage
+    # depth.
+    comptime BK = 8 if has_apple_gpu_accelerator() else 16
     comptime WM = 32
-    comptime WN = 64 if has_nvidia_gpu_accelerator() else 128
+    # This example originally treated every non-NVIDIA target as wave64. Apple
+    # SIMD groups are wave32, so use the 4x8 per-thread decomposition there as
+    # well; otherwise the specialization fails its own warp-shape assertion.
+    comptime WN = 64 if WARP_SIZE == 32 else 128
     comptime TM = 8
     comptime TN = 8
 

@@ -24,6 +24,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <strings.h>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,45 @@ void objcRelease(id obj) {
   if (obj)
     msg<void>(obj, "release");
 }
+
+id objcRetain(id obj) {
+  return obj ? msg<id>(obj, "retain") : nullptr;
+}
+
+/// Boolean env knob. Accepts the VEGART_* spelling first and the sister
+/// fork's APPLEGPU_* as an alias, so one set of notes covers both machines.
+bool environmentFlag(const char *vega, const char *apple, bool defaultValue) {
+  const char *v = ::getenv(vega);
+  if (!v || !*v)
+    v = ::getenv(apple);
+  if (!v || !*v)
+    return defaultValue;
+  return v[0] != '0' && ::strcasecmp(v, "off") != 0 &&
+         ::strcasecmp(v, "false") != 0 && ::strcasecmp(v, "no") != 0;
+}
+
+/// Queued launch is the normal contract; VEGART_SYNC_LAUNCH=1 restores the
+/// one-wait-per-dispatch bring-up mode for debugging. Read once.
+bool asyncLaunchEnabled() {
+  static const bool on =
+      !environmentFlag("VEGART_SYNC_LAUNCH", "APPLEGPU_SYNC_LAUNCH", false);
+  return on;
+}
+
+/// Whether consecutive queued dispatches share one command buffer. The
+/// synchronous debug path never batches. =0 keeps queued launch but one
+/// command buffer per dispatch, for diagnosis and A/B measurement.
+bool batchedLaunchEnabled() {
+  static const bool on = environmentFlag("VEGART_BATCH_DISPATCHES",
+                                         "APPLEGPU_BATCH_DISPATCHES", true);
+  return on;
+}
+
+/// Dispatches encoded into one command buffer before it is committed, and
+/// committed-but-unwaited buffers kept before the oldest is reaped. The
+/// sister fork bounded both at its long-standing 64-dispatch backpressure.
+constexpr size_t kMaxBatchDispatches = 64;
+constexpr size_t kMaxPendingBuffers = 4;
 
 std::string nsstringToStd(id nsstr) {
   if (!nsstr)
@@ -102,6 +142,26 @@ struct VRMetalCtx {
   id queue = nullptr;  // id<MTLCommandQueue>
   std::string name;
   std::string arch;
+
+  // Queued launch state. Ported in shape from the sister fork's
+  // AppleGPUMetal.cpp (their f88fdda3 + 7a7a5071), where the change was
+  // measured before it was believed: the 35-dispatch fluid step went from
+  // 3.7-3.9 ms to 1.06 ms once dispatches stopped paying one
+  // waitUntilCompleted each. Our runtime was "synchronous under the async
+  // names for bring-up" -- 0.235 ms of round trip per dispatch on this
+  // machine -- and fluid is exactly the many-dispatches-per-frame shape that
+  // bill lands on.
+  //
+  // `mu` guards all four fields and every encode into `openBatch`. Each
+  // dispatch owns its own compute encoder inside the shared command buffer,
+  // so encoder state cannot leak between kernels. `openBatch` is retained
+  // when opened; ownership moves to `pending` at commit; `pending` buffers
+  // are released once waited.
+  std::mutex mu;
+  std::vector<id> pending;    // committed, not yet waited
+  id openBatch = nullptr;     // encoding, not yet committed
+  size_t openBatchDispatches = 0;
+  std::string deferredError;  // first async failure, surfaced at next drain
 };
 
 struct VRMetalBuf {
@@ -198,6 +258,54 @@ id resolveAddress(uint64_t addr, size_t *offsetOut) {
 // Command helpers (synchronous bring-up)
 //===----------------------------------------------------------------------===//
 
+/// Commit the open batch and move its retained ownership to `pending`.
+/// Caller holds `ctx->mu`.
+void commitOpenBatchLocked(VRMetalCtx *ctx) {
+  if (!ctx->openBatch)
+    return;
+  if (::getenv("VEGART_TRACE_LAUNCH") || ::getenv("APPLEGPU_TRACE_LAUNCH"))
+    fprintf(stderr, "[vegart] commit batch dispatches=%zu\n",
+            ctx->openBatchDispatches);
+  msg<void>(ctx->openBatch, "commit");
+  ctx->pending.push_back(ctx->openBatch);
+  ctx->openBatch = nullptr;
+  ctx->openBatchDispatches = 0;
+}
+
+/// Wait out everything queued. The host-observation boundary: called by
+/// synchronize, by every path that reads or hands out device memory, and by
+/// teardown. Returns the FIRST asynchronous failure, once -- an error found
+/// here happened on some earlier launch, and this is the earliest moment the
+/// contract lets us say so.
+const char *drainPending(VRMetalCtx *ctx) {
+  std::vector<id> toWait;
+  {
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    commitOpenBatchLocked(ctx);
+    toWait.swap(ctx->pending);
+  }
+  for (id cb : toWait) {
+    msg<void>(cb, "waitUntilCompleted");
+    if (id err = msg<id>(cb, "error")) {
+      std::lock_guard<std::mutex> lock(ctx->mu);
+      if (ctx->deferredError.empty())
+        ctx->deferredError =
+            std::string("VegaRT[metal]: queued launch failed: ") +
+            nsstringToStd(msg<id>(err, "localizedDescription"));
+    }
+    objcRelease(cb);
+  }
+  std::lock_guard<std::mutex> lock(ctx->mu);
+  if (!ctx->deferredError.empty()) {
+    // Surfaced through the same static-buffer channel every other error in
+    // this file uses, then cleared: one failure, one report.
+    const char *e = vrmErrorf("%s", ctx->deferredError.c_str());
+    ctx->deferredError.clear();
+    return e;
+  }
+  return nullptr;
+}
+
 struct BlitOp {
   id src = nullptr;
   size_t srcOff = 0;
@@ -209,6 +317,12 @@ struct BlitOp {
 };
 
 const char *runBlitOp(VRMetalCtx *ctx, const BlitOp &op) {
+  // Queued kernels come first in queue order, and this blit's own wait then
+  // covers them too. Draining (rather than merely committing) also lets a
+  // deferred launch error surface HERE, before a copy whose input that
+  // launch was supposed to produce.
+  if (const char *err = drainPending(ctx))
+    return err;
   id cb = msg<id>(ctx->queue, "commandBuffer");
   if (!cb)
     return vrmErrorf("VegaRT[metal]: commandBuffer creation failed");
@@ -355,6 +469,7 @@ const char *VegaRTMetal_createContext(VRMetalCtx **out, int id_,
 void VegaRTMetal_destroyContext(VRMetalCtx *ctx) {
   if (!ctx)
     return;
+  drainPending(ctx); // teardown may not strand queued work
   objcRelease(ctx->queue);
   delete ctx;
 }
@@ -365,12 +480,9 @@ const char *VegaRTMetal_mtlDevice(VRMetalCtx *ctx, void **out) {
 }
 
 const char *VegaRTMetal_synchronize(VRMetalCtx *ctx) {
-  // Every op is currently synchronous; an empty command buffer round-trip
-  // still serializes against anything in flight.
-  id cb = msg<id>(ctx->queue, "commandBuffer");
-  msg<void>(cb, "commit");
-  msg<void>(cb, "waitUntilCompleted");
-  return nullptr;
+  // Draining the queue IS the serialization now, and it is also where a
+  // deferred launch error finally gets a voice.
+  return drainPending(ctx);
 }
 
 const char *VegaRTMetal_memInfo(VRMetalCtx *ctx, size_t *freeMem,
@@ -465,6 +577,9 @@ void VegaRTMetal_destroyBuffer(VRMetalBuf *buf) {
 void *VegaRTMetal_hostPtr(VRMetalBuf *buf) {
   if (!buf->isHost)
     return nullptr;
+  // Handing out a raw pointer is the ultimate host observation: everything
+  // queued that might write this memory must land first.
+  drainPending(buf->ctx);
   char *contents = msg<char *>(buf->buffer, "contents");
   return contents ? contents + buf->offset : nullptr;
 }
@@ -475,6 +590,10 @@ const char *VegaRTMetal_copyHtoD(VRMetalBuf *dst, const void *src,
     return nullptr;
   VRMetalCtx *ctx = dst->ctx;
   if (dst->isHost) {
+    // A host-visible store must serialize after queued kernels that read or
+    // write this buffer; enqueue order is the contract.
+    if (const char *err = drainPending(ctx))
+      return err;
     memcpy(static_cast<char *>(msg<char *>(dst->buffer, "contents")) +
                dst->offset,
            src, bytes);
@@ -500,6 +619,9 @@ const char *VegaRTMetal_copyDtoH(void *dst, VRMetalBuf *src, size_t bytes) {
     return nullptr;
   VRMetalCtx *ctx = src->ctx;
   if (src->isHost) {
+    // Reading back what a queued kernel may still be writing.
+    if (const char *err = drainPending(ctx))
+      return err;
     memcpy(dst,
            static_cast<char *>(msg<char *>(src->buffer, "contents")) +
                src->offset,
@@ -757,9 +879,40 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
                      block[0], block[1], block[2], requested, maxThreads,
                      fn->name.c_str());
 
-  id cb = msg<id>(ctx->queue, "commandBuffer");
-  if (!cb)
-    return vrmErrorf("VegaRT[metal]: commandBuffer creation failed");
+  // Same shape of silent failure for threadgroup STORAGE: past the device
+  // limit, Metal misbehaves rather than reports (sister fork's 003be388).
+  if (sharedMemBytes) {
+    unsigned long maxTg =
+        msg<unsigned long>(ctx->device, "maxThreadgroupMemoryLength");
+    if (maxTg && sharedMemBytes > maxTg)
+      return vrmErrorf("VegaRT[metal]: %u bytes of threadgroup memory "
+                       "exceeds this device's maxThreadgroupMemoryLength "
+                       "(%lu) for '%s'",
+                       sharedMemBytes, maxTg, fn->name.c_str());
+  }
+
+  const bool async = asyncLaunchEnabled();
+  const bool batching = async && batchedLaunchEnabled();
+
+  // In batching mode the encode happens inside the shared open batch, under
+  // the context lock for the whole of it; each dispatch still gets its own
+  // encoder, so no pipeline/buffer state leaks between kernels.
+  std::unique_lock<std::mutex> batchLock;
+  id cb = nullptr;
+  if (batching) {
+    batchLock = std::unique_lock<std::mutex>(ctx->mu);
+    if (!ctx->openBatch) {
+      id fresh = msg<id>(ctx->queue, "commandBuffer");
+      if (!fresh)
+        return vrmErrorf("VegaRT[metal]: commandBuffer creation failed");
+      ctx->openBatch = objcRetain(fresh);
+    }
+    cb = ctx->openBatch;
+  } else {
+    cb = msg<id>(ctx->queue, "commandBuffer");
+    if (!cb)
+      return vrmErrorf("VegaRT[metal]: commandBuffer creation failed");
+  }
   id enc = msg<id>(cb, "computeCommandEncoder");
   msg<void>(enc, "setComputePipelineState:", fn->pipeline);
 
@@ -850,6 +1003,44 @@ const char *VegaRTMetal_launch(VRMetalCtx *ctx, VRMetalFunc *fn,
   msg<void>(enc, "dispatchThreadgroups:threadsPerThreadgroup:", gridSize,
             blockSize);
   msg<void>(enc, "endEncoding");
+
+  if (batching) {
+    // Stay queued. The buffer commits when it is full, and its completion is
+    // observed at the next drain -- synchronize, a copy, a host pointer.
+    if (++ctx->openBatchDispatches >= kMaxBatchDispatches)
+      commitOpenBatchLocked(ctx);
+    // Backpressure: never hold more than a few committed buffers in flight;
+    // reap the oldest outside the lock so encoding never waits on the GPU.
+    id oldest = nullptr;
+    if (ctx->pending.size() > kMaxPendingBuffers) {
+      oldest = ctx->pending.front();
+      ctx->pending.erase(ctx->pending.begin());
+    }
+    batchLock.unlock();
+    if (oldest) {
+      msg<void>(oldest, "waitUntilCompleted");
+      if (id err = msg<id>(oldest, "error")) {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        if (ctx->deferredError.empty())
+          ctx->deferredError =
+              std::string("VegaRT[metal]: queued launch failed: ") +
+              nsstringToStd(msg<id>(err, "localizedDescription"));
+      }
+      objcRelease(oldest);
+    }
+    return nullptr;
+  }
+
+  if (async) {
+    // Queued but unbatched (VEGART_BATCH_DISPATCHES=0): one buffer per
+    // dispatch, committed without waiting, for A/B measurement.
+    msg<void>(cb, "commit");
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    ctx->pending.push_back(objcRetain(cb));
+    return nullptr;
+  }
+
+  // VEGART_SYNC_LAUNCH=1: the bring-up contract, one wait per dispatch.
   msg<void>(cb, "commit");
   msg<void>(cb, "waitUntilCompleted");
   id err = msg<id>(cb, "error");

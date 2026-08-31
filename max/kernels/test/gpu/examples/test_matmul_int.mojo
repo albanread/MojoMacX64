@@ -150,9 +150,17 @@ def run_matmul(ctx: DeviceContext) raises:
     ctx.enqueue_copy(c_host_ptr, c_device)
     ctx.synchronize()
 
+    for i in range(m * n):
+        if c_host_ptr[i] != k:
+            raise Error(
+                "matmul mismatch at ", i, ": got ", c_host_ptr[i],
+                ", expected ", k,
+            )
+
     for i in range(10):
         for j in range(10):
             print("at index = [", i, ",", j, "]the value is", c_host[i, j])
+    print("integer matmul complete")
 
 
 def main() raises:

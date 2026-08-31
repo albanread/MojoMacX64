@@ -1,0 +1,13 @@
+X:1
+T:Sí Bheag Sí Mhór
+C:Turlough O'Carolan
+M:3/4
+L:1/8
+Q:1/4=100
+K:D
+V:1 name="melody"
+|: A2 | d3 e f2 | e4 d2 | B3 A F2 | A4 A2 |
+d3 e f2 | e4 d2 | B3 A F2 | D4 :|
+V:2 name="bass"
+|: D,2 | D,4 A,,2 | D,4 F,,2 | G,,4 D,,2 | A,,4 A,,2 |
+D,4 A,,2 | D,4 F,,2 | G,,4 A,,2 | D,4 :|

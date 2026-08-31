@@ -1,0 +1,13 @@
+X:1
+T:Feature Check
+C:not music, a test
+M:4/4
+L:1/8
+Q:1/4=120
+K:D
+% K:D means F and C are sharp for the whole tune unless said otherwise.
+% The =F is a natural: it cancels the key for the rest of its bar only.
+|: FF ^GA | =F2 F2 | (3ABc c2 | d>c B2 :|
+% A chord becomes one sounding of three notes; a chord symbol becomes
+% accompaniment on its own timeline.
+|1 [DFA]4 z4 |2 "Gm7" G4 "A7" A4 |]
