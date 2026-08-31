@@ -71,7 +71,16 @@ import python_env
 from json import JSON, parse
 from gridview import set_shown_path, push_undo, replace_selection
 from gridview import theme_names, current_theme, theme_is_dark, rebuild_theme
-from gridview import theme_color, ROLE_SIDEBAR_BG, ROLE_SIDEBAR_TEXT
+from gridview import (
+    theme_color,
+    ROLE_BG,
+    ROLE_TEXT,
+    ROLE_GUTTER_BG,
+    ROLE_GUTTER_TEXT,
+    ROLE_HAIRLINE,
+    ROLE_SIDEBAR_BG,
+    ROLE_SIDEBAR_TEXT,
+)
 
 comptime P = OpaquePointer[MutUntrackedOrigin]
 
@@ -591,6 +600,13 @@ def _ensure_python(after: Int, spec: String = String()) -> Bool:
         # _start_python_environment and report that absence instead.
         return True
     if python_env.environment_ready(project, root):
+        return True
+    # Run (1) and Debug (2) are IMPLICIT: nobody asked for Python, so a
+    # venv is built only when the project demonstrably uses it. The pip
+    # actions (3, 4) asked for Python by name and create unconditionally.
+    if (after == 1 or after == 2) and not python_env.project_uses_python(
+        project
+    ):
         return True
     _ = _start_python_environment(after, spec)
     return False
@@ -2868,6 +2884,34 @@ class RoastActions:
     ) -> ObjCObject:
         return outline_display_value(item)
 
+    def outlineView_willDisplayCell_forTableColumn_item_(
+        self,
+        view: ObjCObject,
+        cell: ObjCObject,
+        column: ObjCObject,
+        item: ObjCObject,
+    ):
+        """Style each file-list cell as it is drawn.
+
+        ROLE_SIDEBAR_TEXT existed in every theme's palette and was applied
+        nowhere -- the rows kept the cell default while the background took
+        the theme, which is why the sidebar looked half-switched. This is
+        the cell-based table's styling hook: per draw, so a theme change or
+        a zoom is current on the next paint by construction.
+        """
+        with autoreleasepool():
+            Obj["NSCell"](cell.addr()).setFont(
+                Cls["NSFont"]().systemFontOfSize(console_font_points()).ptr()
+            )
+            if current_theme() == "System":
+                Obj["NSTextFieldCell"](cell.addr()).setTextColor(
+                    Cls["NSColor"]().labelColor().ptr()
+                )
+            else:
+                Obj["NSTextFieldCell"](cell.addr()).setTextColor(
+                    theme_color(ROLE_SIDEBAR_TEXT).ptr()
+                )
+
     # ── Toolbar delegate ───────────────────────────────────────────────────
 
     def toolbarAllowedItemIdentifiers_(self, tb: ObjCObject) -> ObjCObject:
@@ -3020,6 +3064,10 @@ def zoom_font(delta: Float64):
     """⌘+ and ⌘−. Every metric downstream is arithmetic on two numbers, so a
     zoom is: new font, resize the document to the new line height, redraw."""
     set_font_size(font_size() + delta)
+    # The other panes ride the same zoom: the console refonts its whole
+    # document (a plain-text view restyles wholesale), the sidebar re-rows.
+    apply_console_theme()
+    apply_sidebar_theme()
     if g_grid()[] != 0:
         with autoreleasepool():
             let grid = ObjCObject(g_grid()[])
@@ -3448,31 +3496,65 @@ class RoastTabBar(NSView):
     """
 
     var _attrs: Int  # label attributes, full ink: a retained NSDictionary
-    var _dim: Int  # the same, secondaryLabelColor, for inactive tabs
+    var _dim: Int  # the same, dimmed, for inactive tabs
+    var _stamp: Int  # theme generation the dictionaries were built against
 
     def _ensure_attrs(mut self):
-        """Build the two attribute dictionaries, once per instance."""
-        if self._attrs != 0:
+        """Build the two attribute dictionaries -- and REBUILD them when the
+        theme has changed since.
+
+        These are cached and retained, which is right for a view that
+        repaints often -- and it was also why switching themes never reached
+        the tab labels: the dictionaries outlived every theme. The stamp is
+        compared against the global theme generation; stale means release
+        and build again with the new palette. `+ 1` so a zero stamp (the
+        box's zero-filled start) can never read as current.
+
+        The active label carries an explicit foreground now. It had none,
+        and text drawn with no colour attribute is black -- invisible on a
+        dark theme's tab.
+        """
+        let gen = g_theme_gen()[] + 1
+        if self._attrs != 0 and self._stamp == gen:
             return
+        if self._attrs != 0:
+            _ = external_call["objc_release", P](ObjCObject(self._attrs).ptr())
+            _ = external_call["objc_release", P](ObjCObject(self._dim).ptr())
+            self._attrs = 0
+            self._dim = 0
+        let system = current_theme() == "System"
         let NSMutableDictionary = ObjCClass.lookup["NSMutableDictionary"]()
         var ta = Cls["NSMutableDictionary"]().dictionary()
         Obj["NSMutableDictionary"](ta.addr()).setObject_forKey(
             Cls["NSFont"]().systemFontOfSize(Float64(12.0)).ptr(),
             extern_object["NSFontAttributeName"]().ptr(),
         )
+        Obj["NSMutableDictionary"](ta.addr()).setObject_forKey(
+            (
+                Cls["NSColor"]().labelColor()
+                if system
+                else theme_color(ROLE_TEXT)
+            ).ptr(),
+            extern_object["NSForegroundColorAttributeName"]().ptr(),
+        )
         _ = external_call["objc_retain", P](ta.ptr())
         self._attrs = ta.addr()
 
         var td = Cls["NSMutableDictionary"]().dictionaryWithDictionary(ta.ptr())
         Obj["NSMutableDictionary"](td.addr()).setObject_forKey(
-            Cls["NSColor"]().secondaryLabelColor().ptr(),
+            (
+                Cls["NSColor"]().secondaryLabelColor()
+                if system
+                else theme_color(ROLE_GUTTER_TEXT)
+            ).ptr(),
             extern_object["NSForegroundColorAttributeName"]().ptr(),
         )
         _ = external_call["objc_retain", P](td.ptr())
         self._dim = td.addr()
-        # One line, once per instance, so the smoke test can assert the box
-        # actually carried the state -- drawRect_'s try would otherwise
-        # swallow a failure here into tabs quietly drawn with defaults.
+        self._stamp = gen
+        # One line per build, so the smoke test can assert the box actually
+        # carried the state -- drawRect_'s try would otherwise swallow a
+        # failure here into tabs quietly drawn with defaults.
         print("roast: tab attributes built in the box")
 
     def drawRect_(mut self, dirty: CGRect):
@@ -3483,9 +3565,17 @@ class RoastTabBar(NSView):
                 let bounds = Obj["NSView"](view.addr()).bounds()
                 let NSColorT = ObjCClass.lookup["NSColor"]()
 
-                # The bar, a shade back from the editor so the active tab can be
-                # the one that matches it.
-                let back = Cls["NSColor"]().windowBackgroundColor()
+                # The bar, a shade back from the editor so the active tab can
+                # be the one that matches it. Under a theme the bar takes the
+                # sidebar's shade -- the same band as the titlebar above it --
+                # and the active tab takes the page, so the open file reads
+                # as continuous with its editor.
+                let system_theme = current_theme() == "System"
+                let back = (
+                    Cls["NSColor"]().windowBackgroundColor()
+                    if system_theme
+                    else theme_color(ROLE_SIDEBAR_BG)
+                )
                 Obj["NSColor"](back.addr()).setFill()
                 _ = external_call["NSRectFill", NoneType](bounds)
 
@@ -3503,7 +3593,11 @@ class RoastTabBar(NSView):
                     if x > total:
                         break
                     if i == active:
-                        let front = Cls["NSColor"]().textBackgroundColor()
+                        let front = (
+                            Cls["NSColor"]().textBackgroundColor()
+                            if system_theme
+                            else theme_color(ROLE_BG)
+                        )
                         Obj["NSColor"](front.addr()).setFill()
                         _ = external_call["NSRectFill", NoneType](
                             rect(x, 0.0, w, TAB_H)
@@ -3518,7 +3612,11 @@ class RoastTabBar(NSView):
                             rect(x, TAB_H - 2.0, w, 2.0)
                         )
                     # A separator, so tabs read as tabs and not as a run of words.
-                    let line = Cls["NSColor"]().separatorColor()
+                    let line = (
+                        Cls["NSColor"]().separatorColor()
+                        if system_theme
+                        else theme_color(ROLE_HAIRLINE)
+                    )
                     Obj["NSColor"](line.addr()).setFill()
                     _ = external_call["NSRectFill", NoneType](
                         rect(x + w - 1.0, 4.0, 1.0, TAB_H - 8.0)
@@ -4433,6 +4531,52 @@ def stdlib_root() -> String:
     return tc + String("/lib/mojo/stdlib")
 
 
+def _dir_entries(path: String) -> List[String]:
+    """The immediate entries of a directory, minus dotfiles. Empty on error."""
+    var out = List[String]()
+    try:
+        with autoreleasepool():
+            let NSFileManager = ObjCClass.lookup["NSFileManager"]()
+            let fm = Cls["NSFileManager"]().defaultManager()
+            var local = path
+            let names = Obj["NSFileManager"](fm.addr()).contentsOfDirectoryAtPath_error(
+                nsstring(local).ptr(), ObjCObject(0).ptr()
+            )
+            if names.addr() == 0:
+                return out^
+            let n = Obj["NSArray"](names.addr()).count()
+            var i = 0
+            while i < n:
+                let nm = ns_to_string(
+                    Obj["NSArray"](names.addr()).objectAtIndex(i)
+                )
+                if not nm.startswith("."):
+                    out.append(nm)
+                i += 1
+    except:
+        pass
+    return out^
+
+
+def _merge_new_examples(bundle: String, user: String) -> Bool:
+    """Copy every example folder the bundle has and the user copy lacks.
+
+    Additive and non-destructive: an example already in the user copy is
+    skipped whole, edits and all. This is what makes a new release's examples
+    appear without a Reset, and without touching anything a person changed.
+    """
+    var brought = False
+    let entries = _dir_entries(bundle)
+    for i in range(len(entries)):
+        let name = entries[i]
+        let dst = user + String("/") + name
+        if file_exists(dst):
+            continue
+        if _copy_tree(bundle + String("/") + name, dst):
+            brought = True
+    return brought
+
+
 def _copy_tree(source: String, destination: String) -> Bool:
     """NSFileManager's copy, whole-tree, refusing to overwrite."""
     try:
@@ -4498,6 +4642,16 @@ def migrate_user_space(force: Bool = False) -> Bool:
         _ = _remove_tree(ex_dst)
     if not file_exists(ex_dst + String("/README.md")):
         did = _copy_tree(tc + String("/share/examples"), ex_dst) or did
+    else:
+        # The copy above runs once, on first launch. A later release that
+        # ships a NEW example (chip, abcplayer) would never reach the user's
+        # writable copy, so the Examples menu -- which reads that copy -- would
+        # never show it, and the menu-builder's promise that shipping an
+        # example is enough to list it would be false. Add whatever the bundle
+        # has and the user copy lacks, folder by folder. _copy_tree refuses to
+        # overwrite, so an example the user has edited is left exactly as they
+        # left it; only genuinely new ones are brought over.
+        did = _merge_new_examples(tc + String("/share/examples"), ex_dst) or did
     let ide_dst = user_ide_source_dir()
     if force and file_exists(ide_dst):
         _ = _remove_tree(ide_dst)
@@ -4699,6 +4853,15 @@ def apply_sidebar_theme():
             Obj["NSTableView"](outline.addr()).setBackgroundColor(
                 theme_color(ROLE_SIDEBAR_BG).ptr()
             )
+        else:
+            # Put the DEFAULT back, explicitly. The colour set by a custom
+            # theme survives the style switch -- returning to System left the
+            # sidebar wearing the last theme's shade while everything else
+            # restored, which is exactly the half-switched look this function
+            # exists to prevent.
+            Obj["NSTableView"](outline.addr()).setBackgroundColor(
+                Cls["NSColor"]().controlBackgroundColor().ptr()
+            )
         if g_side_scroll()[] != 0:
             let scroll = ObjCObject(g_side_scroll()[])
             Obj["NSScrollView"](scroll.addr()).setDrawsBackground(not system)
@@ -4706,8 +4869,68 @@ def apply_sidebar_theme():
                 Obj["NSScrollView"](scroll.addr()).setBackgroundColor(
                     theme_color(ROLE_SIDEBAR_BG).ptr()
                 )
+            else:
+                Obj["NSScrollView"](scroll.addr()).setBackgroundColor(
+                    Cls["NSColor"]().controlBackgroundColor().ptr()
+                )
+        # Rows track the editor zoom: the font is set per-draw by
+        # willDisplayCell, but the row has to be tall enough to hold it.
+        Obj["NSTableView"](outline.addr()).setRowHeight(
+            console_font_points() + 8.0
+        )
         Obj["NSView"](outline.addr()).setNeedsDisplay(True)
         Obj["NSOutlineView"](outline.addr()).reloadData()
+
+
+def console_font_points() -> Float64:
+    """The console's size rides the editor zoom, two points behind it.
+
+    One zoom, every pane: the editor at font_size(), the console just under
+    it, the sidebar likewise. Separate zoom levels per pane is a setting
+    nobody asks for; panes that ignore the zoom is a bug everybody notices.
+    """
+    let pts = font_size() - 2.0
+    return pts if pts >= 9.0 else 9.0
+
+
+def apply_console_theme():
+    """Colour and size the build/run pane to match the chosen theme.
+
+    This pane was never themed: it kept AppKit's defaults while the editor
+    went to Ink or Paper, and it kept 11pt while the editor zoomed. It is a
+    plain-text NSTextView, and on a plain-text view setFont:/setTextColor:
+    restyle the whole document and everything appended after -- so the whole
+    fix is four setters, no walk over the text storage.
+
+    The console gets the gutter's colours rather than the page's: it is
+    chrome, not document, and the gutter pair is the theme's own answer to
+    "like the page, but set apart from it".
+    """
+    if g_console()[] == 0:
+        return
+    with autoreleasepool():
+        let tv = ObjCObject(g_console()[])
+        let system = current_theme() == "System"
+        Obj["NSTextView"](tv.addr()).setFont(
+            Cls["NSFont"]().monospacedSystemFontOfSize_weight(
+                console_font_points(), Float64(0.0)
+            ).ptr(),
+        )
+        if system:
+            Obj["NSTextView"](tv.addr()).setBackgroundColor(
+                Cls["NSColor"]().textBackgroundColor().ptr()
+            )
+            Obj["NSTextView"](tv.addr()).setTextColor(
+                Cls["NSColor"]().labelColor().ptr()
+            )
+        else:
+            Obj["NSTextView"](tv.addr()).setBackgroundColor(
+                theme_color(ROLE_GUTTER_BG).ptr()
+            )
+            Obj["NSTextView"](tv.addr()).setTextColor(
+                theme_color(ROLE_TEXT).ptr()
+            )
+        Obj["NSView"](tv.addr()).setNeedsDisplay(True)
 
 
 def apply_theme():
@@ -4718,8 +4941,10 @@ def apply_theme():
     the scrollers, the toolbar and the tab strip are all system-drawn, and
     they have to be told.
     """
+    g_theme_gen()[] += 1
     rebuild_theme()
     apply_sidebar_theme()
+    apply_console_theme()
     let dark = theme_is_dark(current_theme())
     with autoreleasepool():
         if g_window()[] != 0:
@@ -4728,6 +4953,14 @@ def apply_theme():
             # goes back to following the machine.
             if current_theme() == "System":
                 Obj["NSWindow"](win.addr()).setAppearance(ObjCObject(0).ptr())
+                # Standard chrome again: opaque titlebar, the system's own
+                # window background.
+                Obj["NSWindow"](win.addr()).setTitlebarAppearsTransparent(
+                    False
+                )
+                Obj["NSWindow"](win.addr()).setBackgroundColor(
+                    Cls["NSColor"]().windowBackgroundColor().ptr()
+                )
             else:
                 let name = String("NSAppearanceNameDarkAqua") if dark else String(
                     "NSAppearanceNameAqua"
@@ -4736,6 +4969,17 @@ def apply_theme():
                     nsstring(name).ptr()
                 )
                 Obj["NSWindow"](win.addr()).setAppearance(appearance.ptr())
+                # With a transparent titlebar, the titlebar and the toolbar
+                # strip are drawn on the window background -- the one
+                # sanctioned way to put the palette on the chrome. The
+                # sidebar's shade is the right hue: the titlebar sits over
+                # that column and the toolbar reads as one band with it.
+                Obj["NSWindow"](win.addr()).setTitlebarAppearsTransparent(
+                    True
+                )
+                Obj["NSWindow"](win.addr()).setBackgroundColor(
+                    theme_color(ROLE_SIDEBAR_BG).ptr()
+                )
             Obj["NSView"](
                 Obj["NSWindow"](win.addr()).contentView().addr()
             ).setNeedsDisplay(True)
@@ -4770,6 +5014,12 @@ def _sync_theme_menu():
 
 
 comptime g_theme_menu_done = named_global["roast.theme.menu", Int]
+
+# Bumped by apply_theme. A view that caches anything derived from the theme
+# (the tab bar retains its label-attribute dictionaries) compares the
+# generation it built against and rebuilds when they differ -- which is what
+# makes switching themes take effect on the NEXT paint instead of never.
+comptime g_theme_gen = named_global["roast.theme.gen", Int]
 
 
 def install_theme_menu():

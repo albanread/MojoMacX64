@@ -18,7 +18,7 @@
 # right thing if Roast is sandboxed later.
 from std.hashlib._fnv1a import Fnv1a
 from std.objc import Cls, Obj, ObjCObject, autoreleasepool, nsstring
-from std.os import getenv
+from std.os import getenv, listdir
 
 from json import JSON
 import session
@@ -139,6 +139,85 @@ def environment_ready(project: String, toolchain_root: String = String()) -> Boo
         and _exists(env + String("/pyvenv.cfg"))
         and _exists(env + String("/bin/python"))
     )
+
+
+def project_uses_python(project: String) -> Bool:
+    """Does this project actually speak Python?
+
+    Run and Debug used to build a venv for EVERY project before doing
+    anything else -- the fern example, three files of pure Mojo, got a
+    private Python installation it would never import. The venv is wanted
+    exactly when one of these holds, any one sufficient:
+
+      * requirements.txt or pyproject.toml at the root -- the same two
+        files the dependency installer itself honours
+      * a .py file anywhere in the tree
+      * a .mojo file that mentions std.python -- the only door to the
+        interpreter in this dialect, so its absence is proof
+
+    The walk is bounded (four levels, 200 sources read, 500 entries
+    considered) and skips what is never source: build, .git, .venv,
+    __pycache__. Two failure directions, deliberately asymmetric: the
+    ROOT being unreadable means nothing can be known, so the answer is
+    the safe True -- a needless venv is the old behaviour, merely
+    wasteful, where a wrongly skipped one breaks a real Python project
+    at runtime. A CHILD that will not list is just a plain file
+    (LICENSE, Makefile) met by a walk that descends anything, and says
+    nothing about Python at all.
+    """
+    if project == "":
+        return True
+    if _exists(project + String("/requirements.txt")):
+        return True
+    if _exists(project + String("/pyproject.toml")):
+        return True
+
+    # Iterative: paths and depths in parallel lists. Bounded work, and
+    # recursion through raising functions is a door this compiler has
+    # already slammed once.
+    var dirs = List[String]()
+    var depths = List[Int]()
+    dirs.append(project)
+    depths.append(0)
+    var read_files = 0
+    var considered = 0
+    while len(dirs) > 0:
+        let dir = dirs.pop()
+        let depth = depths.pop()
+        var names = List[String]()
+        var listed = True
+        try:
+            names = listdir(dir)
+        except:
+            listed = False
+        if not listed:
+            if depth == 0:
+                return True  # the project itself is unreadable: assume
+            continue  # a plain file the walk tried as a directory
+        for i in range(len(names)):
+            let name = names[i]
+            if name.startswith("."):
+                continue
+            if name == "build" or name == "__pycache__" or name == "node_modules":
+                continue
+            considered += 1
+            if considered > 500:
+                return True  # too big to be sure: the safe answer
+            let path = dir + String("/") + name
+            if name.endswith(".py"):
+                return True
+            if name.endswith(".mojo"):
+                read_files += 1
+                if read_files > 200:
+                    return True
+                if _read_file(path).find(String("std.python")) >= 0:
+                    return True
+            elif depth < 4:
+                # Descend everything else. If it turns out to be a plain
+                # file, its listdir fails soft above.
+                dirs.append(path)
+                depths.append(depth + 1)
+    return False
 
 
 def runtime_home(toolchain_root: String) -> String:
