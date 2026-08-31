@@ -190,3 +190,4 @@ spikes/**/*.o
 # this machine, not about the tree.
 vega-sdk/lib/mojo/
 .components/
+.components-v3/

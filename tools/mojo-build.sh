@@ -36,12 +36,19 @@ GROUP_libs=(//bazel/llvm-shared:LLVM //bazel/mlir-shared:MLIR //KGEN:MojoCompile
 GROUP_lsp=(//KGEN/tools/mojo-lsp-server:mojo-lsp-server)
 GROUP_debugger=(//KGEN:MojoLLDB
   @llvm-project//lldb:lldb @llvm-project//lldb:lldb-dap @llvm-project//lldb:lldb-argdumper)
-GROUP_all=("${GROUP_compiler[@]}" "${GROUP_libs[@]}" "${GROUP_lsp[@]}" "${GROUP_debugger[@]}")
+# The three runtime dylibs make-dist stages. Absent from the groups, they were
+# never rebuilt when the configuration changed -- and since a --copt change
+# re-keys actions but shares the same output DIRECTORY, the previous flavor's
+# files simply remained on disk and make-dist shipped them. The v3 flavor's
+# ISA gate caught exactly that: a cascadelake CompilerRT, 70 reachable EVEX
+# instructions, inside an otherwise clean portable dist.
+GROUP_runtime=(//KGEN:CompilerRT //AsyncRT:RuntimeGlobals //Support:Globals)
+GROUP_all=("${GROUP_compiler[@]}" "${GROUP_libs[@]}" "${GROUP_lsp[@]}" "${GROUP_debugger[@]}" "${GROUP_runtime[@]}")
 
 arg="${1:-all}"
 case "$arg" in
   -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  compiler|libs|lsp|debugger|all)
+  compiler|libs|lsp|debugger|runtime|all)
     var="GROUP_$arg[@]"
     targets=("${!var}")
     shift
@@ -50,7 +57,7 @@ case "$arg" in
     targets=("$@")
     set --
     ;;
-  *) echo "mojo-build: unknown group '$arg' (try: compiler libs lsp debugger all, or a //target)" >&2
+  *) echo "mojo-build: unknown group '$arg' (try: compiler libs lsp debugger runtime all, or a //target)" >&2
      exit 64 ;;
 esac
 
